@@ -1,0 +1,22 @@
+app:
+  env: development
+  host: 127.0.0.1
+  port: 8000
+
+paths:
+  sample_data: data/samples
+  generated_data: data/generated
+  frontend_demo: frontend/demo
+
+animation:
+  default_renderer: canvas_2d
+  allowed_renderers:
+    - canvas_2d
+    - svg_2d
+    - three_3d
+
+agent:
+  max_storyboard_steps: 7
+  require_visual_objects: true
+  require_interactive_demo: true
+

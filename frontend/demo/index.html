@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Manual Animator Agent</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <div>
+            <p class="eyebrow">Manual Animator Agent</p>
+            <h1>把技术手册转成可互动教学动画</h1>
+          </div>
+        </div>
+        <div class="status-strip" aria-label="系统状态">
+          <span>解析</span>
+          <span>分镜</span>
+          <span>动画</span>
+          <span>互动</span>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="input-panel panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Source Manual</p>
+              <h2>文档输入</h2>
+            </div>
+            <button id="loadSampleBtn" class="ghost-btn">载入避障手册</button>
+          </div>
+          <textarea id="manualInput" spellcheck="false"></textarea>
+          <div class="action-row">
+            <button id="analyzeBtn" class="primary-btn">生成教学分镜</button>
+            <button id="rosSampleBtn" class="ghost-btn">切换 ROS 课件</button>
+            <button id="apiSampleBtn" class="ghost-btn">切换 API 鉴权样例</button>
+          </div>
+        </section>
+
+        <section class="analysis-panel panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Agent Reasoning</p>
+              <h2>理解结果</h2>
+            </div>
+            <span id="docType" class="chip">机器人手册</span>
+          </div>
+          <div class="insight-grid">
+            <article>
+              <span>核心对象</span>
+              <strong id="objectsText">小车 / 激光雷达 / 障碍物 / 控制器</strong>
+            </article>
+            <article>
+              <span>核心逻辑</span>
+              <strong id="logicText">扫描距离低于安全阈值时，控制器改变转向角</strong>
+            </article>
+            <article>
+              <span>可互动参数</span>
+              <strong id="paramsText">车速、雷达半径、安全距离、障碍密度</strong>
+            </article>
+          </div>
+          <div id="storyboard" class="storyboard"></div>
+        </section>
+
+        <section class="stage-panel panel">
+          <div class="panel-head stage-head">
+            <div>
+              <p class="eyebrow">Interactive Demo</p>
+              <h2 id="demoTitle">小车避障动画实验台</h2>
+            </div>
+            <div class="playback">
+              <button id="playBtn" class="icon-btn" aria-label="播放或暂停">▶</button>
+              <button id="resetBtn" class="icon-btn" aria-label="重置">↺</button>
+            </div>
+          </div>
+
+          <div class="demo-layout">
+            <div class="canvas-wrap">
+              <canvas id="demoCanvas" width="980" height="620"></canvas>
+              <div class="hud">
+                <span id="phaseText">阶段 1 / 雷达扫描</span>
+                <span id="decisionText">等待传感器回波</span>
+              </div>
+            </div>
+
+            <aside class="control-deck">
+              <label>
+                <span>车速</span>
+                <input id="speedRange" type="range" min="0.4" max="2.2" value="1.0" step="0.1" />
+              </label>
+              <label>
+                <span>雷达半径</span>
+                <input id="lidarRange" type="range" min="90" max="210" value="150" step="5" />
+              </label>
+              <label>
+                <span>安全距离</span>
+                <input id="safeRange" type="range" min="45" max="120" value="76" step="2" />
+              </label>
+              <label>
+                <span>障碍密度</span>
+                <input id="densityRange" type="range" min="2" max="7" value="4" step="1" />
+              </label>
+              <button id="stepBtn" class="primary-btn">单步讲解</button>
+              <p id="explainText" class="explain">
+                激光雷达像一把旋转的尺子：每条射线测量前方距离，最近距离低于安全距离时，控制器选择空旷方向绕行。
+              </p>
+            </aside>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="./app.js"></script>
+  </body>
+</html>

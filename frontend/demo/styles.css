@@ -1,0 +1,471 @@
+:root {
+  color-scheme: dark;
+  --bg: #07080d;
+  --panel: rgba(13, 18, 28, 0.86);
+  --panel-strong: rgba(19, 27, 41, 0.94);
+  --line: rgba(83, 246, 255, 0.32);
+  --line-hot: #42f7ff;
+  --magenta: #ff2fd6;
+  --yellow: #f4f06d;
+  --green: #5dff9c;
+  --text: #ecfbff;
+  --muted: #91a6b8;
+  --danger: #ff5e7a;
+  --shadow: 0 0 28px rgba(66, 247, 255, 0.16);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    linear-gradient(rgba(66, 247, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(66, 247, 255, 0.035) 1px, transparent 1px),
+    radial-gradient(circle at 78% 18%, rgba(255, 47, 214, 0.11), transparent 28rem),
+    #07080d;
+  background-size:
+    38px 38px,
+    38px 38px,
+    auto;
+  color: var(--text);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.025),
+    rgba(255, 255, 255, 0.025) 1px,
+    transparent 1px,
+    transparent 6px
+  );
+  mix-blend-mode: screen;
+  opacity: 0.45;
+}
+
+button,
+textarea,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.app-shell {
+  width: min(1520px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 24px 0 36px;
+}
+
+.topbar {
+  min-height: 94px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border: 1px solid var(--line);
+  background: rgba(8, 12, 20, 0.82);
+  box-shadow: var(--shadow);
+  padding: 18px 22px;
+  position: relative;
+  overflow: hidden;
+}
+
+.topbar::after,
+.panel::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: -1px;
+  width: 92px;
+  height: 28px;
+  border-top: 2px solid var(--magenta);
+  border-right: 2px solid var(--magenta);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 22% 100%);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.brand-mark {
+  width: 46px;
+  height: 46px;
+  border: 2px solid var(--line-hot);
+  box-shadow:
+    0 0 18px rgba(66, 247, 255, 0.56),
+    inset 0 0 18px rgba(66, 247, 255, 0.28);
+  transform: skew(-8deg);
+  position: relative;
+}
+
+.brand-mark::before,
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  background: var(--magenta);
+}
+
+.brand-mark::before {
+  width: 20px;
+  height: 2px;
+  left: 11px;
+  top: 15px;
+  box-shadow: 0 9px 0 var(--yellow);
+}
+
+.brand-mark::after {
+  width: 2px;
+  height: 22px;
+  right: 12px;
+  top: 10px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--line-hot);
+  text-transform: uppercase;
+  letter-spacing: 0;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+h1,
+h2 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+h1 {
+  font-size: clamp(1.55rem, 3vw, 3.2rem);
+  line-height: 1.03;
+}
+
+h2 {
+  font-size: 1.2rem;
+}
+
+.status-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(54px, 1fr));
+  gap: 8px;
+  min-width: 310px;
+}
+
+.status-strip span {
+  border: 1px solid rgba(244, 240, 109, 0.42);
+  color: var(--yellow);
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  background: rgba(244, 240, 109, 0.06);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(330px, 0.72fr) minmax(430px, 1fr);
+  grid-template-areas:
+    "input analysis"
+    "stage stage";
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.panel {
+  position: relative;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  overflow: hidden;
+}
+
+.input-panel {
+  grid-area: input;
+}
+
+.analysis-panel {
+  grid-area: analysis;
+}
+
+.stage-panel {
+  grid-area: stage;
+  background: rgba(9, 13, 21, 0.92);
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  color: #ddfaff;
+  background: #080d15;
+  border: 1px solid rgba(66, 247, 255, 0.26);
+  outline: none;
+  padding: 14px;
+  line-height: 1.62;
+  box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.32);
+}
+
+textarea:focus {
+  border-color: var(--line-hot);
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.primary-btn,
+.ghost-btn,
+.icon-btn {
+  border: 1px solid var(--line-hot);
+  color: var(--text);
+  background: rgba(66, 247, 255, 0.1);
+  min-height: 40px;
+  padding: 0 14px;
+  box-shadow: 0 0 14px rgba(66, 247, 255, 0.14);
+}
+
+.primary-btn {
+  border-color: var(--magenta);
+  background: linear-gradient(90deg, rgba(255, 47, 214, 0.22), rgba(66, 247, 255, 0.18));
+  font-weight: 800;
+}
+
+.ghost-btn {
+  color: var(--line-hot);
+}
+
+.icon-btn {
+  width: 42px;
+  padding: 0;
+  color: var(--yellow);
+  border-color: rgba(244, 240, 109, 0.7);
+}
+
+.chip {
+  border: 1px solid rgba(93, 255, 156, 0.5);
+  color: var(--green);
+  padding: 6px 10px;
+  background: rgba(93, 255, 156, 0.08);
+  white-space: nowrap;
+}
+
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.insight-grid article,
+.story-card,
+.control-deck,
+.hud {
+  border: 1px solid rgba(66, 247, 255, 0.2);
+  background: rgba(5, 9, 16, 0.62);
+}
+
+.insight-grid article {
+  padding: 12px;
+  min-height: 112px;
+}
+
+.insight-grid span {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+}
+
+.insight-grid strong {
+  display: block;
+  line-height: 1.45;
+  font-size: 0.98rem;
+}
+
+.storyboard {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+}
+
+.story-card {
+  min-height: 122px;
+  padding: 12px;
+  position: relative;
+}
+
+.story-card.active {
+  border-color: var(--yellow);
+  box-shadow: inset 0 0 18px rgba(244, 240, 109, 0.12);
+}
+
+.story-card b {
+  display: block;
+  color: var(--yellow);
+  margin-bottom: 8px;
+}
+
+.story-card p {
+  margin: 0;
+  color: #c8d8e4;
+  line-height: 1.45;
+  font-size: 0.9rem;
+}
+
+.stage-head {
+  align-items: center;
+}
+
+.playback {
+  display: flex;
+  gap: 8px;
+}
+
+.demo-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 16px;
+  align-items: stretch;
+}
+
+.canvas-wrap {
+  min-height: 520px;
+  position: relative;
+  border: 1px solid rgba(66, 247, 255, 0.3);
+  background: #03060b;
+  overflow: hidden;
+}
+
+canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.hud {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  align-items: center;
+  padding: 10px 12px;
+  color: var(--line-hot);
+  backdrop-filter: blur(8px);
+}
+
+.hud span:last-child {
+  color: var(--yellow);
+  text-align: right;
+}
+
+.control-deck {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.control-deck label {
+  display: grid;
+  gap: 8px;
+}
+
+.control-deck label span {
+  color: var(--muted);
+}
+
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--magenta);
+}
+
+.explain {
+  margin: 0;
+  color: #dcebf3;
+  line-height: 1.6;
+  border-left: 2px solid var(--line-hot);
+  padding-left: 12px;
+}
+
+.control-deck.disabled label {
+  opacity: 0.42;
+}
+
+.control-deck.disabled input[type="range"] {
+  pointer-events: none;
+}
+
+@media (max-width: 1080px) {
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "input"
+      "analysis"
+      "stage";
+  }
+
+  .demo-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .canvas-wrap {
+    min-height: 460px;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    width: min(100vw - 20px, 1520px);
+    padding-top: 10px;
+  }
+
+  .topbar,
+  .panel-head,
+  .hud {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .status-strip,
+  .insight-grid,
+  .storyboard {
+    grid-template-columns: 1fr;
+    min-width: 0;
+  }
+
+  .canvas-wrap {
+    min-height: 390px;
+  }
+}
