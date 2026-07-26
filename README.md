@@ -1,10 +1,32 @@
-# Animate Agent
+# Intuition Engine Agent
 
-Animate Agent 是一个把官方文档、设备手册、API 手册转成可视化教学页面和互动动画 demo 的 Agent 项目。
+Intuition Engine Agent 是一个把文本、文档、PPT 或开源项目 introduction 转成 2D/3D 教学动画的原型项目。项目目标不是生成普通摘要，而是输出 Interactive Knowledge Movie：把抽象概念拆成可见对象、因果动画、教学分镜和可交互参数。
 
-项目当前处于原型阶段：已有一个静态前端 demo，展示“小车避障手册”和“ROS Publisher/Subscriber 手册”如何被转成教学分镜、Canvas 动画和可互动知识课件。
+## 当前可展示成果
 
-## 快速开始
+- AI 前端输入页：`frontend/demo/index.html`
+  - 支持粘贴文本、拖拽/选择本地文件、载入示例 prompt。
+  - 有旋转地球、星空背景和输入分析结果预览。
+  - 静态页面可直接用浏览器打开。
+
+- 旧版交互课件原型：`frontend/demo/app.js`、`frontend/demo/styles.css`
+  - 保留了机器人避障、ROS Publisher/Subscriber、API 鉴权等教学动画逻辑。
+  - 当前在首页中作为 legacy prototype 保留，后续可重新接入路由或 demo 入口。
+
+- Python 动画 spec 对象模型：`src/animate_agent/`
+  - `animation/elements.py` 定义机器人、雷达、障碍物、ROS 节点、Topic、Message、Timeline、Scene 等可复用对象。
+  - `animation/templates.py` 可生成小车避障和 ROS Publisher/Subscriber 的结构化动画 spec。
+  - `interaction/controls.py` 定义 slider、button、toggle、drag target 等互动控件。
+
+- 产品与交互设计文档：`docs/`
+  - `PROJECT_EXPECTATIONS.md`：项目愿景和质量标准。
+  - `TECH_STACK.md`：技术栈分析。
+  - `TODO.md`：MVP 开发计划。
+  - `INTERACTION_FLOW.md` 与 `interaction-flow.drawio`：最终交互流程叙述与流程图源文件。
+
+## 快速运行
+
+Python 侧测试：
 
 ```powershell
 python -m venv .venv
@@ -13,44 +35,15 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-静态 demo 可直接用浏览器打开：
+前端静态 demo：
 
 ```text
 frontend/demo/index.html
 ```
 
-## 项目结构
+## 工程原则
 
-```text
-animate-agent/
-  config/                 # 环境配置与运行配置
-  data/
-    samples/              # 示例文档、手册片段
-    generated/            # 生成结果，本地运行产物
-  docs/                   # 产品、架构、技术栈、Todo 文档
-  frontend/
-    demo/                 # 当前静态交互原型
-  src/
-    animate_agent/
-      animation/          # 可复用动画对象、场景模板
-      documents/          # 文档解析与结构化抽取
-      interaction/        # 可复用互动控件对象
-      rendering/          # 前端渲染 spec 生成
-      storyboard/         # 教学分镜生成
-  tests/                  # 单元测试与集成测试
-```
-
-## 当前重点
-
-- 先用 Python 后端建立文档解析、Agent 编排、动画 spec 生成能力。
-- 前端不要直接执行模型生成的任意代码，而是消费受控的动画 JSON spec。
-- 常见动画元素和互动控件要封装成对象，Agent 只组合对象，减少重复生成代码和 token 消耗。
+- 前端不直接执行模型生成的任意代码，只消费受控 JSON spec。
+- Agent 组合对象库和模板库，减少重复生成代码和 token 消耗。
 - 教学页面必须用具象对象解释核心逻辑，不能只把文档变成摘要。
-- 产品体验定位为 Interactive Knowledge Movie（交互式知识电影），不是普通文档阅读器。
-- 当前 ROS demo 已包含滚轮推进镜头、Topic 消息飞行、源码弹窗、节点高亮和拖动机器人模拟。
-
-## 相关文档
-
-- [项目期望](docs/PROJECT_EXPECTATIONS.md)
-- [技术栈分析](docs/TECH_STACK.md)
-- [开发 Todo](docs/TODO.md)
+- 每次新增或修改功能后提交一次，保持提交历史清晰。

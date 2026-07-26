@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="31.0.2">
+  <diagram id="interaction-flow" name="Interaction Flow">
+    <mxGraphModel dx="1420" dy="940" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="Intuition Engine Agent 最终交互流程" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=26;fontStyle=1;fontColor=#172033;" vertex="1" parent="1">
+          <mxGeometry x="330" y="30" width="940" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="从资料输入到 Interactive Knowledge Movie，再通过用户操作反向验证理解" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=15;fontColor=#546179;" vertex="1" parent="1">
+          <mxGeometry x="330" y="80" width="940" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n1" value="开始&#xa;用户输入资料" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1f3d24;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="690" y="130" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n2" value="粘贴文本 / 上传文档&#xa;PDF、Markdown、HTML、PPT、项目介绍" style="shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontColor=#5f3b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="650" y="250" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n3" value="文档解析&#xa;切章节、识别标题、段落、参数、表格" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#17365d;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="650" y="370" width="300" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n4" value="内容理解&#xa;抽取对象、流程、状态、条件、异常、互动参数" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#17365d;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="650" y="490" width="300" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n5" value="教学分镜生成&#xa;每个镜头定义画面对象、动作、旁白和交互点" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#17365d;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="650" y="620" width="300" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n6" value="匹配对象库 / 模板库&#xa;ROS、机器人避障、API、状态机等复用模板" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#3d274f;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="650" y="750" width="300" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n7" value="生成受控 JSON spec&#xa;场景、对象、时间线、运动、点击行为、源码关联、参数控件" style="shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontColor=#5f3b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="620" y="880" width="360" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n8" value="Schema 与质量检查通过？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#5f4a00;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="685" y="1010" width="230" height="110" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n9" value="前端渲染知识电影&#xa;Canvas / SVG / Three.js 消费 spec，不执行模型任意代码" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#17365d;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="1030" width="330" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n10" value="进入第一页&#xa;先看到具象对象场景，而不是长篇摘要" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#17365d;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="870" width="330" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n11" value="滚轮 / 时间轴 / 单步推进&#xa;镜头推进，对象出现，因果动画发生" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#17365d;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="730" width="330" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n12" value="用户互动操作&#xa;点击对象、点击源码、拖动物体、调滑杆、播放 / 暂停 / 重置" style="shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontColor=#5f3b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="580" width="390" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n13" value="画面实时反馈&#xa;节点高亮、消息飞行、源码弹窗、参数改变动画结果、模拟状态更新" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1f3d24;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="430" width="390" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n14" value="用户是否已经理解核心逻辑？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#5f4a00;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1145" y="260" width="260" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="n15" value="完成&#xa;可分享、复用模板、沉淀案例" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1f3d24;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="120" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n16" value="反馈修正&#xa;补对象、改分镜、调交互点、重新生成 spec" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontColor=#5b1f1f;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="160" y="1015" width="320" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="example1" value="ROS 示例交互&#xa;Publisher 出现 → Topic 消息飞行 → Subscriber 变色 → 点击 Topic 弹源码 → 点击源码高亮节点 → 拖动机器人更新状态" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;fontColor=#333333;fontSize=12;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="100" y="430" width="390" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="example2" value="避障示例交互&#xa;小车、车头、雷达扇形、射线、障碍物、安全阈值、命中点、控制决策、绕行轨迹都必须可见；滑杆与拖动会改变结果" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;dashed=1;fontColor=#333333;fontSize=12;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="100" y="600" width="390" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="rule1" value="核心约束&#xa;前端只消费受控 JSON spec；Agent 组合白名单对象和模板；所有模型输出先校验，再渲染。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#3d274f;fontSize=12;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="100" y="790" width="390" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n1" target="n2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n2" target="n3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n3" target="n4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n4" target="n5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n5" target="n6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#9673a6;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n6" target="n7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#d79b00;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="n7" target="n8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="通过" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#82b366;fontColor=#1f3d24;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="n8" target="n9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="n9" target="n10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="n10" target="n11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#6c8ebf;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="n11" target="n12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#d79b00;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="n12" target="n13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#82b366;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="n13" target="n14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#82b366;fontColor=#1f3d24;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="n14" target="n15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e15" value="否：继续操作或回退改分镜" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#b85450;fontColor=#5b1f1f;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="n14" target="n12">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1030" y="320" />
+              <mxPoint x="1030" y="625" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e16" value="不通过" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#b85450;fontColor=#5b1f1f;labelBackgroundColor=#ffffff;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="n8" target="n16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e17" value="重新生成 spec" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeColor=#b85450;fontColor=#5b1f1f;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="n16" target="n7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" value="质量规则约束" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;dashed=1;strokeColor=#9673a6;fontColor=#3d274f;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="rule1" target="n8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

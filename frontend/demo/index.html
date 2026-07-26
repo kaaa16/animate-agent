@@ -3,10 +3,62 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Manual Animator Agent</title>
+    <title>Intuition Engine Agent</title>
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./intuition-home.css" />
   </head>
   <body>
+    <canvas id="starfield" aria-hidden="true"></canvas>
+    <div class="aurora aurora-one" aria-hidden="true"></div>
+    <div class="aurora aurora-two" aria-hidden="true"></div>
+
+    <main class="home-shell">
+      <section class="hero" aria-label="Intuition Engine Agent 输入页">
+        <p class="brand-kicker">Intuition Engine Agent</p>
+        <h1>把文本变成 2D / 3D 教学动画</h1>
+        <p class="subtitle">
+          粘贴一段介绍、拖入文档，或导入本地文件。Agent 会把抽象概念拆成对象、关系、镜头和可交互演示。
+        </p>
+
+        <form class="prompt-box" id="promptBox">
+          <input id="fileInput" type="file" hidden accept=".txt,.md,.markdown,.json,.csv,.py,.js,.ts,.tsx,.html,.css,.pdf,.ppt,.pptx,.doc,.docx" />
+          <button class="add-button" id="addFileBtn" type="button" aria-label="导入本地文件" title="导入本地文件">
+            <span aria-hidden="true">+</span>
+          </button>
+          <textarea
+            id="sourceInput"
+            spellcheck="false"
+            placeholder="输入一段文档、PPT 大纲或开源项目 introduction..."
+          ></textarea>
+          <div class="prompt-actions">
+            <span id="fileStatus">支持拖拽文件到这里</span>
+            <button id="generateBtn" type="submit">生成动画分镜</button>
+          </div>
+        </form>
+
+        <div class="quick-prompts" aria-label="示例输入">
+          <button type="button" data-sample="robot">机器人避障</button>
+          <button type="button" data-sample="transformer">Transformer 注意力</button>
+          <button type="button" data-sample="repo">开源项目简介</button>
+        </div>
+      </section>
+
+      <section class="planet-stage" aria-label="旋转地球视觉背景">
+        <canvas id="earthCanvas"></canvas>
+        <div class="orbit-ring orbit-a" aria-hidden="true"></div>
+        <div class="orbit-ring orbit-b" aria-hidden="true"></div>
+      </section>
+    </main>
+
+    <aside class="result-dock" id="resultDock" aria-live="polite">
+      <div>
+        <span>识别结果</span>
+        <strong id="resultTitle">等待输入</strong>
+      </div>
+      <p id="resultSummary">输入内容后，这里会预览 Agent 将如何拆解教学动画。</p>
+    </aside>
+
+    <!-- Legacy prototype retained for reference; disabled so malformed old copy cannot affect the new home page.
     <div class="app-shell">
       <header class="topbar">
         <div class="brand">
@@ -113,6 +165,7 @@
         </section>
       </main>
     </div>
-    <script src="./app.js"></script>
+    -->
+    <script src="./intuition-home.js"></script>
   </body>
 </html>
