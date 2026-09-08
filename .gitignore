@@ -25,10 +25,13 @@ Thumbs.db
 *.local.*
 config/*.local.*
 data/generated/
+data/documents/*.json
 dist/
 build/
 *.egg-info/
 node_modules/
+.next/
+*.tsbuildinfo
 output/
 output/playwright/
 .playwright-cli/
