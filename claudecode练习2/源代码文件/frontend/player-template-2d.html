@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2D 教学动画</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0f0f1e;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    display: block;
+  }
+  .subtitle-bar {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    background: rgba(15,15,30,0.85); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px; padding: 10px 28px;
+    color: #e0e0e0; font-size: 16px; letter-spacing: 1px;
+    pointer-events: none; z-index: 10;
+    transition: opacity 0.5s; max-width: 80vw; text-align: center;
+  }
+  .step-indicator {
+    position: fixed; top: 24px; right: 28px;
+    display: flex; gap: 10px; z-index: 10;
+  }
+  .step-indicator .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #3a3a55; transition: all 0.3s;
+  }
+  .step-indicator .dot.active {
+    background: #7c5ce7; box-shadow: 0 0 12px rgba(124,92,231,0.5);
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div class="subtitle-bar" id="subtitle"></div>
+<div class="step-indicator" id="stepDots"></div>
+
+<script>
+/* ═══════════════════════════════════════
+   2D Canvas 模板播放器
+   接收 lesson JSON → 俯视视角 Canvas 2D 动画
+   ═══════════════════════════════════════ */
+
+let lessonData = null;
+let currentStep = 0;
+let animTime = 0;
+let animFrameId = null;
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+/* ── 场景状态 ── */
+let carX, carY, carAngle;         // 小车位置和朝向
+let lidarPulsePhase = 0;          // 雷达波脉动相位
+let obstaclePulse = 0;            // 障碍物脉动相位
+let pathDots = [];                // 路径标记点 [{x, y}]
+
+/* ── 步骤状态覆盖 ── */
+let lidarSpeed = 0.025;
+let lidarOpacity = 0.12;
+let obsScale = 1.0;
+let obsEmissive = false;  // 是否红色高亮
+let pathVisible = false;
+
+/* ═══════════════════════════════════════
+   绘制函数
+   ═══════════════════════════════════════ */
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* 绘制路面 */
+function drawRoad() {
+  const w = canvas.width, h = canvas.height;
+  const roadY = h * 0.55;
+  const roadH = h * 0.08;
+
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, roadY - roadH/2, w, roadH);
+
+  // 道路边线
+  ctx.strokeStyle = '#3a3a55';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, roadY - roadH/2);
+  ctx.lineTo(w, roadY - roadH/2);
+  ctx.moveTo(0, roadY + roadH/2);
+  ctx.lineTo(w, roadY + roadH/2);
+  ctx.stroke();
+
+  // 虚线中间线
+  ctx.setLineDash([20, 20]);
+  ctx.strokeStyle = '#2a2a45';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, roadY);
+  ctx.lineTo(w, roadY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  return { y: roadY };
+}
+
+/* 绘制小车（俯视） */
+function drawCar(x, y, angle) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+
+  const bw = 80, bh = 40;  // 车身
+
+  // 车身阴影
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(-bw/2 + 2, -bh/2 + 2, bw, bh);
+
+  // 车身主体
+  ctx.fillStyle = '#22c55e';
+  ctx.fillRect(-bw/2, -bh/2, bw, bh);
+
+  // 车顶（深色方块）
+  ctx.fillStyle = '#166534';
+  ctx.fillRect(-bw/6, -bh/4, bw * 0.55, bh * 0.5);
+
+  // 前灯（黄色，在车头）
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillRect(bw/2 - 12, -bh/2 + 2, 10, 8);
+  ctx.fillRect(bw/2 - 12, bh/2 - 10, 10, 8);
+
+  // 后灯（红色）
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(-bw/2 + 2, -bh/2 + 2, 6, 6);
+  ctx.fillRect(-bw/2 + 2, bh/2 - 8, 6, 6);
+
+  // 车轮
+  ctx.fillStyle = '#111827';
+  [-1, 1].forEach(sy => {
+    [-1, 1].forEach(sx => {
+      ctx.fillRect(sx * bw * 0.35 - 6, sy * bh/2 - 4, 12, 8);
+    });
+  });
+
+  ctx.restore();
+}
+
+/* 绘制 LiDAR 雷达波 */
+function drawLidar(x, y, time) {
+  const maxRadius = 180;
+  const waves = 4;
+
+  for (let i = 0; i < waves; i++) {
+    const phase = (time * lidarSpeed * 8 + i / waves) % 1;
+    const radius = phase * maxRadius;
+    const alpha = lidarOpacity * (1 - phase) * 1.2;
+
+    ctx.strokeStyle = `rgba(56, 189, 248, ${alpha})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(radius, 2), 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 虚线内圈
+    if (radius > 10) {
+      ctx.setLineDash([8, 8]);
+      ctx.strokeStyle = `rgba(56, 189, 248, ${alpha * 0.5})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(x, y, radius * 0.7, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+/* 绘制障碍物 */
+function drawObstacle(x, y, time) {
+  const baseW = 50, baseH = 50;
+  const s = obsScale;
+  const w = baseW * s, h = baseH * s;
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  // 脉动高亮
+  if (obsEmissive) {
+    const glow = Math.sin(time * 4) * 0.3 + 0.7;
+    ctx.fillStyle = `rgba(239, 68, 68, ${glow * 0.6})`;
+    ctx.fillRect(-w/2 - 10, -h/2 - 10, w + 20, h + 20);
+  }
+
+  // 主体
+  ctx.fillStyle = '#ef4444';
+  ctx.fillRect(-w/2, -h/2, w, h);
+
+  // 危险条纹
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillRect(-w/2, -h/6, w, h/3);
+
+  // 感叹号
+  if (obsEmissive) {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 24px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('!', 0, -2);
+  }
+
+  ctx.restore();
+}
+
+/* 绘制路径标记 */
+function drawPath(waypoints) {
+  if (!pathVisible || waypoints.length < 2) return;
+
+  // 连线
+  ctx.strokeStyle = 'rgba(37, 99, 235, 0.6)';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([6, 6]);
+  ctx.beginPath();
+  ctx.moveTo(waypoints[0][0], waypoints[0][1]);
+  for (let i = 1; i < waypoints.length; i++) {
+    ctx.lineTo(waypoints[i][0], waypoints[i][1]);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 标记点
+  waypoints.forEach(([px, py]) => {
+    ctx.fillStyle = '#2563eb';
+    ctx.beginPath();
+    ctx.arc(px, py, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(37, 99, 235, 0.4)';
+    ctx.beginPath();
+    ctx.arc(px, py, 12, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+/* 绘制背景粒子 */
+let particles = [];
+function initParticles() {
+  particles = [];
+  for (let i = 0; i < 40; i++) {
+    particles.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      r: Math.random() * 1.5 + 0.5,
+      speed: Math.random() * 0.3 + 0.1,
+      alpha: Math.random() * 0.4 + 0.1,
+    });
+  }
+}
+initParticles();
+window.addEventListener('resize', initParticles);
+
+function drawParticles(time) {
+  particles.forEach(p => {
+    p.y -= p.speed;
+    if (p.y < -10) { p.y = canvas.height + 10; p.x = Math.random() * canvas.width; }
+    ctx.fillStyle = `rgba(124, 92, 231, ${p.alpha})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+/* ═══════════════════════════════════════
+   主渲染循环
+   ═══════════════════════════════════════ */
+
+function render(timestamp) {
+  animTime = timestamp * 0.001;  // 秒
+
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // 背景
+  ctx.fillStyle = '#0f0f1e';
+  ctx.fillRect(0, 0, w, h);
+
+  drawParticles(animTime);
+
+  const road = drawRoad();
+
+  // 小车位置（在道路上缓慢移动）
+  const carSpeed = 0.3;
+  if (!carX) carX = w * 0.2;
+  if (!carY) carY = road.y;
+  carX += carSpeed;
+  if (carX > w + 100) carX = -100;
+
+  // 障碍物位置
+  const obsX = carX + 220;
+  const obsY = road.y;
+
+  // 将路径 waypoints 从规范坐标映射到屏幕
+  // lesson JSON 中的坐标是相对于场景的，这里做映射
+  const mappedWaypoints = pathDots.length > 0 ? pathDots.map(p => [p.x, p.y]) : [];
+
+  // 绘制路径
+  if (pathVisible && mappedWaypoints.length > 0) {
+    drawPath(mappedWaypoints);
+  } else if (pathVisible) {
+    // 生成默认路径
+    const defPath = [
+      [carX - 30, road.y],
+      [carX + 80, road.y],
+      [obsX + 30, road.y - 80],
+      [obsX + 120, road.y - 80],
+      [obsX + 200, road.y],
+    ];
+    drawPath(defPath);
+  }
+
+  // 小车
+  drawCar(carX, carY, 0);
+
+  // LiDAR
+  drawLidar(carX + 30, carY, animTime);
+
+  // 障碍物
+  drawObstacle(obsX, obsY, animTime);
+
+  // 顶部标题（如果有）
+  if (lessonData && lessonData.meta) {
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = '14px "PingFang SC", "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(lessonData.meta.title || '', 24, 40);
+  }
+
+  animFrameId = requestAnimationFrame(render);
+}
+
+/* ═══════════════════════════════════════
+   步骤管理
+   ═══════════════════════════════════════ */
+
+function applyStep(idx) {
+  currentStep = idx;
+  const steps = lessonData?.steps || [];
+  if (idx >= steps.length) return;
+
+  const step = steps[idx];
+  const states = step.objectStates || {};
+
+  // 更新字幕
+  const subEl = document.getElementById('subtitle');
+  if (subEl && step.description) {
+    subEl.textContent = step.description;
+    subEl.style.opacity = '0';
+    requestAnimationFrame(() => { subEl.style.opacity = '1'; });
+  }
+
+  // 更新步骤指示器
+  updateDots();
+
+  // 应用对象状态
+  if (states.lidar) {
+    lidarSpeed = states.lidar.speed ?? 0.025;
+    lidarOpacity = states.lidar.opacity ?? 0.12;
+  }
+  if (states.obstacle) {
+    obsScale = states.obstacle.scale ?? 1.0;
+    obsEmissive = states.obstacle.emissive !== '#000000' && states.obstacle.emissive !== null;
+  }
+  if (states.path) {
+    pathVisible = !!states.path.visible;
+    if (states.path.waypoints) {
+      pathDots = states.path.waypoints.map(p => ({ x: p[0], y: p[1] }));
+    }
+  }
+}
+
+function updateDots() {
+  const steps = lessonData?.steps || [];
+  const container = document.getElementById('stepDots');
+  if (!container) return;
+  container.innerHTML = '';
+  steps.forEach((s, i) => {
+    const dot = document.createElement('span');
+    dot.className = 'dot' + (i === currentStep ? ' active' : '');
+    container.appendChild(dot);
+  });
+}
+
+/* ═══════════════════════════════════════
+   数据加载
+   ═══════════════════════════════════════ */
+
+function init(data) {
+  lessonData = data;
+
+  // 从 scene 数据初始化场景对象位置
+  const sc = data.scene || {};
+  const roadY = canvas.height * 0.55;
+
+  if (sc.car) {
+    carX = (sc.car.position ? sc.car.position[0] : 200);
+    carY = roadY;
+    carAngle = 0;
+  }
+
+  resize();
+  applyStep(0);
+
+  if (!animFrameId) {
+    animFrameId = requestAnimationFrame(render);
+  }
+}
+
+/* ═══════════════════════════════════════
+   外部 API
+   ═══════════════════════════════════════ */
+
+window.changeScene = function(n) {
+  if (lessonData && n >= 0 && n < lessonData.steps.length) {
+    applyStep(n);
+  }
+};
+
+window.getSceneCount = function() {
+  return lessonData ? lessonData.steps.length : 0;
+};
+
+/* ═══════════════════════════════════════
+   接收数据
+   ═══════════════════════════════════════ */
+
+window.addEventListener('message', function(event) {
+  if (event.data && event.data.type === 'lesson-data') {
+    init(event.data.payload);
+  }
+});
+
+// 支持 URL hash 中的 base64 JSON
+if (window.location.hash && window.location.hash.length > 1) {
+  try {
+    const json = decodeURIComponent(escape(atob(window.location.hash.slice(1))));
+    init(JSON.parse(json));
+  } catch (e) {
+    console.error('Failed to parse lesson data from URL hash:', e);
+  }
+}
+
+console.log('[player-template-2d] 就绪，等待 lesson 数据...');
+</script>
+</body>
+</html>

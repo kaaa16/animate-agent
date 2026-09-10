@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D 教学动画</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0f0f1e;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+  #canvas3d {
+    display: block;
+    width: 100%; height: 100%;
+  }
+  /* 底部字幕 */
+  .subtitle-bar {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    background: rgba(15,15,30,0.85); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px; padding: 10px 28px;
+    color: #e0e0e0; font-size: 16px; letter-spacing: 1px;
+    pointer-events: none; z-index: 10;
+    transition: opacity 0.5s;
+  }
+  /* 步骤标记 */
+  .step-indicator {
+    position: fixed; top: 24px; right: 28px;
+    display: flex; gap: 10px; z-index: 10;
+  }
+  .step-indicator .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #3a3a55; transition: all 0.3s;
+  }
+  .step-indicator .dot.active {
+    background: #7c5ce7; box-shadow: 0 0 12px rgba(124,92,231,0.5);
+  }
+  /* 参数面板 */
+  .param-panel {
+    position: fixed; left: 24px; top: 50%; transform: translateY(-50%);
+    background: rgba(15,15,30,0.85); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 14px; padding: 16px 18px;
+    z-index: 10; min-width: 210px;
+    display: none; color: #e0e0e0;
+  }
+  .param-panel .param-title {
+    font-size: 13px; letter-spacing: 2px; color: #a0a0c0;
+    margin-bottom: 14px; text-align: center;
+  }
+  .param-row { margin-bottom: 16px; }
+  .param-row:last-child { margin-bottom: 0; }
+  .param-row label {
+    display: block; font-size: 12px; color: #b8b8d0; margin-bottom: 6px;
+  }
+  .param-row input[type="range"] {
+    width: 100%; -webkit-appearance: none; appearance: none; height: 4px;
+    border-radius: 2px; background: #3a3a55; outline: none; cursor: pointer;
+  }
+  .param-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: #7c5ce7; cursor: pointer; border: 2px solid #fff;
+  }
+  .param-row .param-value {
+    float: right; font-size: 12px; color: #7c5ce7; margin-top: 5px;
+  }
+  /* 速度读数面板 */
+  .velocity-panel {
+    position: fixed; left: 24px; top: 24px;
+    background: rgba(15,15,30,0.85); border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 12px; padding: 12px 16px;
+    z-index: 10; min-width: 160px;
+    display: none; color: #e0e0e0;
+  }
+  .velocity-panel .v-title {
+    font-size: 12px; letter-spacing: 2px; color: #a0a0c0;
+    margin-bottom: 8px; text-align: center;
+  }
+  .velocity-panel .v-row {
+    font-size: 13px; line-height: 1.7; font-family: "Consolas", "Menlo", monospace;
+    white-space: nowrap;
+  }
+  /* 暂停按钮 */
+  .pause-btn {
+    position: fixed; bottom: 24px; right: 24px;
+    width: 48px; height: 48px; border-radius: 50%;
+    background: rgba(15,15,30,0.85); border: 1px solid rgba(255,255,255,0.2);
+    color: #e0e0e0; font-size: 20px; cursor: pointer; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .pause-btn:hover { background: rgba(124,92,231,0.4); }
+</style>
+</head>
+<body>
+<div id="canvas3d"></div>
+<div class="subtitle-bar" id="subtitle"></div>
+<div class="step-indicator" id="stepDots"></div>
+<div class="param-panel" id="paramPanel"></div>
+<div class="velocity-panel" id="velocityPanel"></div>
+<button class="pause-btn" id="pauseBtn" title="暂停/播放">⏸</button>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ──────────────── 全局状态 ──────────────── */
+let lessonData = null;
+let currentStep = 0;
+let sceneController = null;  // { objects, applyState, update }
+let simTime = 0;             // 场景累计模拟时间（秒）
+
+let renderer, scene, camera, controls, clock;
+let animationId;
+let paused = false;
+let lastNow = 0;
+
+/* ──────────────── 场景构建器注册表 ────────────────
+   每个构建器接收 sceneData，返回一个"场景控制器"：
+   {
+     objects: {...},          // 3D 物体
+     applyState(step),        // 应用某一步骤的 objectStates
+     update(dt, time),        // 每帧动画逻辑
+   }
+   ──────────────────────────────────────────────── */
+const sceneBuilders = {};
+
+/* ──────────────── 可调参数注册表 ──────────────── */
+const SCENE_PARAMS = {
+  projectile_motion: [
+    { key: 'initialSpeed', label: '初速度', min: 2, max: 12, step: 0.5, unit: 'm/s' },
+    { key: 'angle', label: '发射角度', min: 10, max: 85, step: 1, unit: '°' },
+    { key: 'gravity', label: '重力加速度', min: 2, max: 12, step: 0.5, unit: 'm/s²' },
+  ],
+  force_analysis: [
+    { key: 'applied', label: '拉力大小', min: 0.4, max: 3, step: 0.1, unit: 'N' },
+    { key: 'gravity', label: '重力大小', min: 0.4, max: 3, step: 0.1, unit: 'N' },
+    { key: 'friction', label: '摩擦力大小', min: 0.4, max: 3, step: 0.1, unit: 'N' },
+  ],
+};
+
+/* ──────────────── 通用工具 ──────────────── */
+function arrowFrom(origin, dir, length, color, headLength = 0.3, headWidth = 0.15) {
+  const d = new THREE.Vector3(dir[0], dir[1], dir[2]).normalize();
+  return new THREE.ArrowHelper(d, new THREE.Vector3(origin[0], origin[1], origin[2]), length, color, headLength, headWidth);
+}
+
+function makeGround(size, color) {
+  const [gw, gd] = size || [8, 5];
+  const geo = new THREE.PlaneGeometry(gw, gd);
+  const mat = new THREE.MeshStandardMaterial({ color: color || '#f8fafc', roughness: 0.9 });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = -0.02;
+  return mesh;
+}
+
+function removeDerived(obj) {
+  if (!obj) return;
+  scene.remove(obj);
+  if (typeof obj.dispose === 'function') { obj.dispose(); return; }
+  if (obj.geometry) obj.geometry.dispose();
+  if (obj.material) {
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    mats.forEach(m => m && typeof m.dispose === 'function' && m.dispose());
+  }
+}
+
+/* ──────────────── LiDAR 避障场景 ──────────────── */
+sceneBuilders['lidar_obstacle_avoidance'] = function(sceneData) {
+  const objects = {};
+
+  // 地面
+  const ground = makeGround(sceneData.ground?.size, sceneData.ground?.color || '#f8fafc');
+  scene.add(ground);
+  objects.ground = ground;
+
+  // 小车组
+  const carGroup = new THREE.Group();
+  const carCfg = sceneData.car || {};
+  const [bx, by, bz] = carCfg.bodySize || [1.5, 0.55, 0.9];
+  const bodyGeo = new THREE.BoxGeometry(bx, by, bz);
+  const bodyMat = new THREE.MeshStandardMaterial({ color: carCfg.bodyColor || '#22c55e', roughness: 0.45 });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  carGroup.add(body);
+
+  // 车轮
+  const wheels = carCfg.wheels || [{ position: [-0.48, -0.29, 0.48] }, { position: [0.48, -0.29, 0.48] }];
+  wheels.forEach(w => {
+    const wGeo = new THREE.CylinderGeometry(w.radius || 0.18, w.radius || 0.18, w.width || 0.18, 24);
+    const wMat = new THREE.MeshStandardMaterial({ color: '#111827' });
+    const wheel = new THREE.Mesh(wGeo, wMat);
+    wheel.rotation.z = Math.PI / 2;
+    if (w.position) wheel.position.set(...w.position);
+    carGroup.add(wheel);
+  });
+
+  // 车顶
+  const topCfg = carCfg.top || {};
+  const topGeo = new THREE.CylinderGeometry(topCfg.radius || 0.18, topCfg.radius || 0.18, topCfg.height || 0.12, 32);
+  const topMat = new THREE.MeshStandardMaterial({ color: topCfg.color || '#0f766e' });
+  const top = new THREE.Mesh(topGeo, topMat);
+  top.position.set(0, 0.42, 0);
+  carGroup.add(top);
+
+  // 车头灯（黄色标识）
+  const hlGeo = new THREE.BoxGeometry(0.1, 0.08, 0.22);
+  const hlMat = new THREE.MeshStandardMaterial({ color: '#fbbf24', emissive: '#fbbf24', emissiveIntensity: 0.5 });
+  const headlightL = new THREE.Mesh(hlGeo, hlMat);
+  headlightL.position.set(-0.35, 0.05, bz / 2 + 0.02);
+  carGroup.add(headlightL);
+  const headlightR = new THREE.Mesh(hlGeo, hlMat);
+  headlightR.position.set(0.35, 0.05, bz / 2 + 0.02);
+  carGroup.add(headlightR);
+
+  carGroup.position.set(...(carCfg.position || [0, 0.34, 0]));
+  scene.add(carGroup);
+  objects.carGroup = carGroup;
+
+  // LiDAR 扫描锥
+  const lidarCfg = sceneData.lidar || {};
+  const lidarGroup = new THREE.Group();
+  const coneGeo = new THREE.ConeGeometry(lidarCfg.coneRadius || 1.9, lidarCfg.coneHeight || 3.3, 48, 1, true);
+  const coneMat = new THREE.MeshBasicMaterial({
+    color: lidarCfg.color || '#38bdf8',
+    transparent: true,
+    opacity: 0.12,
+    side: THREE.DoubleSide,
+  });
+  const cone = new THREE.Mesh(coneGeo, coneMat);
+  cone.rotation.x = Math.PI / 2;
+  lidarGroup.add(cone);
+  lidarGroup.position.set(...(lidarCfg.position || [0, 1.1, 0]));
+  scene.add(lidarGroup);
+  objects.lidar = { group: lidarGroup, cone, cfg: lidarCfg, _speed: 0.025 };
+
+  // 障碍物
+  const obsCfg = sceneData.obstacle || {};
+  const obsGeo = new THREE.BoxGeometry(...(obsCfg.size || [0.8, 1, 0.8]));
+  const obsMat = new THREE.MeshStandardMaterial({ color: obsCfg.color || '#ef4444' });
+  const obstacle = new THREE.Mesh(obsGeo, obsMat);
+  obstacle.position.set(...(obsCfg.position || [2.2, 0.5, 0]));
+  scene.add(obstacle);
+  objects.obstacle = { mesh: obstacle, mat: obsMat, cfg: obsCfg };
+
+  // 路径标记球
+  const pathGroup = new THREE.Group();
+  const pathCfg = sceneData.path || {};
+  const points = pathCfg.waypoints || [];
+  points.forEach(p => {
+    const sGeo = new THREE.SphereGeometry(0.08, 16, 16);
+    const sMat = new THREE.MeshStandardMaterial({
+      color: pathCfg.color || '#2563eb',
+      emissive: pathCfg.emissive || '#1d4ed8',
+      emissiveIntensity: 0.3,
+    });
+    const sphere = new THREE.Mesh(sGeo, sMat);
+    sphere.position.set(...p);
+    pathGroup.add(sphere);
+  });
+  pathGroup.visible = false;
+  scene.add(pathGroup);
+  objects.pathMarkers = pathGroup;
+
+  return {
+    objects,
+    applyState(step) {
+      const states = step.objectStates || {};
+      if (states.lidar) {
+        objects.lidar._speed = states.lidar.speed ?? 0.025;
+        objects.lidar.cone.material.opacity = states.lidar.opacity ?? 0.12;
+      }
+      if (states.obstacle) {
+        const s = states.obstacle.scale ?? 1;
+        objects.obstacle.mesh.scale.setScalar(s);
+        if (states.obstacle.emissive !== undefined) {
+          objects.obstacle.mat.emissive = new THREE.Color(states.obstacle.emissive || '#000000');
+        }
+      }
+      if (states.path) {
+        objects.pathMarkers.visible = !!states.path.visible;
+      }
+    },
+    update(dt, time) {
+      if (!paused && objects.lidar) {
+        objects.lidar.group.rotation.y += objects.lidar._speed;
+      }
+      // 障碍物脉动（步骤 1 = detect）
+      if (objects.obstacle && currentStep === 1) {
+        const pulse = 1 + Math.sin(time * 3) * 0.06;
+        objects.obstacle.mesh.scale.setScalar(pulse);
+      }
+    },
+  };
+};
+
+/* ──────────────── 抛物运动场景 ──────────────── */
+sceneBuilders['projectile_motion'] = function(sceneData) {
+  const objects = {};
+
+  // 地面
+  const ground = makeGround(sceneData.ground?.size || [10, 6], sceneData.ground?.color || '#f8fafc');
+  scene.add(ground);
+  objects.ground = ground;
+
+  // 物理参数（可调）
+  const cfg = {
+    v0: sceneData.projectile?.initialSpeed ?? 5,
+    angle: (sceneData.projectile?.angle ?? 45) * Math.PI / 180,
+    g: sceneData.projectile?.gravity ?? 5,
+    launch: sceneData.projectile?.launch || [0, 0.3, 0],
+  };
+  objects.cfg = cfg;
+
+  // 小球（抛体，参数变化时不重建，只改变运动路径）
+  const ballGeo = new THREE.SphereGeometry(0.2, 32, 32);
+  const ballMat = new THREE.MeshStandardMaterial({ color: '#ef4444', roughness: 0.3 });
+  const projectile = new THREE.Mesh(ballGeo, ballMat);
+  projectile.position.set(cfg.launch[0], cfg.launch[1], cfg.launch[2]);
+  scene.add(projectile);
+  objects.projectile = projectile;
+
+  // 速度分解箭头（跟随小球，每帧更新方向与长度）
+  const VEL_SCALE = 0.22;   // 每 m/s 对应的箭头长度（世界单位）
+  const velGroup = new THREE.Group();
+  velGroup.visible = false;
+  scene.add(velGroup);
+
+  const vxArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0), 1, '#38bdf8', 0.22, 0.12);
+  const vyArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 0), 1, '#34d399', 0.22, 0.12);
+  const vArrow  = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0, 0), 1, '#f97316', 0.26, 0.14);
+  velGroup.add(vxArrow, vyArrow, vArrow);
+
+  // 速度分解平行四边形辅助线
+  const decompPos = new Float32Array(12);
+  const decompGeo = new THREE.BufferGeometry();
+  decompGeo.setAttribute('position', new THREE.BufferAttribute(decompPos, 3));
+  const decompLines = new THREE.LineSegments(decompGeo, new THREE.LineBasicMaterial({ color: '#64748b', transparent: true, opacity: 0.45 }));
+  velGroup.add(decompLines);
+
+  objects.velocity = velGroup;
+
+  // 派生物体（轨迹/最高点/射程标记），参数变化时重建
+  let trajectory = null, apex = null, rangeMark = null;
+
+  function recompute() {
+    cfg.v0x = cfg.v0 * Math.cos(cfg.angle);
+    cfg.v0y = cfg.v0 * Math.sin(cfg.angle);
+    cfg.flightTime = 2 * cfg.v0y / cfg.g;
+    cfg.range = cfg.v0x * cfg.flightTime;
+    cfg.apexH = (cfg.v0y * cfg.v0y) / (2 * cfg.g);
+  }
+
+  function rebuildKinematics() {
+    recompute();
+
+    // 清理旧派生物体
+    [trajectory, apex, rangeMark].forEach(removeDerived);
+
+    // 抛物线轨迹（点状虚线）
+    const trajPoints = [];
+    const N = 70;
+    for (let i = 0; i <= N; i++) {
+      const t = (i / N) * cfg.flightTime;
+      const x = cfg.v0x * t;
+      const y = cfg.launch[1] + cfg.v0y * t - 0.5 * cfg.g * t * t;
+      trajPoints.push(new THREE.Vector3(x, y, 0));
+    }
+    const trajGeo = new THREE.BufferGeometry().setFromPoints(trajPoints);
+    trajectory = new THREE.Points(trajGeo, new THREE.PointsMaterial({ color: '#2563eb', size: 0.09, transparent: true, opacity: 0.55 }));
+    trajectory.visible = false;
+    scene.add(trajectory);
+    objects.trajectory = trajectory;
+
+    // 最高点标记
+    apex = new THREE.Mesh(
+      new THREE.SphereGeometry(0.16, 16, 16),
+      new THREE.MeshStandardMaterial({ color: '#fbbf24', emissive: '#f59e0b', emissiveIntensity: 0.8 })
+    );
+    apex.position.set(cfg.range / 2, cfg.launch[1] + cfg.apexH, 0);
+    apex.visible = false;
+    scene.add(apex);
+    objects.apex = apex;
+
+    // 射程标记（地面横线）
+    const rangeGeo = new THREE.BoxGeometry(cfg.range, 0.03, 0.05);
+    rangeMark = new THREE.Mesh(rangeGeo, new THREE.MeshStandardMaterial({ color: '#22c55e', emissive: '#16a34a', emissiveIntensity: 0.4 }));
+    rangeMark.position.set(cfg.range / 2, 0.01, 0);
+    rangeMark.visible = false;
+    scene.add(rangeMark);
+    objects.range = rangeMark;
+  }
+
+  let lastStep = null;
+
+  function applyState(step) {
+    lastStep = step;
+    const states = step.objectStates || {};
+    if (states.velocity) velGroup.visible = !!states.velocity.visible;
+    if (states.trajectory) {
+      trajectory.visible = !!states.trajectory.visible;
+      if (states.trajectory.opacity !== undefined) trajectory.material.opacity = states.trajectory.opacity;
+    }
+    if (states.apex) apex.visible = !!states.apex.visible;
+    if (states.range) rangeMark.visible = !!states.range.visible;
+  }
+
+  function update(dt, time) {
+    // 推进模拟时间（循环飞行）
+    simTime += dt;
+    const t = simTime % cfg.flightTime;
+    const x = cfg.v0x * t;
+    const y = cfg.launch[1] + cfg.v0y * t - 0.5 * cfg.g * t * t;
+    projectile.position.set(x, y, cfg.launch[2]);
+
+    // 速度分解：瞬时速度 vx / vy / v
+    if (velGroup.visible) {
+      const vx = cfg.v0x;
+      const vy = cfg.v0y - cfg.g * t;
+      const vmag = Math.hypot(vx, vy);
+
+      velGroup.position.set(x, y, cfg.launch[2]);
+      vxArrow.setDirection(new THREE.Vector3(1, 0, 0));
+      vxArrow.setLength(vx * VEL_SCALE, 0.22, 0.12);
+      vyArrow.setDirection(new THREE.Vector3(0, vy >= 0 ? 1 : -1, 0));
+      vyArrow.setLength(Math.abs(vy) * VEL_SCALE, 0.22, 0.12);
+      vArrow.setDirection(new THREE.Vector3(vx, vy, 0).normalize());
+      vArrow.setLength(vmag * VEL_SCALE, 0.26, 0.14);
+
+      // 平行四边形辅助线（v = vx + vy）
+      const sx = vx * VEL_SCALE, sy = vy * VEL_SCALE;
+      decompPos.set([sx, 0, 0, sx, sy, 0, 0, sy, 0, sx, sy, 0]);
+      decompGeo.attributes.position.needsUpdate = true;
+
+      setVelocityReadout(vx, vy, vmag);
+    } else {
+      hideVelocityReadout();
+    }
+
+    // 最高点脉动
+    if (apex.visible) {
+      apex.scale.setScalar(1 + Math.sin(time * 4) * 0.2);
+    }
+  }
+
+  function setParam(key, value) {
+    if (key === 'initialSpeed') cfg.v0 = value;
+    else if (key === 'angle') cfg.angle = value * Math.PI / 180;
+    else if (key === 'gravity') cfg.g = value;
+    rebuildKinematics();
+    if (lastStep) applyState(lastStep);
+  }
+
+  function getParams() {
+    return { initialSpeed: cfg.v0, angle: cfg.angle * 180 / Math.PI, gravity: cfg.g };
+  }
+
+  rebuildKinematics();
+
+  return { objects, applyState, update, setParam, getParams };
+};
+
+/* ──────────────── 受力分析场景 ──────────────── */
+sceneBuilders['force_analysis'] = function(sceneData) {
+  const objects = {};
+
+  // 地面
+  const ground = makeGround(sceneData.ground?.size || [8, 6], sceneData.ground?.color || '#f8fafc');
+  scene.add(ground);
+  objects.ground = ground;
+
+  // 物体方块
+  const blockCfg = sceneData.block || {};
+  const blockGeo = new THREE.BoxGeometry(...(blockCfg.size || [1.2, 1.2, 1.2]));
+  const blockMat = new THREE.MeshStandardMaterial({ color: blockCfg.color || '#8b5cf6', roughness: 0.4 });
+  const block = new THREE.Mesh(blockGeo, blockMat);
+  block.position.set(...(blockCfg.position || [0, 0.6, 0]));
+  block.userData.baseY = blockCfg.position ? blockCfg.position[1] : 0.6;
+  scene.add(block);
+  objects.block = block;
+
+  // 力大小（可调参数，单位 N）
+  const fCfg = sceneData.forces || {};
+  const cfg = {
+    applied: fCfg.applied ?? 1.4,
+    gravity: fCfg.gravity ?? 1.1,
+    friction: fCfg.friction ?? 1.1,
+  };
+
+  // 力箭头
+  const origin = blockCfg.position || [0, 0.6, 0];
+  const fg = arrowFrom(origin, [0, -1, 0], cfg.gravity, '#3b82f6');   // 重力（蓝，向下）
+  const fn = arrowFrom(origin, [0, 1, 0], 1.1, '#22c55e');            // 支持力（绿，向上，固定）
+  const fapp = arrowFrom(origin, [1, 0, 0], cfg.applied, '#f97316');  // 拉力（橙，向右）
+  const ff = arrowFrom(origin, [-1, 0, 0], cfg.friction, '#ef4444');  // 摩擦力（红，向左）
+
+  [fg, fn, fapp, ff].forEach(a => { a.visible = false; scene.add(a); });
+  objects.forces = { gravity: fg, normal: fn, applied: fapp, friction: ff };
+
+  function setParam(key, value) {
+    if (key === 'applied') { cfg.applied = value; fapp.setLength(value, 0.3, 0.15); }
+    else if (key === 'gravity') { cfg.gravity = value; fg.setLength(value, 0.3, 0.15); }
+    else if (key === 'friction') { cfg.friction = value; ff.setLength(value, 0.3, 0.15); }
+  }
+
+  function getParams() {
+    return { applied: cfg.applied, gravity: cfg.gravity, friction: cfg.friction };
+  }
+
+  return {
+    objects,
+    applyState(step) {
+      const states = step.objectStates || {};
+      const f = states.forces || {};
+      if (f.gravity !== undefined) objects.forces.gravity.visible = !!f.gravity;
+      if (f.normal !== undefined) objects.forces.normal.visible = !!f.normal;
+      if (f.applied !== undefined) objects.forces.applied.visible = !!f.applied;
+      if (f.friction !== undefined) objects.forces.friction.visible = !!f.friction;
+    },
+    update(dt, time) {
+      // 物体轻微悬浮呼吸感
+      const bob = Math.sin(time * 2) * 0.03;
+      objects.block.position.y = objects.block.userData.baseY + bob;
+    },
+    setParam,
+    getParams,
+  };
+};
+
+/* ──────────────── 通用 3D 场景（兜底） ──────────────── */
+sceneBuilders['generic_3d'] = function(sceneData) {
+  const objects = {};
+  const ground = makeGround(sceneData.ground?.size, sceneData.ground?.color || '#2a2a3e');
+  scene.add(ground);
+  objects.ground = ground;
+
+  return {
+    objects,
+    applyState(step) { /* 通用场景无专属状态 */ },
+    update(dt, time) { /* 通用场景无持续动画 */ },
+  };
+};
+
+/* ──────────────── 场景初始化 ──────────────── */
+function buildScene(data) {
+  // 清空旧场景
+  while (scene.children.length > 0) {
+    scene.remove(scene.children[0]);
+  }
+  simTime = 0;
+  hideVelocityReadout();
+
+  const sceneCfg = data.scene || {};
+  const builder = sceneBuilders[sceneCfg.type] || sceneBuilders['generic_3d'];
+  sceneController = builder(sceneCfg);
+
+  // 添加灯光（如果场景没有自带）
+  scene.add(new THREE.AmbientLight('#eef2f7', 0.8));
+  const dirLight = new THREE.DirectionalLight('#ffffff', 1.2);
+  dirLight.position.set(4, 6, 4);
+  scene.add(dirLight);
+
+  // 背景色
+  scene.background = new THREE.Color('#eef2f7');
+
+  // 渲染参数面板
+  renderParamPanel();
+}
+
+/* ──────────────── 步骤切换 ──────────────── */
+function applyStep(idx) {
+  currentStep = idx;
+  const steps = lessonData?.steps || [];
+  if (idx >= steps.length) return;
+
+  const step = steps[idx];
+
+  // 更新字幕
+  const subEl = document.getElementById('subtitle');
+  if (subEl && step.description) {
+    subEl.textContent = step.description;
+    subEl.style.opacity = '0';
+    requestAnimationFrame(() => { subEl.style.opacity = '1'; });
+  }
+
+  // 更新步骤指示器
+  updateDots();
+
+  // 委托给场景控制器
+  if (sceneController && sceneController.applyState) {
+    sceneController.applyState(step);
+  }
+}
+
+/* ──────────────── 动画循环 ──────────────── */
+function animate() {
+  animationId = requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.1);  // cap to avoid jumps
+  controls.update();
+
+  // 委托给场景控制器（暂停时不推进时间，但仍刷新物体位置与读数，便于暂停时调参）
+  if (sceneController && sceneController.update) {
+    if (paused) {
+      sceneController.update(0, lastNow);
+    } else {
+      lastNow = performance.now() * 0.001;
+      sceneController.update(dt, lastNow);
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+
+/* ──────────────── 步骤指示器 ──────────────── */
+function updateDots() {
+  const steps = lessonData?.steps || [];
+  const container = document.getElementById('stepDots');
+  if (!container) return;
+  container.innerHTML = '';
+  steps.forEach((s, i) => {
+    const dot = document.createElement('span');
+    dot.className = 'dot' + (i === currentStep ? ' active' : '');
+    container.appendChild(dot);
+  });
+}
+
+/* ──────────────── 参数面板 ──────────────── */
+function renderParamPanel() {
+  const panel = document.getElementById('paramPanel');
+  if (!panel) return;
+  const sceneType = lessonData?.scene?.type;
+  const params = SCENE_PARAMS[sceneType];
+  const hasSetParam = sceneController && typeof sceneController.setParam === 'function';
+
+  if (!params || !params.length || !hasSetParam) {
+    panel.innerHTML = '';
+    panel.style.display = 'none';
+    return;
+  }
+
+  panel.style.display = 'block';
+  const current = sceneController.getParams ? sceneController.getParams() : {};
+  panel.innerHTML = '<div class="param-title">可调参数</div>';
+
+  params.forEach(p => {
+    const val = current[p.key] ?? p.min;
+    const row = document.createElement('div');
+    row.className = 'param-row';
+
+    const label = document.createElement('label');
+    label.textContent = p.label;
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = p.min;
+    slider.max = p.max;
+    slider.step = p.step;
+    slider.value = val;
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'param-value';
+    valueEl.textContent = val + (p.unit ? ' ' + p.unit : '');
+
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      valueEl.textContent = v + (p.unit ? ' ' + p.unit : '');
+      if (sceneController.setParam) sceneController.setParam(p.key, v);
+    });
+
+    row.appendChild(label);
+    row.appendChild(slider);
+    row.appendChild(valueEl);
+    panel.appendChild(row);
+  });
+}
+
+/* ──────────────── 速度读数面板 ──────────────── */
+let velocityPanelBuilt = false;
+function setVelocityReadout(vx, vy, vmag) {
+  const el = document.getElementById('velocityPanel');
+  if (!el) return;
+  if (!velocityPanelBuilt) {
+    el.innerHTML =
+      '<div class="v-title">速度读数</div>' +
+      '<div class="v-row" id="vrVx" style="color:#38bdf8"></div>' +
+      '<div class="v-row" id="vrVy" style="color:#34d399"></div>' +
+      '<div class="v-row" id="vrV" style="color:#f97316"></div>';
+    velocityPanelBuilt = true;
+  }
+  el.style.display = 'block';
+  document.getElementById('vrVx').textContent = 'vx = ' + vx.toFixed(2) + ' m/s';
+  document.getElementById('vrVy').textContent = 'vy = ' + (vy >= 0 ? '+' : '') + vy.toFixed(2) + ' m/s';
+  document.getElementById('vrV').textContent = 'v = ' + vmag.toFixed(2) + ' m/s';
+}
+function hideVelocityReadout() {
+  const el = document.getElementById('velocityPanel');
+  if (el) el.style.display = 'none';
+}
+
+/* ──────────────── 暂停/播放 ──────────────── */
+const pauseBtn = document.getElementById('pauseBtn');
+if (pauseBtn) {
+  pauseBtn.addEventListener('click', () => {
+    paused = !paused;
+    pauseBtn.textContent = paused ? '▶' : '⏸';
+  });
+}
+
+/* ──────────────── 入口：接收 lesson 数据 ──────────────── */
+function init(data) {
+  lessonData = data;
+
+  // 容器
+  const container = document.getElementById('canvas3d');
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+
+  // Renderer
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(w, h);
+  renderer.shadowMap.enabled = true;
+  container.appendChild(renderer.domElement);
+
+  // Scene
+  scene = new THREE.Scene();
+
+  // Camera
+  const camCfg = data.scene?.camera || { position: [5.8, 4.2, 7], fov: 55 };
+  camera = new THREE.PerspectiveCamera(camCfg.fov || 55, w / h, 0.1, 100);
+  camera.position.set(...(camCfg.position || [5.8, 4.2, 7]));
+  camera.lookAt(0, 0, 0);
+
+  // OrbitControls
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enablePan = false;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.target.set(0, 0.5, 0);
+
+  // Clock
+  clock = new THREE.Clock();
+
+  // 构建场景
+  buildScene(data);
+
+  // 初始步骤
+  applyStep(0);
+
+  // 窗口大小适配
+  window.addEventListener('resize', () => {
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    camera.aspect = cw / ch;
+    camera.updateProjectionMatrix();
+    renderer.setSize(cw, ch);
+  });
+
+  // 启动动画循环
+  animate();
+}
+
+/* ──────────────── 暴露给父页面的 API ──────────────── */
+window.changeScene = function(n) {
+  if (lessonData && n >= 0 && n < lessonData.steps.length) {
+    applyStep(n);
+  }
+};
+
+window.getSceneCount = function() {
+  return lessonData ? lessonData.steps.length : 0;
+};
+
+/* ──────────────── 接收 postMessage ──────────────── */
+window.addEventListener('message', function(event) {
+  if (event.data && event.data.type === 'lesson-data') {
+    init(event.data.payload);
+  }
+});
+
+/* ──────────────── 也支持 URL hash 中的 base64 数据（用于调试） ──────────────── */
+if (window.location.hash && window.location.hash.length > 1) {
+  try {
+    const json = decodeURIComponent(escape(atob(window.location.hash.slice(1))));
+    const data = JSON.parse(json);
+    init(data);
+  } catch (e) {
+    console.error('Failed to parse lesson data from URL hash:', e);
+  }
+}
+
+console.log('[player-template] 就绪，等待 lesson 数据...');
+</script>
+</body>
+</html>
