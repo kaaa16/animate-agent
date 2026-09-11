@@ -27,4 +27,4 @@ class LessonIR(BaseModel):
     subject: str
     summary: str
     learning_objectives: list[str] = Field(default_factory=list, min_length=2, max_length=4)
-    scenes: list[LessonScene] = Field(default_factory=list, min_length=3, max_length=6)
+    scenes: list[LessonScene] = Field(default_factory=list, min_length=1, max_length=10)

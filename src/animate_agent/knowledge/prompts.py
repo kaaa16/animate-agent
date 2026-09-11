@@ -29,7 +29,8 @@ KNOWLEDGE_SYSTEM_PROMPT = """你是一位资深课程设计师。
 
 要求：
 - learning_objectives 写 2~4 条。
-- scenes 写 3~6 个，按教学顺序组织，从易到难。
+- scenes 的数量由你根据文档内容复杂度自主决定：简单内容 1~2 个，
+  一般 3~5 个，复杂内容 6~8 个；按教学顺序组织、从易到难，宁少勿滥。
 - 每个场景的 narration 口语化、简洁，200 字以内。
 - key_points 写 2~5 个关键词。
 - source_refs 必须引用输入文档中真实存在的 section id 或 block id，

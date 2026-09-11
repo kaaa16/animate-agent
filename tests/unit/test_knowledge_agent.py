@@ -89,23 +89,36 @@ def test_extract_json_extracts_from_prose() -> None:
     assert _extract_json('结果如下：{"a": 1} 完成') == {"a": 1}
 
 
+def _complete_lesson(**overrides) -> dict:
+    scenes = [
+        {**scene, "id": f"scene-{index}"}
+        for index, scene in enumerate(VALID_LESSON["scenes"], start=1)
+    ]
+    data = {
+        **VALID_LESSON,
+        "lesson_id": "l1",
+        "document_id": "d1",
+        "scenes": scenes,
+    }
+    data.update(overrides)
+    return data
+
+
 def test_lesson_ir_rejects_extra_field() -> None:
     with pytest.raises(ValueError):
-        LessonIR.model_validate(
-            {**VALID_LESSON, "lesson_id": "l1", "document_id": "d1", "extra": 1}
-        )
+        LessonIR.model_validate(_complete_lesson(extra=1))
 
 
-def test_lesson_ir_rejects_too_few_scenes() -> None:
+def test_lesson_ir_rejects_empty_scenes() -> None:
     with pytest.raises(ValueError):
-        LessonIR.model_validate(
-            {
-                **VALID_LESSON,
-                "lesson_id": "l1",
-                "document_id": "d1",
-                "scenes": VALID_LESSON["scenes"][:2],
-            }
-        )
+        LessonIR.model_validate(_complete_lesson(scenes=[]))
+
+
+def test_lesson_ir_accepts_single_scene() -> None:
+    single = [{**VALID_LESSON["scenes"][0], "id": "scene-1"}]
+    lesson = LessonIR.model_validate(_complete_lesson(scenes=single))
+
+    assert len(lesson.scenes) == 1
 
 
 def test_generate_returns_valid_lesson() -> None:
