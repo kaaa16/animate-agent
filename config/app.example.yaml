@@ -20,3 +20,12 @@ agent:
   require_visual_objects: true
   require_interactive_demo: true
 
+llm:
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-pro
+
+knowledge:
+  max_scenes: 6
+  max_retries: 3
+  temperature: 0.4
+
