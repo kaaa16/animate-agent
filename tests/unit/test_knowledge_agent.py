@@ -8,7 +8,7 @@ import pytest
 
 from animate_agent.documents.models import DocumentBlock, DocumentIR, DocumentSource, Section
 from animate_agent.knowledge.agent import KnowledgeAgent, _extract_json
-from animate_agent.knowledge.models import LessonIR, LessonScene
+from animate_agent.knowledge.models import LessonIR
 from animate_agent.llm import LLMClient, LLMConfig
 
 VALID_LESSON = {
@@ -18,12 +18,26 @@ VALID_LESSON = {
     "learning_objectives": ["理解牛顿定律", "掌握抛物运动"],
     "scenes": [
         {
-            "title": "牛顿定律",
-            "objective": "理解 F=ma",
-            "narration": "力是改变物体运动状态的原因。",
-            "key_points": ["力", "加速度"],
+            "title": "牛顿第一定律",
+            "objective": "理解惯性",
+            "narration": "物体在不受外力时保持静止或匀速直线运动。",
+            "key_points": ["惯性", "匀速直线运动"],
             "source_refs": ["section-1"],
-        }
+        },
+        {
+            "title": "牛顿第二定律",
+            "objective": "理解 F=ma",
+            "narration": "力是改变物体运动状态的原因，加速度与力成正比。",
+            "key_points": ["力", "加速度"],
+            "source_refs": ["section-1-block-1"],
+        },
+        {
+            "title": "牛顿第三定律",
+            "objective": "理解作用力与反作用力",
+            "narration": "作用力和反作用力大小相等、方向相反。",
+            "key_points": ["作用力", "反作用力"],
+            "source_refs": ["section-1", "section-1-block-1"],
+        },
     ],
 }
 
@@ -82,14 +96,26 @@ def test_lesson_ir_rejects_extra_field() -> None:
         )
 
 
+def test_lesson_ir_rejects_too_few_scenes() -> None:
+    with pytest.raises(ValueError):
+        LessonIR.model_validate(
+            {
+                **VALID_LESSON,
+                "lesson_id": "l1",
+                "document_id": "d1",
+                "scenes": VALID_LESSON["scenes"][:2],
+            }
+        )
+
+
 def test_generate_returns_valid_lesson() -> None:
     lesson = _run_generate(_make_document(), [json.dumps(VALID_LESSON, ensure_ascii=False)])
 
     assert isinstance(lesson, LessonIR)
     assert lesson.lesson_id == "lesson-doc1"
     assert lesson.document_id == "doc1"
-    assert lesson.scenes[0].id == "scene-1"
-    assert lesson.scenes[0].title == "牛顿定律"
+    assert [scene.id for scene in lesson.scenes] == ["scene-1", "scene-2", "scene-3"]
+    assert lesson.scenes[0].title == "牛顿第一定律"
 
 
 def test_generate_retries_then_succeeds() -> None:
@@ -97,7 +123,7 @@ def test_generate_retries_then_succeeds() -> None:
     lesson = _run_generate(_make_document(), ["not json at all", valid])
 
     assert lesson.lesson_id == "lesson-doc1"
-    assert len(lesson.scenes) == 1
+    assert len(lesson.scenes) == 3
 
 
 def test_generate_raises_after_retries() -> None:
@@ -111,8 +137,8 @@ def test_generate_rejects_missing_scenes() -> None:
         _run_generate(_make_document(), [json.dumps(payload, ensure_ascii=False)])
 
 
-def test_lesson_scene_defaults_lists() -> None:
-    scene = LessonScene(id="s1", title="t", objective="o", narration="n")
-
-    assert scene.key_points == []
-    assert scene.source_refs == []
+def test_generate_rejects_invalid_source_ref() -> None:
+    scene = {**VALID_LESSON["scenes"][0], "source_refs": ["section-999"]}
+    bad = {**VALID_LESSON, "scenes": [scene, *VALID_LESSON["scenes"][1:]]}
+    with pytest.raises(ValueError):
+        _run_generate(_make_document(), [json.dumps(bad, ensure_ascii=False)])

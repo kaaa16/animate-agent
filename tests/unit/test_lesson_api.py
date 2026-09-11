@@ -14,16 +14,32 @@ def _expected_lesson() -> LessonIR:
         title="力学基础",
         subject="物理",
         summary="讲解力学",
-        learning_objectives=["理解牛顿定律"],
+        learning_objectives=["理解牛顿定律", "掌握抛物运动"],
         scenes=[
             LessonScene(
                 id="scene-1",
-                title="牛顿定律",
-                objective="理解 F=ma",
-                narration="力改变运动状态。",
-                key_points=["力"],
+                title="牛顿第一定律",
+                objective="理解惯性",
+                narration="物体在不受外力时保持静止。",
+                key_points=["惯性", "匀速运动"],
                 source_refs=["section-1"],
-            )
+            ),
+            LessonScene(
+                id="scene-2",
+                title="牛顿第二定律",
+                objective="理解 F=ma",
+                narration="力改变物体运动状态。",
+                key_points=["力", "加速度"],
+                source_refs=["section-1"],
+            ),
+            LessonScene(
+                id="scene-3",
+                title="牛顿第三定律",
+                objective="理解作用力与反作用力",
+                narration="作用力与反作用力大小相等方向相反。",
+                key_points=["作用力", "反作用力"],
+                source_refs=["section-1"],
+            ),
         ],
     )
 

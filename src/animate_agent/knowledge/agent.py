@@ -34,6 +34,14 @@ def _derive_lesson_id(document: DocumentIR) -> str:
     return f"lesson-{document.document_id}"
 
 
+def _collect_ids(document: DocumentIR) -> set[str]:
+    """Collect every section id and block id in the document for source_ref validation."""
+    ids = {section.id for section in document.sections}
+    for section in document.sections:
+        ids.update(block.id for block in section.blocks)
+    return ids
+
+
 class KnowledgeAgent:
     """Extract a LessonIR from a DocumentIR via a single, validated LLM call."""
 
@@ -75,8 +83,16 @@ class KnowledgeAgent:
         scenes = data.get("scenes")
         if not isinstance(scenes, list) or not scenes:
             raise ValueError("输出缺少非空的 scenes 列表")
+        valid_ids = _collect_ids(document)
         for index, scene in enumerate(scenes, start=1):
             if not isinstance(scene, dict):
                 raise ValueError(f"scenes[{index - 1}] 不是对象")
             scene.setdefault("id", f"scene-{index}")
+            refs = scene.get("source_refs")
+            if isinstance(refs, list):
+                bad = [ref for ref in refs if ref not in valid_ids]
+                if bad:
+                    raise ValueError(
+                        f"scenes[{index - 1}].source_refs 引用了不存在的 id: {bad}"
+                    )
         return LessonIR.model_validate(data)

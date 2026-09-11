@@ -11,8 +11,8 @@ class LessonScene(BaseModel):
     id: str
     title: str
     objective: str
-    narration: str
-    key_points: list[str] = Field(default_factory=list)
+    narration: str = Field(max_length=200)
+    key_points: list[str] = Field(default_factory=list, min_length=2, max_length=5)
     source_refs: list[str] = Field(default_factory=list)
 
 
@@ -26,5 +26,5 @@ class LessonIR(BaseModel):
     title: str
     subject: str
     summary: str
-    learning_objectives: list[str] = Field(default_factory=list)
-    scenes: list[LessonScene] = Field(default_factory=list)
+    learning_objectives: list[str] = Field(default_factory=list, min_length=2, max_length=4)
+    scenes: list[LessonScene] = Field(default_factory=list, min_length=3, max_length=6)
