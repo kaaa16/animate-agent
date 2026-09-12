@@ -86,6 +86,19 @@ def test_parser_extracts_lists_and_images() -> None:
     )
 
 
+def test_parser_gives_each_list_item_its_own_block() -> None:
+    document = parse_html(fixture_html(), SOURCE_URL)
+    lists = [
+        block for section in document.sections for block in section.blocks if block.type == "list"
+    ]
+
+    assert any("Save the file." in block.text for block in lists)
+    # Each item is its own block, so no list block spans multiple lines...
+    assert all("\n" not in block.text for block in lists)
+    # ...and the ids handed out are distinct.
+    assert len({block.id for block in lists}) == len(lists)
+
+
 def test_parser_excludes_page_chrome_and_executable_content() -> None:
     document = parse_html(fixture_html(), SOURCE_URL)
     serialized = document.model_dump_json()

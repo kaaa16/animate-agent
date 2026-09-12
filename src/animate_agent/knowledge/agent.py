@@ -7,6 +7,11 @@ import re
 from typing import Any, cast
 
 from animate_agent.documents.models import DocumentIR
+from animate_agent.knowledge.fidelity import (
+    FIDELITY_SYSTEM_PROMPT,
+    FidelityReport,
+    build_fidelity_prompt,
+)
 from animate_agent.knowledge.models import LessonIR
 from animate_agent.knowledge.prompts import KNOWLEDGE_SYSTEM_PROMPT, build_knowledge_prompt
 from animate_agent.llm import LLMClient
@@ -15,6 +20,7 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_MAX_SCENES = 10
 DEFAULT_TEMPERATURE = 0.4
 DEFAULT_REQUIRE_FULL_COVERAGE = True
+DEFAULT_VERIFY_FIDELITY = False
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -81,12 +87,14 @@ class KnowledgeAgent:
         max_scenes: int = DEFAULT_MAX_SCENES,
         temperature: float = DEFAULT_TEMPERATURE,
         require_full_coverage: bool = DEFAULT_REQUIRE_FULL_COVERAGE,
+        verify_fidelity: bool = DEFAULT_VERIFY_FIDELITY,
     ) -> None:
         self._llm = llm
         self._max_retries = max_retries
         self._max_scenes = max_scenes
         self._temperature = temperature
         self._require_full_coverage = require_full_coverage
+        self._verify_fidelity = verify_fidelity
 
     async def generate(self, document: DocumentIR) -> LessonIR:
         user_prompt = build_knowledge_prompt(document)
@@ -99,7 +107,12 @@ class KnowledgeAgent:
             raw = await self._llm.chat(messages, temperature=self._temperature, max_tokens=8192)
             try:
                 data = _extract_json(raw)
-                return self._validate(document, data)
+                lesson = self._validate(document, data)
+                if self._verify_fidelity:
+                    report = await self._check_fidelity(document, lesson)
+                    if report.has_findings:
+                        raise ValueError(f"保真核对未通过——{report.describe()}")
+                return lesson
             except ValueError as exc:
                 last_error = str(exc)
                 messages = [
@@ -114,6 +127,15 @@ class KnowledgeAgent:
                     },
                 ]
         raise ValueError(f"Knowledge Agent 多次重试仍无法生成有效 LessonIR：{last_error}")
+
+    async def _check_fidelity(self, document: DocumentIR, lesson: LessonIR) -> FidelityReport:
+        """Ask a second pass whether the lesson actually taught the source."""
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": FIDELITY_SYSTEM_PROMPT},
+            {"role": "user", "content": build_fidelity_prompt(document, lesson)},
+        ]
+        raw = await self._llm.chat(messages, temperature=0.0, max_tokens=2048)
+        return FidelityReport.model_validate(_extract_json(raw))
 
     def _validate(self, document: DocumentIR, data: dict[str, Any]) -> LessonIR:
         data = dict(data)

@@ -233,6 +233,21 @@ def test_parse_markdown_keeps_leading_paragraph_when_no_headings(tmp_path: Path)
     assert [block.text for block in document.sections[0].blocks] == ["第一段内容。", "第二段内容。"]
 
 
+def test_parse_markdown_emits_one_block_per_list_item(tmp_path: Path) -> None:
+    path = tmp_path / "sample.md"
+    path.write_text("# 步骤\n\n1. 第一步\n2. 第二步\n3. 第三步\n", encoding="utf-8")
+
+    blocks = parse_markdown(path).sections[0].blocks
+
+    # Separate blocks so source_refs can name a single step.
+    assert [block.text for block in blocks] == ["第一步", "第二步", "第三步"]
+    assert [block.id for block in blocks] == [
+        "section-1-block-1",
+        "section-1-block-2",
+        "section-1-block-3",
+    ]
+
+
 def test_parse_markdown_numbers_sections_from_one(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
     path.write_text(PLAIN_TEXT_SAMPLE, encoding="utf-8")

@@ -19,6 +19,8 @@ class KnowledgeSettings(BaseModel):
     max_retries: int = Field(default=3, ge=1)
     temperature: float = Field(default=0.4, ge=0.0, le=2.0)
     require_full_coverage: bool = True
+    # Costs a second LLM call per generation; see knowledge/fidelity.py.
+    verify_fidelity: bool = False
 
 
 DEFAULT_CONFIG_PATH = Path("config/app.example.yaml")

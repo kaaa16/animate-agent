@@ -32,6 +32,7 @@ async def generate_lesson(
             max_scenes=settings.max_scenes,
             temperature=settings.temperature,
             require_full_coverage=settings.require_full_coverage,
+            verify_fidelity=settings.verify_fidelity,
         )
         owns_client = True
     try:

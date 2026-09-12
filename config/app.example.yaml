@@ -32,4 +32,7 @@ knowledge:
   # 要求原文每个 section / block 都至少被一个场景引用到，防止漏内容。
   # 若接入的文档带大量导航/页脚等噪声导致频繁重试，可改成 false。
   require_full_coverage: true
+  # 生成后再调一次模型，核对「原文有没有被漏讲、课程有没有编原文没有的东西」。
+  # 每次生成多一次 LLM 调用，默认关闭；打开前建议先用真实模型验证误报率。
+  verify_fidelity: false
 

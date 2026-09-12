@@ -306,16 +306,16 @@ def parse_markdown(path: str | Path) -> DocumentIR:
 
         if token.type in {"bullet_list_open", "ordered_list_open"}:
             closing = token.type.replace("_open", "_close")
-            items: list[str] = []
             index += 1
             while index < len(tokens) and tokens[index].type != closing:
                 if tokens[index].type == "inline":
                     item = _inline_text(tokens[index])
                     if item:
-                        items.append(item)
+                        # One block per item: a single blob for the whole list
+                        # leaves source_refs unable to name the step a scene is
+                        # actually about.
+                        add_block("list", item)
                 index += 1
-            if items:
-                add_block("list", "\n".join(items))
             index += 1
             continue
 

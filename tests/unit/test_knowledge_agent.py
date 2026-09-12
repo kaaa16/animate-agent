@@ -8,6 +8,7 @@ import pytest
 
 from animate_agent.documents.models import DocumentBlock, DocumentIR, DocumentSource, Section
 from animate_agent.knowledge.agent import KnowledgeAgent, _extract_json
+from animate_agent.knowledge.fidelity import FidelityReport, build_fidelity_prompt
 from animate_agent.knowledge.models import LessonIR
 from animate_agent.llm import LLMClient, LLMConfig
 
@@ -70,7 +71,13 @@ def _make_document() -> DocumentIR:
     )
 
 
-def _run_generate(document: DocumentIR, responses: list[str], *, max_scenes: int = 10) -> LessonIR:
+def _run_generate(
+    document: DocumentIR,
+    responses: list[str],
+    *,
+    max_scenes: int = 10,
+    verify_fidelity: bool = False,
+) -> LessonIR:
     async def run() -> LessonIR:
         idx = 0
 
@@ -87,7 +94,9 @@ def _run_generate(document: DocumentIR, responses: list[str], *, max_scenes: int
                 LLMConfig(base_url="http://test", api_key="k", model="m"),
                 client=client,
             )
-            agent = KnowledgeAgent(llm, max_scenes=max_scenes)
+            agent = KnowledgeAgent(
+                llm, max_scenes=max_scenes, verify_fidelity=verify_fidelity
+            )
             return await agent.generate(document)
 
     return asyncio.run(run())
@@ -175,6 +184,67 @@ def test_generate_rejects_too_many_scenes() -> None:
             _make_document(),
             [json.dumps(VALID_LESSON, ensure_ascii=False)],
             max_scenes=2,
+        )
+
+
+CLEAN_REPORT = json.dumps({"dropped_facts": [], "added_claims": []})
+DIRTY_REPORT = json.dumps(
+    {"dropped_facts": ["t 的定义被压掉了"], "added_claims": ["「化曲为直」原文没有"]},
+    ensure_ascii=False,
+)
+
+
+def test_fidelity_report_flags_findings() -> None:
+    assert not FidelityReport().has_findings
+
+    dirty = FidelityReport(dropped_facts=["漏了 t"], added_claims=["编了修辞"])
+    assert dirty.has_findings
+    assert "遗漏了原文内容" in dirty.describe()
+    assert "出现了原文没有的内容" in dirty.describe()
+
+
+def test_build_fidelity_prompt_shows_both_sides() -> None:
+    prompt = build_fidelity_prompt(_make_document(), LessonIR.model_validate(_complete_lesson()))
+
+    assert "测试文档" in prompt
+    assert "牛顿第一定律" in prompt
+
+
+def test_fidelity_check_is_off_by_default() -> None:
+    # With the check off, only the lesson response is consumed and returned.
+    lesson = _run_generate(_make_document(), [json.dumps(VALID_LESSON, ensure_ascii=False)])
+
+    assert len(lesson.scenes) == 3
+
+
+def test_fidelity_check_returns_lesson_on_clean_report() -> None:
+    lesson = _run_generate(
+        _make_document(),
+        [json.dumps(VALID_LESSON, ensure_ascii=False), CLEAN_REPORT],
+        verify_fidelity=True,
+    )
+
+    assert lesson.lesson_id == "lesson-doc1"
+
+
+def test_fidelity_check_retries_after_findings() -> None:
+    valid = json.dumps(VALID_LESSON, ensure_ascii=False)
+    lesson = _run_generate(
+        _make_document(),
+        [valid, DIRTY_REPORT, valid, CLEAN_REPORT],
+        verify_fidelity=True,
+    )
+
+    assert len(lesson.scenes) == 3
+
+
+def test_fidelity_check_raises_when_never_clean() -> None:
+    valid = json.dumps(VALID_LESSON, ensure_ascii=False)
+    with pytest.raises(ValueError, match="保真核对未通过"):
+        _run_generate(
+            _make_document(),
+            [valid, DIRTY_REPORT] * 3,
+            verify_fidelity=True,
         )
 
 
