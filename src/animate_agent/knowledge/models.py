@@ -4,14 +4,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class LessonScene(BaseModel):
-    """One teachable scene in a generated lesson."""
+    """One teachable scene in a generated lesson.
+
+    `narration` carries a floor as well as a ceiling: a scene too thin to fill
+    ~80 characters is a scene too thin to carry its own animation, and should
+    have been merged with a neighbour (see the Knowledge Agent prompt).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
     title: str
     objective: str
-    narration: str = Field(max_length=200)
+    narration: str = Field(min_length=80, max_length=200)
     key_points: list[str] = Field(default_factory=list, min_length=2, max_length=5)
     source_refs: list[str] = Field(default_factory=list)
 

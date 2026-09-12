@@ -33,3 +33,16 @@ def test_load_knowledge_settings_defaults_when_missing(tmp_path: Path) -> None:
 def test_knowledge_settings_validates_range() -> None:
     with pytest.raises(ValueError):
         KnowledgeSettings(max_scenes=0)
+
+
+def test_knowledge_settings_requires_coverage_by_default() -> None:
+    assert KnowledgeSettings().require_full_coverage is True
+
+
+def test_load_knowledge_settings_reads_coverage_flag(tmp_path: Path) -> None:
+    path = tmp_path / "app.yaml"
+    path.write_text("knowledge:\n  require_full_coverage: false\n", encoding="utf-8")
+
+    settings = load_knowledge_settings(path)
+
+    assert settings.require_full_coverage is False

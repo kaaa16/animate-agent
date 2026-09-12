@@ -25,7 +25,11 @@ llm:
   model: deepseek-v4-pro
 
 knowledge:
-  max_scenes: 10
+  # 场景数上限（硬校验，超出会打回重试）。prompt 引导 6~8，这里留一点余量。
+  max_scenes: 8
   max_retries: 3
   temperature: 0.4
+  # 要求原文每个 section / block 都至少被一个场景引用到，防止漏内容。
+  # 若接入的文档带大量导航/页脚等噪声导致频繁重试，可改成 false。
+  require_full_coverage: true
 

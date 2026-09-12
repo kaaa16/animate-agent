@@ -20,21 +20,33 @@ VALID_LESSON = {
         {
             "title": "牛顿第一定律",
             "objective": "理解惯性",
-            "narration": "物体在不受外力时保持静止或匀速直线运动。",
+            "narration": (
+                "物体在不受任何外力作用的时候，会一直保持静止，或者保持匀速直线运动状态，"
+                "这就是牛顿第一定律，也叫做惯性定律。生活中汽车急刹车时人会向前倾，"
+                "正是惯性在起作用，所以乘车时一定要系好安全带。"
+            ),
             "key_points": ["惯性", "匀速直线运动"],
             "source_refs": ["section-1"],
         },
         {
             "title": "牛顿第二定律",
             "objective": "理解 F=ma",
-            "narration": "力是改变物体运动状态的原因，加速度与力成正比。",
+            "narration": (
+                "力是改变物体运动状态的原因。物体加速度的大小跟作用力成正比，"
+                "跟物体的质量成反比，加速度的方向跟作用力的方向相同，"
+                "这就是牛顿第二定律，写成公式就是 F 等于 ma。"
+            ),
             "key_points": ["力", "加速度"],
             "source_refs": ["section-1-block-1"],
         },
         {
             "title": "牛顿第三定律",
             "objective": "理解作用力与反作用力",
-            "narration": "作用力和反作用力大小相等、方向相反。",
+            "narration": (
+                "两个物体之间的作用力和反作用力，总是大小相等、方向相反，"
+                "并且作用在同一条直线上，这就是牛顿第三定律。比如你用力推墙，"
+                "墙同时也用同样大的力推你，所以划船时向后划水，船才会向前走。"
+            ),
             "key_points": ["作用力", "反作用力"],
             "source_refs": ["section-1", "section-1-block-1"],
         },
@@ -164,3 +176,42 @@ def test_generate_rejects_too_many_scenes() -> None:
             [json.dumps(VALID_LESSON, ensure_ascii=False)],
             max_scenes=2,
         )
+
+
+def test_lesson_ir_rejects_short_narration() -> None:
+    scene = {**VALID_LESSON["scenes"][0], "id": "scene-1", "narration": "太短了。"}
+    with pytest.raises(ValueError):
+        LessonIR.model_validate(_complete_lesson(scenes=[scene]))
+
+
+def test_generate_rejects_uncovered_content() -> None:
+    document = _make_document()
+    document.sections.append(
+        Section(
+            id="section-2",
+            title="没人引用的章节",
+            level=1,
+            blocks=[
+                DocumentBlock(id="section-2-block-1", type="paragraph", text="被漏掉的内容"),
+            ],
+        )
+    )
+
+    with pytest.raises(ValueError, match="没有被任何场景"):
+        _run_generate(document, [json.dumps(VALID_LESSON, ensure_ascii=False)])
+
+
+def test_coverage_allows_unreferenced_section_when_its_blocks_are_covered() -> None:
+    # VALID_LESSON references every block of section-1 but never the bare
+    # section id itself; that must still count as covered.
+    lesson = _run_generate(_make_document(), [json.dumps(VALID_LESSON, ensure_ascii=False)])
+
+    assert len(lesson.scenes) == 3
+
+
+def test_generate_rejects_uncovered_blockless_section() -> None:
+    document = _make_document()
+    document.sections.append(Section(id="section-empty", title="空章节", level=1))
+
+    with pytest.raises(ValueError, match="没有被任何场景"):
+        _run_generate(document, [json.dumps(VALID_LESSON, ensure_ascii=False)])

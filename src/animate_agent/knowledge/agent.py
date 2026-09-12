@@ -14,6 +14,7 @@ from animate_agent.llm import LLMClient
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_MAX_SCENES = 10
 DEFAULT_TEMPERATURE = 0.4
+DEFAULT_REQUIRE_FULL_COVERAGE = True
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -44,6 +45,31 @@ def _collect_ids(document: DocumentIR) -> set[str]:
     return ids
 
 
+def _uncovered_ids(document: DocumentIR, scenes: list[Any]) -> list[str]:
+    """Return document ids that no scene references, in stable order.
+
+    A section is covered once every one of its blocks is covered — the blocks
+    are its content, so referencing the section id itself is not required.
+    A blockless section has no other content, so its own id must be referenced.
+    """
+    referenced: set[str] = set()
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        refs = scene.get("source_refs")
+        if isinstance(refs, list):
+            referenced.update(ref for ref in refs if isinstance(ref, str))
+
+    missing: list[str] = []
+    for section in document.sections:
+        block_ids = {block.id for block in section.blocks}
+        if block_ids:
+            missing.extend(sorted(block_ids - referenced))
+        elif section.id not in referenced:
+            missing.append(section.id)
+    return sorted(missing)
+
+
 class KnowledgeAgent:
     """Extract a LessonIR from a DocumentIR via a single, validated LLM call."""
 
@@ -54,11 +80,13 @@ class KnowledgeAgent:
         max_retries: int = DEFAULT_MAX_RETRIES,
         max_scenes: int = DEFAULT_MAX_SCENES,
         temperature: float = DEFAULT_TEMPERATURE,
+        require_full_coverage: bool = DEFAULT_REQUIRE_FULL_COVERAGE,
     ) -> None:
         self._llm = llm
         self._max_retries = max_retries
         self._max_scenes = max_scenes
         self._temperature = temperature
+        self._require_full_coverage = require_full_coverage
 
     async def generate(self, document: DocumentIR) -> LessonIR:
         user_prompt = build_knowledge_prompt(document)
@@ -108,4 +136,11 @@ class KnowledgeAgent:
                     raise ValueError(
                         f"scenes[{index - 1}].source_refs 引用了不存在的 id: {bad}"
                     )
+        if self._require_full_coverage:
+            missing = _uncovered_ids(document, scenes)
+            if missing:
+                raise ValueError(
+                    f"以下原文内容没有被任何场景的 source_refs 覆盖（疑似遗漏）：{missing}。"
+                    "请把遗漏的内容补进相应场景，或调整 source_refs。"
+                )
         return LessonIR.model_validate(data)
