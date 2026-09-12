@@ -20,6 +20,19 @@ SUPPORTED_EXTENSIONS = frozenset({".pptx", ".docx", ".pdf"}) | MARKDOWN_EXTENSIO
 _FRONTMATTER_FENCE = ("---", "...")
 _INLINE_TEXT_TOKENS = frozenset({"text", "code_inline"})
 
+# Real documents routinely mark sections as 【一、基础知识】 or 一、基础知识 rather
+# than with markdown `#`. Without these, the whole document collapses into one
+# flat section and the section structure is lost before the LLM ever sees it.
+_BRACKET_HEADING_RE = re.compile(r"^【\s*([^】]+?)\s*】$")
+_NUMBERED_HEADING_RE = re.compile(
+    r"^(?:第\s*[一二三四五六七八九十百零〇\d]+\s*[章节節讲部分篇]"
+    r"|[一二三四五六七八九十]{1,3}\s*[、.．]"
+    r"|[（(]\s*[一二三四五六七八九十]{1,3}\s*[）)])"
+    r"\s*\S.*$"
+)
+_PLAIN_HEADING_MAX_LENGTH = 40
+_TITLE_MAX_LENGTH = 60
+
 
 def _clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
@@ -52,13 +65,45 @@ def _resolve_title(sections: list[Section]) -> str:
     return "Untitled document"
 
 
-def _finalize(path: Path, sections: list[Section]) -> DocumentIR:
+def _finalize(path: Path, sections: list[Section], *, title: str | None = None) -> DocumentIR:
     return DocumentIR(
         document_id=_document_id(path),
-        title=_resolve_title(sections),
+        title=title or _resolve_title(sections),
         source=DocumentSource(type="file"),
         sections=sections,
     )
+
+
+def _plain_heading(text: str) -> str | None:
+    """Recognize a heading written in a common Chinese plain-text convention."""
+    if len(text) > _PLAIN_HEADING_MAX_LENGTH:
+        return None
+    bracketed = _BRACKET_HEADING_RE.match(text)
+    if bracketed:
+        return bracketed.group(1).strip() or None
+    if _NUMBERED_HEADING_RE.match(text):
+        return text
+    return None
+
+
+def _promote_leading_title(sections: list[Section]) -> str | None:
+    """Promote a leading title line to the document title and drop it from content.
+
+    Plain-text documents often open with the title as a bare first line, before
+    any heading. That line is metadata rather than a teachable block — and the
+    Knowledge Agent prompt already carries the title separately, so leaving it in
+    would only add a block that the source_refs coverage check then demands be
+    cited. Only promotes when real structure follows the preamble.
+    """
+    if len(sections) < 2 or sections[0].id != "section-overview":
+        return None
+    blocks = sections[0].blocks
+    if not blocks or blocks[0].type != "paragraph" or len(blocks[0].text) > _TITLE_MAX_LENGTH:
+        return None
+    title = blocks.pop(0).text
+    if not blocks:
+        sections.pop(0)
+    return title
 
 
 def parse_pptx(path: str | Path) -> DocumentIR:
@@ -191,6 +236,11 @@ def parse_markdown(path: str | Path) -> DocumentIR:
             sections.append(current)
         return current
 
+    def start_section(title: str, level: int) -> None:
+        nonlocal current
+        current = Section(id=f"section-{len(sections) + 1}", title=title, level=level)
+        sections.append(current)
+
     def add_block(
         kind: BlockKind,
         text: str,
@@ -216,12 +266,7 @@ def parse_markdown(path: str | Path) -> DocumentIR:
         if token.type == "heading_open":
             title = _inline_text(tokens[index + 1])
             if title:
-                current = Section(
-                    id=f"section-{len(sections) + 1}",
-                    title=title,
-                    level=int(token.tag[1]),
-                )
-                sections.append(current)
+                start_section(title, int(token.tag[1]))
             index += 1
             continue
 
@@ -246,7 +291,10 @@ def parse_markdown(path: str | Path) -> DocumentIR:
                 )
             else:
                 text = _inline_text(tokens[inline_index])
-                if text:
+                heading = _plain_heading(text) if text else None
+                if heading is not None:
+                    start_section(heading, 1)
+                elif text:
                     add_block("paragraph", text)
             index += 1
             continue
@@ -270,7 +318,7 @@ def parse_markdown(path: str | Path) -> DocumentIR:
 
     if not sections:
         raise ValueError(f"文件中没有可解析的文本内容: {p.name}")
-    return _finalize(p, sections)
+    return _finalize(p, sections, title=_promote_leading_title(sections))
 
 
 def parse_file(path: str | Path) -> DocumentIR:

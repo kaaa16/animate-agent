@@ -178,6 +178,88 @@ def test_parse_markdown_rejects_empty_document(tmp_path: Path) -> None:
         parse_markdown(path)
 
 
+PLAIN_TEXT_SAMPLE = """抛体运动入门教程
+
+【一、基础知识介绍】
+
+1. 定义：把物体以一定的初速度抛出。
+
+【二、解题步骤】
+
+- 建立坐标系。
+"""
+
+
+def test_parse_markdown_recognizes_bracket_headings(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text(PLAIN_TEXT_SAMPLE, encoding="utf-8")
+
+    document = parse_markdown(path)
+
+    assert [section.title for section in document.sections if section.title] == [
+        "一、基础知识介绍",
+        "二、解题步骤",
+    ]
+
+
+def test_parse_markdown_uses_leading_line_as_title(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text(PLAIN_TEXT_SAMPLE, encoding="utf-8")
+
+    document = parse_markdown(path)
+
+    assert document.title == "抛体运动入门教程"
+
+
+def test_parse_markdown_drops_promoted_title_line_from_blocks(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text(PLAIN_TEXT_SAMPLE, encoding="utf-8")
+
+    document = parse_markdown(path)
+
+    texts = [block.text for section in document.sections for block in section.blocks]
+    assert "抛体运动入门教程" not in texts
+    assert all(section.id != "section-overview" for section in document.sections)
+
+
+def test_parse_markdown_keeps_leading_paragraph_when_no_headings(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text("第一段内容。\n\n第二段内容。\n", encoding="utf-8")
+
+    document = parse_markdown(path)
+
+    # Without structure to spare, the leading paragraph is content, not a title.
+    assert len(document.sections) == 1
+    assert [block.text for block in document.sections[0].blocks] == ["第一段内容。", "第二段内容。"]
+
+
+def test_parse_markdown_recognizes_chinese_numbered_headings(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text("教程\n\n一、基础\n\n正文一。\n\n二、进阶\n\n正文二。\n", encoding="utf-8")
+
+    document = parse_markdown(path)
+
+    assert [section.title for section in document.sections if section.title] == [
+        "一、基础",
+        "二、进阶",
+    ]
+
+
+def test_parse_markdown_does_not_treat_long_paragraph_as_heading(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text(
+        "标题\n\n【一、这是一段很长的正文，长到超过了标题长度上限，"
+        "因此不该被当成章节标题，而应原样保留为正文段落。】\n",
+        encoding="utf-8",
+    )
+
+    document = parse_markdown(path)
+
+    assert [section.title for section in document.sections if section.title] == []
+    texts = [block.text for section in document.sections for block in section.blocks]
+    assert any("很长的正文" in text for text in texts)
+
+
 def test_parse_file_dispatches_markdown_and_text(tmp_path: Path) -> None:
     md = tmp_path / "sample.md"
     md.write_text("# 标题\n\n正文。\n", encoding="utf-8")
