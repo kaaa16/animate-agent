@@ -9,12 +9,13 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict
 
+from animate_agent.documents.file_parser import SUPPORTED_EXTENSIONS
 from animate_agent.documents.models import DocumentIR
 from animate_agent.documents.service import ingest_file, ingest_url
 from animate_agent.knowledge.models import LessonIR
 from animate_agent.knowledge.service import generate_lesson
 
-ALLOWED_EXTENSIONS = {".pptx", ".docx", ".pdf"}
+ALLOWED_EXTENSIONS = SUPPORTED_EXTENSIONS
 
 
 class FromUrlRequest(BaseModel):
@@ -57,9 +58,10 @@ async def create_lesson_from_url(request: FromUrlRequest) -> LessonIR:
 async def create_lesson_from_file(file: Annotated[UploadFile, File()]) -> LessonIR:
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
+        supported = ", ".join(sorted(ALLOWED_EXTENSIONS))
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的文件格式: {ext}。支持: .pptx, .docx, .pdf",
+            detail=f"不支持的文件格式: {ext}。支持: {supported}",
         )
     content = await file.read()
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:

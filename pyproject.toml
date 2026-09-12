@@ -26,6 +26,9 @@ dependencies = [
   "pyyaml>=6.0",
 ]
 
+[project.scripts]
+animate-agent = "animate_agent.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.4.0",

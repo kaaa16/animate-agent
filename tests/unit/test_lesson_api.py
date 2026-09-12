@@ -111,7 +111,24 @@ def test_lessons_from_file_api(monkeypatch) -> None:
 def test_lessons_from_file_rejects_unknown_extension() -> None:
     response = TestClient(api.app).post(
         "/api/lessons/from-file",
-        files={"file": ("sample.txt", b"dummy", "text/plain")},
+        files={"file": ("sample.xyz", b"dummy", "application/octet-stream")},
     )
 
     assert response.status_code == 400
+
+
+def test_lessons_from_file_accepts_markdown(monkeypatch) -> None:
+    expected = _expected_lesson()
+
+    async def fake_generate_lesson(document: DocumentIR) -> LessonIR:
+        assert document.sections[0].title == "标题"
+        return expected
+
+    monkeypatch.setattr(api, "generate_lesson", fake_generate_lesson)
+
+    response = TestClient(api.app).post(
+        "/api/lessons/from-file",
+        files={"file": ("sample.md", "# 标题\n\n正文。\n".encode(), "text/markdown")},
+    )
+
+    assert response.status_code == 200

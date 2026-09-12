@@ -1,14 +1,24 @@
-"""Deterministic file (pptx/docx/pdf) to DocumentIR parsers."""
+"""Deterministic file (pptx/docx/pdf/markdown/text) to DocumentIR parsers."""
 
 from __future__ import annotations
 
 import hashlib
 import re
 from pathlib import Path
+from typing import Literal
+
+from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from animate_agent.documents.models import DocumentBlock, DocumentIR, DocumentSource, Section
 
-SUPPORTED_EXTENSIONS = frozenset({".pptx", ".docx", ".pdf"})
+BlockKind = Literal["paragraph", "code", "list", "image"]
+
+MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown", ".txt"})
+SUPPORTED_EXTENSIONS = frozenset({".pptx", ".docx", ".pdf"}) | MARKDOWN_EXTENSIONS
+
+_FRONTMATTER_FENCE = ("---", "...")
+_INLINE_TEXT_TOKENS = frozenset({"text", "code_inline"})
 
 
 def _clean_text(value: str) -> str:
@@ -131,6 +141,138 @@ def parse_pdf(path: str | Path) -> DocumentIR:
     return _finalize(p, sections)
 
 
+def _strip_frontmatter(text: str) -> str:
+    """Drop a leading YAML frontmatter block so its keys don't leak into the content."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return text
+    for index in range(1, len(lines)):
+        if lines[index].strip() in _FRONTMATTER_FENCE:
+            return "\n".join(lines[index + 1 :])
+    return text
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"文件不是 UTF-8 文本，无法解析: {path.name}") from exc
+
+
+def _inline_text(token: Token) -> str:
+    """Flatten an inline token's children to plain text, dropping markdown markers."""
+    parts: list[str] = []
+    for child in token.children or []:
+        if child.type in _INLINE_TEXT_TOKENS:
+            parts.append(child.content)
+        elif child.type in {"softbreak", "hardbreak"}:
+            parts.append(" ")
+        elif child.type == "image":
+            parts.append(child.content)  # alt text
+    return _clean_text("".join(parts))
+
+
+def parse_markdown(path: str | Path) -> DocumentIR:
+    """Convert Markdown / plain text into DocumentIR.
+
+    Used for both `.md` and `.txt`: markdown gives the structure, and plain text
+    simply arrives as paragraphs under a single overview section. `.txt` authored
+    with markdown-style headings therefore parses the same way.
+    """
+    p = Path(path)
+    tokens = MarkdownIt("commonmark").parse(_strip_frontmatter(_read_text(p)))
+    sections: list[Section] = []
+    current: Section | None = None
+
+    def target_section() -> Section:
+        nonlocal current
+        if current is None:
+            current = Section(id="section-overview", title="", level=1)
+            sections.append(current)
+        return current
+
+    def add_block(
+        kind: BlockKind,
+        text: str,
+        *,
+        language: str | None = None,
+        source_ref: str | None = None,
+    ) -> None:
+        section = target_section()
+        section.blocks.append(
+            DocumentBlock(
+                id=f"{section.id}-block-{len(section.blocks) + 1}",
+                type=kind,
+                text=text,
+                language=language,
+                source_ref=source_ref,
+            )
+        )
+
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+
+        if token.type == "heading_open":
+            title = _inline_text(tokens[index + 1])
+            if title:
+                current = Section(
+                    id=f"section-{len(sections) + 1}",
+                    title=title,
+                    level=int(token.tag[1]),
+                )
+                sections.append(current)
+            index += 1
+            continue
+
+        if token.type == "fence":
+            code = token.content.rstrip("\n")
+            if code.strip():
+                add_block("code", code, language=token.info.strip() or None)
+            index += 1
+            continue
+
+        if token.type == "paragraph_open":
+            inline_index = index + 1
+            children = tokens[inline_index].children or []
+            if len(children) == 1 and children[0].type == "image":
+                # A paragraph that is nothing but an image is an image block.
+                image = children[0]
+                src = image.attrGet("src")
+                add_block(
+                    "image",
+                    _clean_text(image.content),
+                    source_ref=str(src) if src is not None else None,
+                )
+            else:
+                text = _inline_text(tokens[inline_index])
+                if text:
+                    add_block("paragraph", text)
+            index += 1
+            continue
+
+        if token.type in {"bullet_list_open", "ordered_list_open"}:
+            closing = token.type.replace("_open", "_close")
+            items: list[str] = []
+            index += 1
+            while index < len(tokens) and tokens[index].type != closing:
+                if tokens[index].type == "inline":
+                    item = _inline_text(tokens[index])
+                    if item:
+                        items.append(item)
+                index += 1
+            if items:
+                add_block("list", "\n".join(items))
+            index += 1
+            continue
+
+        index += 1
+
+    if not sections:
+        raise ValueError(f"文件中没有可解析的文本内容: {p.name}")
+    return _finalize(p, sections)
+
+
 def parse_file(path: str | Path) -> DocumentIR:
     """Dispatch on file extension and return a DocumentIR."""
     p = Path(path)
@@ -141,4 +283,7 @@ def parse_file(path: str | Path) -> DocumentIR:
         return parse_docx(p)
     if ext == ".pdf":
         return parse_pdf(p)
-    raise ValueError(f"不支持的文件格式: {ext}。支持: .pptx, .docx, .pdf")
+    if ext in MARKDOWN_EXTENSIONS:
+        return parse_markdown(p)
+    supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+    raise ValueError(f"不支持的文件格式: {ext}。支持: {supported}")

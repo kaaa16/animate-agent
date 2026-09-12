@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from animate_agent.documents.file_parser import parse_docx, parse_file, parse_pdf, parse_pptx
+from animate_agent.documents.file_parser import (
+    parse_docx,
+    parse_file,
+    parse_markdown,
+    parse_pdf,
+    parse_pptx,
+)
 from animate_agent.documents.models import DocumentIR
 
 
@@ -84,8 +90,99 @@ def test_parse_file_dispatches(tmp_path: Path) -> None:
 
 
 def test_parse_file_rejects_unknown_extension(tmp_path: Path) -> None:
-    path = tmp_path / "sample.txt"
+    path = tmp_path / "sample.xyz"
     path.write_text("hello", encoding="utf-8")
 
     with pytest.raises(ValueError):
         parse_file(path)
+
+
+MARKDOWN_SAMPLE = """---
+title: 前端元数据
+---
+
+# 力学基础
+
+物体在不受外力时保持静止。
+
+## 工具准备
+
+- 木工锯
+- 木工凿
+- 木工刨
+
+```python
+print("hello")
+```
+"""
+
+
+def test_parse_markdown_splits_headings_into_sections(tmp_path: Path) -> None:
+    path = tmp_path / "sample.md"
+    path.write_text(MARKDOWN_SAMPLE, encoding="utf-8")
+
+    document = parse_markdown(path)
+
+    assert document.source.type == "file"
+    assert [section.title for section in document.sections] == ["力学基础", "工具准备"]
+    assert [section.level for section in document.sections] == [1, 2]
+
+
+def test_parse_markdown_skips_frontmatter(tmp_path: Path) -> None:
+    path = tmp_path / "sample.md"
+    path.write_text(MARKDOWN_SAMPLE, encoding="utf-8")
+
+    text = " ".join(
+        block.text for section in parse_markdown(path).sections for block in section.blocks
+    )
+
+    assert "前端元数据" not in text
+
+
+def test_parse_markdown_builds_paragraph_list_and_code_blocks(tmp_path: Path) -> None:
+    path = tmp_path / "sample.md"
+    path.write_text(MARKDOWN_SAMPLE, encoding="utf-8")
+
+    kinds = {block.type for section in parse_markdown(path).sections for block in section.blocks}
+
+    assert kinds == {"paragraph", "list", "code"}
+
+
+def test_parse_markdown_strips_inline_markers(tmp_path: Path) -> None:
+    path = tmp_path / "sample.md"
+    path.write_text(
+        "# 标题\n\n这是 **加粗** 和 [链接](https://example.com) 文本。\n",
+        encoding="utf-8",
+    )
+
+    text = parse_markdown(path).sections[0].blocks[0].text
+
+    assert text == "这是 加粗 和 链接 文本。"
+
+
+def test_parse_markdown_handles_plain_text_without_headings(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text("第一段内容。\n\n第二段内容。\n", encoding="utf-8")
+
+    document = parse_markdown(path)
+
+    assert len(document.sections) == 1
+    assert [block.text for block in document.sections[0].blocks] == ["第一段内容。", "第二段内容。"]
+
+
+def test_parse_markdown_rejects_empty_document(tmp_path: Path) -> None:
+    path = tmp_path / "empty.md"
+    path.write_text("\n\n   \n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="没有可解析"):
+        parse_markdown(path)
+
+
+def test_parse_file_dispatches_markdown_and_text(tmp_path: Path) -> None:
+    md = tmp_path / "sample.md"
+    md.write_text("# 标题\n\n正文。\n", encoding="utf-8")
+    txt = tmp_path / "sample.txt"
+    txt.write_text("正文。\n", encoding="utf-8")
+
+    assert isinstance(parse_file(md), DocumentIR)
+    assert isinstance(parse_file(txt), DocumentIR)
