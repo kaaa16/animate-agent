@@ -228,6 +228,7 @@ def parse_markdown(path: str | Path) -> DocumentIR:
     tokens = MarkdownIt("commonmark").parse(_strip_frontmatter(_read_text(p)))
     sections: list[Section] = []
     current: Section | None = None
+    section_counter = 0
 
     def target_section() -> Section:
         nonlocal current
@@ -237,8 +238,12 @@ def parse_markdown(path: str | Path) -> DocumentIR:
         return current
 
     def start_section(title: str, level: int) -> None:
-        nonlocal current
-        current = Section(id=f"section-{len(sections) + 1}", title=title, level=level)
+        nonlocal current, section_counter
+        # Count sections rather than reading len(sections): the synthetic
+        # section-overview sits in that list too, and letting it consume a
+        # number leaves a gap (section-2 onwards, with no section-1).
+        section_counter += 1
+        current = Section(id=f"section-{section_counter}", title=title, level=level)
         sections.append(current)
 
     def add_block(

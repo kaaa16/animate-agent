@@ -17,7 +17,11 @@ class LessonScene(BaseModel):
     title: str
     objective: str
     narration: str = Field(min_length=80, max_length=200)
-    key_points: list[str] = Field(default_factory=list, min_length=2, max_length=5)
+    # The cap must stay above the longest single list the source can hand a
+    # scene: a source block listing N items forces one scene to cover all N, and
+    # a cap below N makes the model silently drop items (and then contradict its
+    # own objective, which still says "N").
+    key_points: list[str] = Field(default_factory=list, min_length=2, max_length=8)
     source_refs: list[str] = Field(default_factory=list)
 
 

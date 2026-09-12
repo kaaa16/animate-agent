@@ -178,6 +178,25 @@ def test_generate_rejects_too_many_scenes() -> None:
         )
 
 
+def _scene_with_key_points(count: int) -> dict:
+    return {
+        **VALID_LESSON["scenes"][0],
+        "id": "scene-1",
+        "key_points": [f"要点{i}" for i in range(count)],
+    }
+
+
+def test_lesson_scene_allows_key_points_up_to_the_cap() -> None:
+    lesson = LessonIR.model_validate(_complete_lesson(scenes=[_scene_with_key_points(8)]))
+
+    assert len(lesson.scenes[0].key_points) == 8
+
+
+def test_lesson_scene_rejects_key_points_beyond_the_cap() -> None:
+    with pytest.raises(ValueError):
+        LessonIR.model_validate(_complete_lesson(scenes=[_scene_with_key_points(9)]))
+
+
 def test_lesson_ir_rejects_short_narration() -> None:
     scene = {**VALID_LESSON["scenes"][0], "id": "scene-1", "narration": "太短了。"}
     with pytest.raises(ValueError):

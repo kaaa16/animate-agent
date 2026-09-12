@@ -233,6 +233,16 @@ def test_parse_markdown_keeps_leading_paragraph_when_no_headings(tmp_path: Path)
     assert [block.text for block in document.sections[0].blocks] == ["第一段内容。", "第二段内容。"]
 
 
+def test_parse_markdown_numbers_sections_from_one(tmp_path: Path) -> None:
+    path = tmp_path / "sample.txt"
+    path.write_text(PLAIN_TEXT_SAMPLE, encoding="utf-8")
+
+    document = parse_markdown(path)
+
+    # The synthetic overview must not consume a number and leave a gap.
+    assert [section.id for section in document.sections] == ["section-1", "section-2"]
+
+
 def test_parse_markdown_recognizes_chinese_numbered_headings(tmp_path: Path) -> None:
     path = tmp_path / "sample.txt"
     path.write_text("教程\n\n一、基础\n\n正文一。\n\n二、进阶\n\n正文二。\n", encoding="utf-8")
