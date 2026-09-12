@@ -12,6 +12,8 @@ from animate_agent.knowledge.prompts import KNOWLEDGE_SYSTEM_PROMPT, build_knowl
 from animate_agent.llm import LLMClient
 
 DEFAULT_MAX_RETRIES = 3
+DEFAULT_MAX_SCENES = 10
+DEFAULT_TEMPERATURE = 0.4
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -45,9 +47,18 @@ def _collect_ids(document: DocumentIR) -> set[str]:
 class KnowledgeAgent:
     """Extract a LessonIR from a DocumentIR via a single, validated LLM call."""
 
-    def __init__(self, llm: LLMClient, *, max_retries: int = DEFAULT_MAX_RETRIES) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        *,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        max_scenes: int = DEFAULT_MAX_SCENES,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> None:
         self._llm = llm
         self._max_retries = max_retries
+        self._max_scenes = max_scenes
+        self._temperature = temperature
 
     async def generate(self, document: DocumentIR) -> LessonIR:
         user_prompt = build_knowledge_prompt(document)
@@ -57,7 +68,7 @@ class KnowledgeAgent:
         ]
         last_error = ""
         for _attempt in range(1, self._max_retries + 1):
-            raw = await self._llm.chat(messages, temperature=0.4, max_tokens=8192)
+            raw = await self._llm.chat(messages, temperature=self._temperature, max_tokens=8192)
             try:
                 data = _extract_json(raw)
                 return self._validate(document, data)
@@ -83,6 +94,8 @@ class KnowledgeAgent:
         scenes = data.get("scenes")
         if not isinstance(scenes, list) or not scenes:
             raise ValueError("输出缺少非空的 scenes 列表")
+        if len(scenes) > self._max_scenes:
+            raise ValueError(f"scenes 数量 {len(scenes)} 超过上限 {self._max_scenes}")
         valid_ids = _collect_ids(document)
         for index, scene in enumerate(scenes, start=1):
             if not isinstance(scene, dict):

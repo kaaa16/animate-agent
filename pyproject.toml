@@ -23,6 +23,7 @@ dependencies = [
   "python-pptx>=0.6.21",
   "python-docx>=0.8.11",
   "python-multipart>=0.0.6",
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from animate_agent.config import load_knowledge_settings
 from animate_agent.documents.models import DocumentIR
 from animate_agent.knowledge.agent import KnowledgeAgent
 from animate_agent.knowledge.models import LessonIR
@@ -23,8 +24,14 @@ async def generate_lesson(
     llm: LLMClient | None = None
     owns_client = False
     if agent is None:
+        settings = load_knowledge_settings()
         llm = LLMClient(load_llm_config())
-        agent = KnowledgeAgent(llm)
+        agent = KnowledgeAgent(
+            llm,
+            max_retries=settings.max_retries,
+            max_scenes=settings.max_scenes,
+            temperature=settings.temperature,
+        )
         owns_client = True
     try:
         lesson = await agent.generate(document)

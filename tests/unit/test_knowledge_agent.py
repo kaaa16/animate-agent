@@ -58,7 +58,7 @@ def _make_document() -> DocumentIR:
     )
 
 
-def _run_generate(document: DocumentIR, responses: list[str]) -> LessonIR:
+def _run_generate(document: DocumentIR, responses: list[str], *, max_scenes: int = 10) -> LessonIR:
     async def run() -> LessonIR:
         idx = 0
 
@@ -75,7 +75,7 @@ def _run_generate(document: DocumentIR, responses: list[str]) -> LessonIR:
                 LLMConfig(base_url="http://test", api_key="k", model="m"),
                 client=client,
             )
-            agent = KnowledgeAgent(llm)
+            agent = KnowledgeAgent(llm, max_scenes=max_scenes)
             return await agent.generate(document)
 
     return asyncio.run(run())
@@ -155,3 +155,12 @@ def test_generate_rejects_invalid_source_ref() -> None:
     bad = {**VALID_LESSON, "scenes": [scene, *VALID_LESSON["scenes"][1:]]}
     with pytest.raises(ValueError):
         _run_generate(_make_document(), [json.dumps(bad, ensure_ascii=False)])
+
+
+def test_generate_rejects_too_many_scenes() -> None:
+    with pytest.raises(ValueError):
+        _run_generate(
+            _make_document(),
+            [json.dumps(VALID_LESSON, ensure_ascii=False)],
+            max_scenes=2,
+        )
