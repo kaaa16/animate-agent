@@ -10,13 +10,18 @@ model produced with no feedback at all. Everything the validator flags there is
 a constraint the prompt failed to teach.
 
 `StoryboardAgent(debug_dir=...)` writes every rejected response to disk, numbered
-by attempt. This script is what turns one of those dumps into a list of codes.
+by attempt, as a `…-attempt-N-raw.txt` / `…-attempt-N-error.txt` pair. The error
+file is the authoritative record of what the validator said *during that run*;
+this script re-derives it from the raw text. The difference between the two is
+the point: replaying an old attempt through a *newer* validator answers "would
+today's rules have rejected what the model wrote before the rules changed?", and
+that is measurable without spending an LLM call.
 
 Usage
 -----
 
     python -m tools.inspect_storyboard_output \
-        data/generated/s1-run/storyboard-lesson-985e1285ffd6ef6b-raw-attempt-1.txt \
+        data/generated/s1-run/storyboard-lesson-985e1285ffd6ef6b-attempt-1-raw.txt \
         --lesson data/generated/lesson-985e1285ffd6ef6b.json
 
 Add `--document` to also check that every `source_refs` id really exists; without

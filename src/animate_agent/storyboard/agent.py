@@ -83,19 +83,26 @@ class StoryboardAgent:
         self._max_tokens = max_tokens
         self._debug_dir = debug_dir
 
-    def _dump_raw(self, lesson: LessonIR, attempt: int, raw: str) -> None:
-        """Persist a rejected response so the next failure is diagnosable.
+    def _dump_rejection(self, lesson: LessonIR, attempt: int, raw: str, reason: str) -> None:
+        """Persist a rejected response *and the complaint that rejected it*.
 
-        Without this the only trace of a bad response is pydantic's complaint
-        about it, which says what was wrong but never what was *there* — so the
-        fix gets designed against a guess. Attempts are numbered: comparing
-        attempt 1 with attempt 3 shows whether the retry feedback landed.
+        Either half alone is a guess. The raw text says what the model produced
+        but never what was wanted; the complaint says what was wanted but never
+        what was there — so with only one of them the fix gets designed against a
+        guess. Together they answer the question that actually matters when a run
+        comes back worse than the last one: did the retry feedback land, or did
+        the model retreat somewhere legal instead of fixing the problem?
+        Attempts are numbered, so attempt 1 can be diffed against what followed.
         """
         if self._debug_dir is None:
             return
         self._debug_dir.mkdir(parents=True, exist_ok=True)
-        name = f"{_derive_storyboard_id(lesson)}-raw-attempt-{attempt}.txt"
-        (self._debug_dir / name).write_text(raw, encoding="utf-8")
+        stem = f"{_derive_storyboard_id(lesson)}-attempt-{attempt}"
+        # The raw text is written byte-for-byte as returned: it is fed back
+        # through the validator by `tools/inspect_storyboard_output.py`, so a
+        # header written into it would change the thing being inspected.
+        (self._debug_dir / f"{stem}-raw.txt").write_text(raw, encoding="utf-8")
+        (self._debug_dir / f"{stem}-error.txt").write_text(reason, encoding="utf-8")
 
     async def generate(self, lesson: LessonIR, document: DocumentIR) -> StoryboardIR:
         user_prompt = build_storyboard_prompt(lesson, allowed_renderers=self._allowed_renderers)
@@ -113,7 +120,7 @@ class StoryboardAgent:
                 return self._validate(lesson, document, data)
             except ValueError as exc:
                 last_error = str(exc)
-                self._dump_raw(lesson, attempt, raw)
+                self._dump_rejection(lesson, attempt, raw, last_error)
                 messages = [
                     {"role": "system", "content": STORYBOARD_SYSTEM_PROMPT},
                     {
@@ -125,7 +132,7 @@ class StoryboardAgent:
                         ),
                     },
                 ]
-        where = f"（模型原始输出已落盘到 {self._debug_dir}）" if self._debug_dir else ""
+        where = f"（模型原始输出与被拒理由已落盘到 {self._debug_dir}）" if self._debug_dir else ""
         raise ValueError(
             f"Storyboard Agent 多次重试仍无法生成有效 StoryboardIR：{last_error}{where}"
         )

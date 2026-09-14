@@ -197,20 +197,57 @@ def test_generate_raises_after_retries() -> None:
         _run_generate(["bad", "bad", "bad"])
 
 
-def test_rejected_responses_are_dumped_when_a_debug_dir_is_given(tmp_path: Path) -> None:
-    # The only other trace of a bad response is pydantic's complaint about it,
-    # which says what was wrong but never what was there. Attempts are numbered
-    # so attempt 1 vs attempt 3 shows whether the retry feedback landed.
+def test_each_rejected_attempt_dumps_its_response_and_its_complaint(tmp_path: Path) -> None:
+    # Both halves, always: the response alone shows where the model drifted but
+    # not what was wanted, the complaint alone the reverse. Attempts are numbered
+    # so attempt 1 can be diffed against what followed it.
     with pytest.raises(ValueError):
         _run_generate(["bad", "bad", "bad"], debug_dir=tmp_path)
 
     dumps = sorted(path.name for path in tmp_path.iterdir())
-    assert dumps == [f"storyboard-lesson-doc1-raw-attempt-{n}.txt" for n in (1, 2, 3)]
-    assert (tmp_path / dumps[0]).read_text(encoding="utf-8") == "bad"
+    assert dumps == [
+        name
+        for attempt in (1, 2, 3)
+        for name in (
+            f"storyboard-lesson-doc1-attempt-{attempt}-error.txt",
+            f"storyboard-lesson-doc1-attempt-{attempt}-raw.txt",
+        )
+    ]
+    raw_one = (tmp_path / "storyboard-lesson-doc1-attempt-1-raw.txt").read_text(encoding="utf-8")
+    assert raw_one == "bad"
+
+
+def test_the_dumped_raw_response_stays_replayable(tmp_path: Path) -> None:
+    # The raw dump is fed back through the validator by
+    # `tools/inspect_storyboard_output.py`, so it has to stay byte-for-byte what
+    # the model returned — a header written into it would change the very thing
+    # being inspected. The reason goes in its own file for that reason.
+    broken = json.loads(json.dumps(VALID_STORYBOARD))
+    broken["scenes"][0]["objects"][0]["role"] = "banana"
+
+    with pytest.raises(ValueError):
+        _run_generate([json.dumps(broken, ensure_ascii=False)] * 3, debug_dir=tmp_path)
+
+    raw = (tmp_path / "storyboard-lesson-doc1-attempt-1-raw.txt").read_text(encoding="utf-8")
+    assert json.loads(raw)["scenes"][0]["objects"][0]["role"] == "banana"
+
+
+def test_the_dumped_error_says_why_the_attempt_was_rejected(tmp_path: Path) -> None:
+    # Before this, the reason existed only inside the *next* request's prompt and
+    # died with the process: a degradation could be seen in the raw dumps but
+    # never explained, so the fix got designed against a guess.
+    broken = json.loads(json.dumps(VALID_STORYBOARD))
+    broken["scenes"][0]["objects"][0]["role"] = "banana"
+
+    with pytest.raises(ValueError):
+        _run_generate([json.dumps(broken, ensure_ascii=False)] * 3, debug_dir=tmp_path)
+
+    reason = (tmp_path / "storyboard-lesson-doc1-attempt-1-error.txt").read_text(encoding="utf-8")
+    assert "unknown_role" in reason
 
 
 def test_the_failure_message_points_at_the_dump(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="原始输出已落盘"):
+    with pytest.raises(ValueError, match="已落盘"):
         _run_generate(["bad", "bad", "bad"], debug_dir=tmp_path)
 
 
