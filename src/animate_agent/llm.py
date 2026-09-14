@@ -5,9 +5,16 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+#: Local key file, resolved against the repository root rather than the working
+#: directory so `animate-agent` reads the same file from anywhere it is invoked.
+#: Written by a developer, never committed: `.gitignore` covers `.env` and
+#: `.env.*` except the `*.example` files.
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 #: Output budget for one chat call. The configured endpoint serves a *reasoning*
 #: model: `max_tokens` covers the hidden reasoning plus the visible answer, and
@@ -93,8 +100,42 @@ class LLMClient:
             await self._client.aclose()
 
 
+def load_env_file(path: Path = ENV_FILE) -> list[str]:
+    """Fill `os.environ` from a `.env` file, returning the names it actually set.
+
+    A name already present in the environment is left alone and not reported: a
+    real `$env:DEEPSEEK_KEY` is a deliberate override, and a file sitting in the
+    working copy must not quietly beat it. A missing file is not an error — that
+    is the normal case for anyone exporting the variable directly.
+    """
+    if not path.is_file():
+        return []
+    filled: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name, separator, value = line.partition("=")
+        if not separator:
+            continue  # a blank line, or a comment that assigns nothing
+        name = name.strip()
+        if name.startswith("export "):
+            # What most documents show, and what gets copy-pasted. Keeping the
+            # name as `export KEY` would set a variable nobody reads while the
+            # real one silently never loads.
+            name = name[len("export ") :].strip()
+        if not name or name.startswith("#"):
+            continue
+        if name not in os.environ:
+            os.environ[name] = value.strip().strip("'\"")
+            filled.append(name)
+    return filled
+
+
 def load_llm_config() -> LLMConfig:
-    """Build an LLMConfig from environment variables (DeepSeek defaults)."""
+    """Build an LLMConfig from the environment, falling back to the `.env` file.
+
+    The file is read here rather than at import time so that importing this
+    module never mutates the process environment as a side effect.
+    """
+    load_env_file(ENV_FILE)
     base_url = os.environ.get("DEEPSEEK_BASE", "https://api.deepseek.com")
     api_key = os.environ.get("DEEPSEEK_KEY", "")
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
