@@ -47,6 +47,10 @@ function fakeContext() {
     moveTo: record("moveTo"),
     lineTo: record("lineTo"),
     arc: record("arc"),
+    // A body carries a live `heading`, so the drawer works in a translated and
+    // rotated frame rather than adding an angle at every corner.
+    translate: record("translate"),
+    rotate: record("rotate"),
     quadraticCurveTo: record("quadraticCurveTo"),
     fill: record("fill"),
     stroke: record("stroke"),
@@ -61,7 +65,13 @@ function fakeContext() {
     // context that no browser provides.
     measureText: (text) => ({ width: String(text).length * 7 }),
   };
-  // Style properties are assigned, never read back, so plain fields suffice.
+  // Style properties are assigned and never read back by the drawers — but they
+  // are recorded, because a highlight *is* a style change. `applyHighlight` sets
+  // `shadowColor`/`shadowBlur` and nothing else, so a plain field would swallow
+  // the only thing most beats do, and the "no two beats alike" check below would
+  // call every highlight-only beat a still. It did, on the first run: the
+  // avoidance document's 系统四大组成 and 前方180度扫描 beats differ in which
+  // elements glow and in nothing else.
   for (const name of [
     "fillStyle",
     "strokeStyle",
@@ -73,7 +83,14 @@ function fakeContext() {
     "textAlign",
     "textBaseline",
   ]) {
-    ctx[name] = null;
+    let value = null;
+    Object.defineProperty(ctx, name, {
+      get: () => value,
+      set: (next) => {
+        value = next;
+        calls.push({ name, args: [next] });
+      },
+    });
   }
   return ctx;
 }
@@ -198,6 +215,37 @@ function touchDistance(scene, obstacleId) {
  * Equality is exact on purpose: the two values are a direct assignment apart, so
  * any drift at all is a real defect rather than floating-point noise.
  */
+/**
+ * The recorded calls as one comparable string.
+ *
+ * `record` stores `{name, args}` objects, so joining the array directly yields
+ * `[object Object]|[object Object]` — every call identical to every other, which
+ * makes the "no two beats alike" comparison below pass on nothing. It did: the
+ * first version of that check reported the avoidance scene's step-5 as a still,
+ * and every element in it as "same", for exactly this reason.
+ */
+function serializeCalls(calls) {
+  return calls.map(({ name, args }) => `${name}(${args.map(String).join(",")})`).join("|");
+}
+
+/**
+ * Whether this element is *supposed* to draw nothing at this moment.
+ *
+ * `enabled: false` on an emitter or a zone is a beat doing its job — the
+ * avoidance document's 扫描周期 beat turns the scanning beam off. Drawing
+ * nothing is then the correct answer, and the "invisible element" check below
+ * would otherwise call a working beat a defect.
+ */
+function switchedOff(element, view) {
+  if (element.kind === "emitter" || element.kind === "zone") {
+    return view.lookup(element.id, "enabled", true) === false;
+  }
+  if (element.kind === "body" || element.kind === "trace") {
+    return view.lookup(element.id, "visible", true) === false;
+  }
+  return false;
+}
+
 function brokenAttachment(scene, simulation) {
   for (const [childId, parentId] of Object.entries(scene.attachment ?? {})) {
     const child = simulation.live.get(childId);
@@ -244,6 +292,8 @@ function main() {
   for (const scene of spec.scenes) {
     const simulation = createSimulation(scene, spec.stage);
     const everDanger = new Set();
+    /** What each beat drew, for the "no two consecutive beats alike" check below. */
+    const pictures = [];
     // Tracked so the attachment check below cannot pass vacuously. If nothing
     // ever moves sideways, "mounted things match their parent" is true for the
     // same reason 0 === 0 is, and the check would prove nothing at all.
@@ -272,6 +322,7 @@ function main() {
         }
       }
       const view = viewFor(scene, simulation, stepIndex, THEME);
+      const beat = [];
       for (const element of scene.elements) {
         const ctx = fakeContext();
         try {
@@ -283,14 +334,39 @@ function main() {
           );
           return 1;
         }
-        if (ctx.calls.length === 0) {
+        if (ctx.calls.length === 0 && !switchedOff(element, view)) {
           console.error(
             `\n❌ ${scene.id} / 元素 \`${element.id}\` (${element.kind}) ` +
               `没发出任何绘制调用——它在画面上是隐形的，但不会报错`,
           );
           return 1;
         }
+        beat.push(`${element.id}: ${serializeCalls(ctx.calls)}`);
         drawn += 1;
+      }
+      pictures.push({ id: scene.steps[stepIndex].id, calls: beat.join("\n") });
+    }
+
+    // Every beat must draw something different from the one before it.
+    //
+    // This is `step_state_inert`'s twin, one layer out: that rule checks the
+    // contract, this checks what actually came out of the renderer. A beat that
+    // repeats the previous picture is a slide, and the failure is invisible — no
+    // exception, no missing element, just a step the viewer clicks through
+    // without the screen doing anything.
+    //
+    // The number that motivated it, measured over the three sample documents:
+    // 20 of 29 `object_states` targeted a prop no drawing code read, and 6 of the
+    // 7 scenes came out as stills. Both halves are needed because they fail
+    // differently — a rule can be right while the drawer ignores it, and a
+    // drawer can read a prop while the value it was handed changes nothing.
+    for (let index = 1; index < pictures.length; index += 1) {
+      if (pictures[index].calls === pictures[index - 1].calls) {
+        console.error(
+          `\n❌ ${scene.id} / 节拍 \`${pictures[index].id}\` 画出来的画面与上一拍` +
+            `（\`${pictures[index - 1].id}\`）逐调用完全相同——这一拍在屏幕上是静止的`,
+        );
+        return 1;
       }
     }
     console.log(

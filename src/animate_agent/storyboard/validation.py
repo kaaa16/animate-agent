@@ -27,6 +27,7 @@ from animate_agent.rendering.registry import (
     PRIMITIVE_BY_NAME,
     ROLE_TO_PRIMITIVE,
     T2_GLYPH_NAMES,
+    stage_range,
 )
 from animate_agent.storyboard.models import StoryboardIR, StoryboardScene
 
@@ -350,6 +351,50 @@ def _check_prop(
     )
 
 
+def _check_stage_range(
+    prop: str,
+    value: object,
+    role: str,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """A distance prop must be a distance *on the stage*, not in the document's units.
+
+    The failure this catches has no symptom at either layer that could catch it.
+    `lidar_emitter.radius: 8` is eight metres, which is what the document says,
+    and it is a legal positive float, so pydantic takes it, the validator takes
+    it, and layout draws a fan eight pixels across — smaller than a full stop, on
+    a 960-pixel stage. `radius: 0.8` is the same story at 0.8 pixels. Nothing
+    errors; the picture is just empty where the lesson says the interesting thing
+    is, and the only way anyone finds out is by looking.
+
+    Rejecting rather than silently rescaling, because the two meanings need
+    different fixes: a model told "40~420 舞台像素" writes a legible number, while
+    a model whose 8-metres value was quietly rewritten to 40 has learned nothing
+    and will do it again on the next document.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return
+    primitive_name = ROLE_TO_PRIMITIVE.get(role)
+    if primitive_name is None:
+        return  # already reported as unknown_role
+    bounds = stage_range(primitive_name, prop)
+    if bounds is None:
+        return
+    low, high = bounds
+    if low <= value <= high:
+        return
+    issues.append(
+        ValidationIssue(
+            "prop_out_of_range",
+            where,
+            f"`{prop}` 的单位是**舞台像素**（画布 960×600），不是文档里的物理量；"
+            f"{value:g} 会被原样画成 {value:g} 个像素。"
+            f"`{primitive_name}.{prop}` 要落在 {low:g}~{high:g} 之间",
+        )
+    )
+
+
 def _check_roles_and_props(
     scene: StoryboardScene,
     where: str,
@@ -387,6 +432,7 @@ def _check_roles_and_props(
 
         for prop in obj.props:
             _check_prop(prop, f"{obj_where}.props.{prop}", obj.role, issues)
+            _check_stage_range(prop, obj.props[prop], obj.role, f"{obj_where}.props.{prop}", issues)
 
         glyph = obj.props.get("glyph")
         if isinstance(glyph, str) and glyph not in T2_GLYPH_NAMES:
@@ -428,6 +474,25 @@ def _check_references(scene: StoryboardScene, where: str, issues: list[Validatio
                         "unresolved_ref",
                         f"{where}.objects[{obj_index}].props.{relation}",
                         f"`{value}` 不是本场景里的对象；合法值：{'、'.join(sorted(object_ids))}",
+                    )
+                )
+
+        # `present` is not `usable`. Layout keys travelers off `_link_points`, so
+        # an `along` naming a `trace` resolves as a reference and then raises —
+        # after the storyboard agent has returned, so the run dies with nothing
+        # fed back and nothing retried. The vocabulary note used to claim trace
+        # was allowed, which made this a promise the layout broke.
+        if primitive_name == "traveler":
+            along = obj.props.get("along")
+            path = next((one for one in scene.objects if one.id == along), None)
+            if path is not None and primitive_of.get(path.id) != "link":
+                issues.append(
+                    ValidationIssue(
+                        "relation_wrong_kind",
+                        f"{where}.objects[{obj_index}].props.along",
+                        f"`{along}` 的图元是 `{primitive_of.get(path.id)}`，"
+                        f"但 `along` 必须指向一个 `link`——"
+                        f"指向别的东西会让布局整单失败、一张图都出不来",
                     )
                 )
 
@@ -516,8 +581,40 @@ def _check_steps(
             role = next((obj.role for obj in scene.objects if obj.id == target), None)
             if role is None:
                 continue  # unresolved_ref already reported
+            primitive_name = ROLE_TO_PRIMITIVE.get(role)
+            primitive = PRIMITIVE_BY_NAME.get(primitive_name) if primitive_name else None
+
             for prop in states:
-                _check_prop(prop, f"{step_where}.object_states.{target}.{prop}", role, issues)
+                prop_where = f"{step_where}.object_states.{target}.{prop}"
+                if primitive is None:
+                    continue  # unknown_role already reported for the object
+                if prop not in (*primitive.props, *primitive.relations):
+                    _check_prop(prop, prop_where, role, issues)
+                    continue
+
+                # A beat is a visual beat. `StoryboardStep` already refuses a step
+                # with neither a highlight nor a state; this refuses the harder
+                # case — a state on a prop nothing reads. Measured across the three
+                # sample documents before this rule existed: 20 of 29 states were
+                # unread, and 6 of 7 scenes came out as stills.
+                #
+                # The model wrote those beats in good faith. `vector.direction` ran
+                # 0/45/90 across the three beats explaining 平抛/斜抛/竖直上抛, and
+                # it was a registered, validated prop — it was simply never
+                # consumed. Caught here it costs one retry; caught nowhere it costs
+                # a picture, and the person who notices is watching the screen.
+                if prop not in primitive.live_props:
+                    issues.append(
+                        ValidationIssue(
+                            "step_state_inert",
+                            prop_where,
+                            f"没有渲染代码读取 `{prop}`——写进这一拍不会让画面改变"
+                            f"一点，这一拍等于一张幻灯片。角色 `{role}`"
+                            f"（图元 `{primitive_name}`）在节拍里能改的属性："
+                            f"{'、'.join(primitive.live_props) or '（无）'}；"
+                            f"想整体设定它，写在这个对象的 `props` 里而不是节拍里",
+                        )
+                    )
 
 
 def _check_controls(

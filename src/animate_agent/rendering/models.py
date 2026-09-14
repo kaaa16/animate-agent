@@ -103,6 +103,19 @@ class BodyElement(_Element):
     #: Degrees, clockwise from +x. The car and its lidar fan share it.
     heading: float = 0.0
     glyph: str | None = None
+    #: Where this body goes during playback, when the preset gave it a path.
+    #:
+    #: `field` bakes a parabola here — the same `_arc_points` curve the `trace`
+    #: gets, so the ball flies along the trajectory the lesson draws rather than
+    #: along a second one computed independently. Nothing in the player evaluates
+    #: physics: it interpolates along points layout already sampled (decision D3,
+    #: "语义给模型，布局给代码" — the arithmetic is the code's job, and the
+    #: player's job is only to move through it).
+    path: list[RenderPoint] = Field(default_factory=list)
+    #: Seconds for one pass along `path`. Baked rather than derived from `speed`
+    #: because a throw's duration is a property of the arc, not of a prop the
+    #: model chose a unit for.
+    duration: float = Field(default=0.0, ge=0)
 
 
 class EmitterElement(_Element):
@@ -155,6 +168,10 @@ class TraceElement(_Element):
     points: list[RenderPoint] = Field(min_length=2)
     dashed: bool = False
     anchor: str | None = None
+    #: The `length` value that draws the whole curve, so the player can turn a
+    #: live `length` into "how much of it to draw" without restating layout's
+    #: `TRACE_LENGTH_REFERENCE`.
+    length_reference: float = Field(default=0.0, gt=0)
 
 
 class VectorElement(_Element):
@@ -164,6 +181,15 @@ class VectorElement(_Element):
     dx: float
     dy: float
     head: float = Field(default=10.0, gt=0)
+    #: Stage pixels per unit of `magnitude`, for this scene.
+    #:
+    #: Layout normalises arrow lengths *within a scene* — the largest `magnitude`
+    #: gets `VECTOR_MAX_LENGTH`, the rest are proportional — because a velocity
+    #: and an acceleration drawn to one scale would be a category error. A live
+    #: `magnitude` needs that ratio to resize the arrow, and the alternative was
+    #: to restate the normalisation in JavaScript, which is two implementations
+    #: of one rule and therefore a drift. Baked, the player only multiplies.
+    length_scale: float = Field(default=0.0, ge=0)
     #: Id of the body the arrow is drawn from, already resolved by layout.
     #:
     #: Kept for the same reason `EmitterElement.anchor` is: a vector is not *at*
@@ -302,6 +328,22 @@ class RenderScene(_Model):
     #: relations into coordinates; this preserves the relation for the player,
     #: which needs it to move an emitter with the car it rides on.
     attachment: dict[str, str] = Field(default_factory=dict)
+    #: Body id -> the id of the `safe_distance`-role zone mounted on it.
+    #:
+    #: Derived from the scene graph, not from a prop name, and that is the whole
+    #: point. `proximity_gate` needs a threshold; `behaviors.js` used to look for
+    #: one on the *body* (`lookup(bodyId, "safe_distance")`), which works for the
+    #: hand-written baseline because it puts `safe_distance` in `scene.params` and
+    #: fails silently for every document that roled a zone instead. The avoidance
+    #: document wrote `safe_zone.radius: 0.8`, the lookup found nothing, and the
+    #: car drove straight past its obstacles with the danger flag never set —
+    #: while the lesson on screen was about deciding to avoid them.
+    #:
+    #: A zone whose role is `safe_distance` and whose `of` is a body *is* that
+    #: body's threshold. Reading that off the relation is the same move
+    #: `_chain_boxes` makes when it asks "does a link touch it?" instead of
+    #: checking a role name.
+    thresholds: dict[str, str] = Field(default_factory=dict)
     elements: list[RenderElement] = Field(default_factory=list)
     steps: list[RenderStep] = Field(default_factory=list)
     controls: list[RenderControl] = Field(default_factory=list)

@@ -426,6 +426,121 @@ def test_unknown_glyph() -> None:
     assert "unknown_glyph" in _codes(_mutation(mutate))
 
 
+def test_step_state_inert() -> None:
+    """A beat that sets a prop nothing reads is a slide, and must be rejected.
+
+    `glyph` is a real, registered, documented prop of `body` — validation used to
+    wave this through, and the picture was identical before and after the beat.
+    Measured over the three sample documents before this rule existed: 20 of 29
+    `object_states` targeted a prop no drawing code reads, and 6 of 7 scenes came
+    out as stills. The clearest case is the projectile document, whose five beats
+    about 平抛/斜抛/竖直上抛 wrote `direction: 0 / 45 / 90` — all correct — onto an
+    arrow that never moved.
+    """
+
+    def mutate(data: dict[str, Any]) -> None:
+        _scene(data)["steps"][1]["object_states"] = {"car": {"glyph": "car"}}
+
+    codes = _codes(_mutation(mutate))
+
+    assert "step_state_inert" in codes
+    assert "unknown_step_prop" not in codes  # the name is real; only the beat is dead
+
+
+def test_the_same_prop_is_fine_set_once_on_the_object() -> None:
+    """The rule's other half, and the reason it is scoped to `object_states`.
+
+    `glyph` is exactly the kind of prop that belongs on the object and not in a
+    beat: a car is a car for the whole scene. Rejecting it at object level would
+    make the rule reject the correct usage — and the hand-written samples, which
+    set `glyph` on five objects between them.
+    """
+
+    def mutate(data: dict[str, Any]) -> None:
+        _scene(data)["objects"][0]["props"]["glyph"] = "car"
+
+    codes = _codes(_mutation(mutate))
+
+    assert "step_state_inert" not in codes
+
+
+def test_step_state_inert_names_what_the_beat_could_change() -> None:
+    """An inert beat has to say what a live one looks like, or the retry is a guess."""
+
+    def mutate(data: dict[str, Any]) -> None:
+        _scene(data)["steps"][1]["object_states"] = {"car": {"glyph": "car"}}
+
+    storyboard = StoryboardIR.model_validate(_mutation(mutate))
+    issues = validate_storyboard(storyboard, lesson=_lesson(), document=_document(), limits=LIMITS)
+    [issue] = [one for one in issues if one.code == "step_state_inert"]
+
+    assert issue.where.endswith(".steps[1].object_states.car.glyph")
+    assert "speed" in issue.detail  # a live prop of `body`
+    assert "props" in issue.detail  # and where to put it instead
+
+
+def test_prop_out_of_range() -> None:
+    """A distance in the document's units is not a distance on the stage.
+
+    `safe_zone.radius: 0.8` is eight tenths of a metre and eight tenths of a
+    pixel at the same time. Every layer accepted it; the circle was invisible,
+    and the only symptom was that the lesson about安全距离 had no circle in it.
+    """
+
+    def mutate(data: dict[str, Any]) -> None:
+        _scene(data)["objects"][3]["props"]["radius"] = 0.8
+
+    codes = _codes(_mutation(mutate))
+
+    assert "prop_out_of_range" in codes
+    assert "unknown_step_prop" not in codes  # `radius` is the right prop, wrong unit
+
+
+def test_a_stage_sized_radius_passes() -> None:
+    """The rule must not reject the unit it is asking for.
+
+    The hand-written baseline writes `radius: 150` and `76` — a person who had
+    read the renderer wrote those. If this rule is wrong, it rejects the one
+    sample in the repo that was already right.
+    """
+
+    def mutate(data: dict[str, Any]) -> None:
+        _scene(data)["objects"][3]["props"]["radius"] = 150
+
+    assert "prop_out_of_range" not in _codes(_mutation(mutate))
+
+
+def test_relation_wrong_kind() -> None:
+    """A reference that resolves can still be one the layout cannot use.
+
+    `_to_traveler` keys off `_link_points`, so `along` naming a `trace` passes
+    the reference check and then raises in layout — after the storyboard agent
+    has returned, which is the one moment nothing can be fed back. The prompt
+    used to say "沿 link 或 trace 移动", so writing a trace was a promise the
+    prompt made and the layout broke.
+    """
+
+    def mutate(data: dict[str, Any]) -> None:
+        scene = _scene(data)
+        scene["objects"].append(
+            {"id": "path", "role": "trajectory", "label": "轨迹", "props": {"of": "car"}}
+        )
+        next(obj for obj in scene["objects"] if obj["id"] == "car")["props"]["speed"] = 60
+        scene["objects"].append(
+            {
+                "id": "token",
+                "role": "message",
+                "label": "令牌",
+                "props": {"along": "path"},
+            }
+        )
+
+    codes = _codes(_mutation(mutate))
+
+    assert "relation_wrong_kind" in codes
+    assert "unresolved_ref" not in codes  # `path` exists; it is the wrong *kind*
+
+
 def test_control_target_unconsumed() -> None:
     # `danger` is an output a behaviour writes, not an input it reads: a slider
     # bound to it would move a number and change nothing on screen.

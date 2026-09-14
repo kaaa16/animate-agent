@@ -88,6 +88,27 @@ class Primitive:
     #: sees the error, picks `zone`, and a picture still comes out.
     drawable: bool = True
 
+    #: Props some drawing code reads **during playback**, with the element's
+    #: baked value as the fallback.
+    #:
+    #: `props` answers "may the model set this". This answers "does setting it
+    #: do anything" — the layer below `drawable`, and the same failure one level
+    #: down. A `vector` declared `direction` and had it validated and had the
+    #: model write `0 / 45 / 90` across three beats, and drew the same arrow
+    #: every time, because `drawVector` read the baked `dx`/`dy` and never asked
+    #: `view.lookup`. Nothing errored; the picture was simply a still.
+    #:
+    #: Measured before this field existed: 20 of the 29 `object_states` in the
+    #: three sample documents targeted a prop nothing reads. A beat whose only
+    #: content is an unread prop is a slide, and no layer said so.
+    #:
+    #: Only `object_states` is gated on this. Setting `glyph` or `fov` once on
+    #: the object is legitimate; setting it *per beat* and changing nothing is
+    #: the defect. `frontend/player/registry.js` mirrors this table by hand and
+    #: a test asserts the two are equal — a hand copy so that drift is a red
+    #: test rather than a silent still (the `PENDING_KINDS` argument).
+    live_props: tuple[str, ...] = ()
+
 
 T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
@@ -104,6 +125,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         ),
         props=("speed", "heading", "scale", "visible", "danger", "glyph"),
         relations=(),
+        live_props=("speed", "heading", "scale", "visible", "danger"),
         note="基础形状由 glyph 选（圆/矩形/多边形/胶囊）；glyph 可指向 T2 字形。"
         "`object` 是兜底角色，只在确实没有合适角色时才用——留它是为了让每个被抽出的"
         "对象都有地方去，而不是被硬塞进某个不匹配的域角色",
@@ -114,6 +136,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("radius", "fov", "enabled"),
         relations=("of",),
         required_relations=("of",),
+        live_props=("radius", "enabled"),
         note="扇形 + N 条射线，其中一条高亮到命中点；radius 是探测距离（激光雷达半径）。"
         "必须挂在某个 body 上——storyboard 里没有坐标，离开母体就无处安放",
     ),
@@ -123,6 +146,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("radius", "enabled"),
         relations=("of",),
         required_relations=("of",),
+        live_props=("radius", "enabled"),
         note="挂在 body 上的虚线扇区/圆/环",
     ),
     Primitive(
@@ -131,6 +155,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("active",),
         relations=("from", "to"),
         required_relations=("from", "to"),
+        live_props=("active",),
         note="两个 body 之间的连线，虚线↔实线；两端都必填，否则这条线不存在",
     ),
     Primitive(
@@ -139,7 +164,19 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("speed", "progress", "state"),
         relations=("along",),
         required_relations=("along",),
-        note="沿 link 或 trace 移动的小令牌；没有 along 就不知道它沿什么走",
+        # `state` is live because the token wears it as a caption. The
+        # hand-written ROS sample walks one message through 待发布 → 已发布 →
+        # 已接收, which is the *whole lesson* — and until the drawer read this
+        # prop, three beats of a publish/subscribe diagram showed the same token.
+        live_props=("speed", "progress", "state"),
+        # "或 trace" used to be here and was not true: `_to_traveler` keys off
+        # `_link_points`, so an `along` naming a trace raised and killed the
+        # whole run — after the last LLM call, with nothing fed back. The note
+        # said a thing the layout refused, which is the same defect as offering
+        # `wave`: a name in the prompt is a promise.
+        note="沿 link 移动的小令牌；没有 along 就不知道它沿什么走，"
+        "而 along **必须指向一个 link**（指向 trace 会让布局整单失败）。"
+        "state 是令牌上那行说明（待发布/已发布/已接收），节拍改它画面就变",
     ),
     Primitive(
         name="trace",
@@ -147,6 +184,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("length", "visible"),
         relations=("of",),
         required_relations=("of",),
+        live_props=("length", "visible"),
         note="折线：body 的历史轨迹，或按公式算出的曲线；`of` 表明是谁的轨迹",
     ),
     Primitive(
@@ -155,6 +193,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("magnitude", "direction"),
         relations=("of", "component_of"),
         required_relations=("of",),
+        live_props=("magnitude", "direction"),
         note="箭头；`of` 是它作用在谁身上（必填），component_of 表达分解"
         "（v0 → v0cosθ + v0sinθ），只有分解出来的分量才需要",
     ),
@@ -163,6 +202,9 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         roles=("x_axis", "y_axis"),
         props=("range", "ticks", "origin"),
         relations=(),
+        # `origin` is not here: no drawer reads it. `range` drives the tick
+        # labels, which is what turns an unlabelled arrow into a coordinate axis.
+        live_props=("range", "ticks"),
         note="带刻度与标签的坐标轴，可成对交于原点",
     ),
     Primitive(
@@ -171,6 +213,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("label",),
         relations=("from", "to"),
         required_relations=("from", "to"),
+        live_props=("label",),
         note="两端带箭头的标注线 + 标签（射程 R、最大高度 H）；"
         "from/to 是它量的那两个点，缺一个就画不出标注线",
     ),
@@ -180,6 +223,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("degrees", "radius"),
         relations=("of", "between"),
         required_relations=("of",),
+        live_props=("degrees", "radius"),
         note="角弧 + 标注（发射角 θ）；`of` 是角的顶点所在的对象。"
         "`between`（夹角的两条边）可选——prop 的取值是标量，装不下两个 id，"
         "真要表达「哪两条边之间」得扩展取值类型",
@@ -208,6 +252,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         roles=("hud", "decision", "caption", "code", "formula"),
         props=("text", "align", "tone"),
         relations=(),
+        live_props=("text", "align", "tone"),
         note="文本面板；公式在这里是构建期渲好的 path，不是可解析文本",
     ),
 )
@@ -232,6 +277,46 @@ REQUIRED_RELATIONS: dict[str, tuple[str, ...]] = {
     for primitive in T1_PRIMITIVES
     if primitive.required_relations
 }
+
+#: primitive name -> the props a *beat* may move. Derived, so `step_state_inert`
+#: and the prompt's two prop groups cannot disagree with `Primitive.live_props`.
+LIVE_PROPS_BY_PRIMITIVE: dict[str, tuple[str, ...]] = {
+    primitive.name: primitive.live_props for primitive in T1_PRIMITIVES if primitive.live_props
+}
+
+#: Every prop that some drawing code reads during playback.
+LIVE_PROPS: frozenset[str] = frozenset(
+    prop for primitive in T1_PRIMITIVES for prop in primitive.live_props
+)
+
+#: Props whose value is a distance **in stage pixels**, with the range that is
+#: legible on a 960×600 stage.
+#:
+#: This is the unit declaration the vocabulary never had, and it is why
+#: `lidar_emitter.radius: 8` drew an 8-pixel fan and `safe_zone.radius: 0.8` an
+#: 0.8-pixel circle: the model wrote metres, layout read pixels, and no layer
+#: disagreed out loud. The model is not wrong to reach for metres — a 激光雷达
+#: radius of 8 *is* eight metres — it was never told the drawing has its own
+#: unit. The baseline's hand-written sample writes `150` and `76`, which is the
+#: same statement made by someone who had read the renderer.
+#:
+#: `layout.py` clamps into these ranges as a backstop (the same treatment
+#: `_to_angle` already gave its `radius`), and the validator rejects a value
+#: outside them so the model gets to fix it rather than shipping an invisible
+#: circle. Only size-like props are listed: `speed` and `trace.length` are
+#: relative quantities with no pixel meaning, and `vector.magnitude` is
+#: normalised within its own scene.
+STAGE_RANGES: dict[tuple[str, str], tuple[float, float]] = {
+    ("emitter", "radius"): (40.0, 420.0),
+    ("zone", "radius"): (24.0, 260.0),
+    ("angle", "radius"): (20.0, 120.0),
+}
+
+
+def stage_range(primitive: str, prop: str) -> tuple[float, float] | None:
+    """The legible pixel range for `prop`, or None when it carries no distance."""
+    return STAGE_RANGES.get((primitive, prop))
+
 
 #: The two halves of `drawable`, derived so there is nowhere for a third answer
 #: to hide. `PENDING_PRIMITIVES` is what the prompt excludes and the validator
@@ -360,7 +445,12 @@ class Behavior:
 
 
 BEHAVIORS: tuple[Behavior, ...] = (
-    Behavior("linear_motion", ("speed", "heading"), "小车/抛体沿当前朝向匀速前进"),
+    Behavior("linear_motion", ("speed", "heading"), "小车沿当前朝向匀速前进（lane）"),
+    Behavior(
+        "ballistic",
+        ("speed", "heading"),
+        "抛体沿布局算好的抛物线飞行（field）——弹道由代码烘好，播放期只做插值",
+    ),
     Behavior(
         "proximity_gate",
         ("radius", "safe_distance"),
@@ -431,6 +521,19 @@ PRESET_BY_NAME: dict[str, Preset] = {p.name: p for p in PRESETS}
 # --------------------------------------------------------------------------
 
 
+def _range_hint(primitive: str, prop: str) -> str:
+    """`（舞台像素 40~420）` for a distance prop, empty otherwise.
+
+    Inline rather than in a footnote because the model reads the prop list when
+    it writes the prop. A unit stated anywhere else is a unit said once.
+    """
+    bounds = stage_range(primitive, prop)
+    if bounds is None:
+        return ""
+    low, high = bounds
+    return f"（舞台像素 {low:g}~{high:g}）"
+
+
 def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
     """Render the whole vocabulary as prompt text.
 
@@ -498,12 +601,22 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
 
     lines.append("")
     lines.append("## 每个图元可设置的属性 prop")
+    lines.append(
+        "属性分两组。**`object_states` 里只能写「可被节拍改变」那一组**——"
+        "另一组没有渲染代码读取，写进某一拍不会让画面动一下，"
+        "那一拍就是一张幻灯片，校验台会打回。"
+    )
     for primitive in T1_PRIMITIVES:
         if not primitive.drawable:
             continue
+        live = primitive.live_props
+        static = tuple(prop for prop in primitive.props if prop not in live)
         parts = []
-        if primitive.props:
-            parts.append("、".join(f"`{prop}`" for prop in primitive.props))
+        if live:
+            live_text = "、".join(f"`{prop}`{_range_hint(primitive.name, prop)}" for prop in live)
+            parts.append(f"可被节拍改变：{live_text}")
+        if static:
+            parts.append("只能整体设置一次：" + "、".join(f"`{prop}`" for prop in static))
         mandatory = primitive.required_relations
         optional = tuple(rel for rel in primitive.relations if rel not in mandatory)
         if mandatory:
@@ -514,6 +627,19 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
         if optional:
             parts.append("可选关系型属性：" + "、".join(f"`{rel}`" for rel in optional))
         lines.append(f"- `{primitive.name}`：{'；'.join(parts) if parts else '（无）'}")
+
+    lines.append("")
+    lines.append("## 距离类属性的单位，以及为什么它必须是像素")
+    lines.append(
+        "画布的坐标系是固定的：宽 960、高 600，单位是**舞台像素**，不是米、"
+        "厘米、牛顿或秒。所以 `radius` 要写「这条射线在图上有多长」，"
+        "不是「这颗激光雷达实际能测多远」。"
+        "**文档里的物理量（8 米、0.8 米）不能直接抄进 `radius`**——"
+        "写 8 会被画成 8 个像素，比一个标点还小，屏幕上什么都看不见。"
+        "按文档的实际含义换算成一个占画布合理比例的像素值再写。"
+    )
+    for (primitive_name, prop), (low, high) in sorted(STAGE_RANGES.items()):
+        lines.append(f"- `{primitive_name}.{prop}`：{low:g}~{high:g} 舞台像素")
 
     lines.append("")
     lines.append("## 可用领域字形 glyph（只能用在 `body` 的 `glyph` 属性上）")

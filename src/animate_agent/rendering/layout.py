@@ -71,8 +71,10 @@ from animate_agent.rendering.registry import (
     PENDING_ALTERNATIVES,
     PENDING_PRIMITIVES,
     ROLE_TO_PRIMITIVE,
+    stage_range,
 )
 from animate_agent.storyboard.models import (
+    PropValue,
     StoryboardControl,
     StoryboardIR,
     StoryboardObject,
@@ -246,6 +248,15 @@ ANGLE_RADIUS_DEFAULT = 46.0
 ANGLE_RADIUS_MIN = 20.0
 ANGLE_RADIUS_MAX = 120.0
 
+#: Stage pixels a thrown body covers per second, and the floor on how quick a
+#: short throw is allowed to be. The duration is baked onto the body so the
+#: player only interpolates; it is derived from the arc's *length* rather than
+#: from a prop, because `speed` on a projectile would need a unit the model has
+#: never been given — and a 竖直上抛 and a 平抛 are the same launch at the same
+#: speed, so the shorter arc is genuinely over sooner.
+THROW_PIXELS_PER_SECOND = 260.0
+THROW_MIN_DURATION = 1.2
+
 #: Graduations on an axis when the storyboard did not say how many.
 DEFAULT_AXIS_TICKS = 5
 
@@ -328,6 +339,106 @@ def _bounded(obj: StoryboardObject, prop: str, default: float, low: float, high:
     return min(max(_number(obj, prop, default), low), high)
 
 
+def _stage_distance(
+    obj: StoryboardObject,
+    primitive: str,
+    prop: str,
+    default: float,
+) -> float:
+    """A distance prop, held inside the range the stage can show.
+
+    The backstop for the units problem, and only the backstop — the fix is the
+    vocabulary saying `radius` is in 舞台像素 and `prop_out_of_range` rejecting a
+    value that is not. This exists for the two cases validation cannot reach: a
+    hand-written sample, and a `scene.safe_distance` that arrives from `params`
+    rather than from a prop.
+
+    Why clamp rather than raise: raising here is a `LayoutError` after the last
+    LLM call, which is the exact failure the `drawable` gate was written to stop
+    doing. A clamped circle is a visible circle. `_bounded` makes the same
+    argument for `fov: 0`, and `_to_angle` has made it for its `radius` since the
+    day the angle arcs landed.
+
+    What it fixes, measured: `lidar_emitter.radius: 8` — eight metres in the
+    document — drew an eight-pixel fan on a 960-pixel stage, and
+    `safe_zone.radius: 0.8` a circle under one pixel across. Both were legible
+    numbers in every layer's terms, and both were invisible on screen.
+    """
+    return _clamp_stage(primitive, prop, _number(obj, prop, default))
+
+
+def _clamp_stage(primitive: str, prop: str, value: float) -> float:
+    """`value` held inside the stage range `prop` is declared with, if it has one."""
+    bounds = stage_range(primitive, prop)
+    if bounds is None:
+        return value
+    low, high = bounds
+    return min(max(value, low), high)
+
+
+def _props_for(obj: StoryboardObject, primitive: str) -> dict[str, PropValue]:
+    """`obj.props`, carried verbatim — except a distance, which is held to the stage.
+
+    The verbatim rule is what lets the player read `direction` or `magnitude` at
+    playback: layout consumes a prop into geometry *and* keeps the value, rather
+    than transferring it. This is the one exception, and it is not a rewrite so
+    much as a consistency fix — `_stage_distance` already clamped the number that
+    got drawn, and leaving the raw one in `props` would mean the circle was
+    radius 24 while the danger gate that reads the same prop fired at 0.8.
+
+    For any storyboard that passes validation the two are the same number, since
+    `prop_out_of_range` rejects a value outside this range. The clamp only bites
+    on a hand-written sample or a scene param, where there is no validator to ask.
+    """
+    props = dict(obj.props)
+    for prop in props:
+        if stage_range(primitive, prop) is None:
+            continue
+        value = props[prop]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        low, high = stage_range(primitive, prop) or (value, value)
+        props[prop] = min(max(float(value), low), high)
+    return props
+
+
+def _safe_distance(scene: StoryboardScene) -> float:
+    """The one number that is this scene's safety threshold.
+
+    Three places need it and they must not disagree:
+
+    - `_lane_boxes` offsets the obstacles by half of it;
+    - `_to_zone` draws the circle that is labelled 安全距离;
+    - `behaviors.js` fires `proximity_gate` when the nearest obstacle is closer.
+
+    They used to read two different sources. The placer took `scene.params`, the
+    gate took the zone's own `radius` — so a document that roled a zone instead
+    of setting a scene param got a circle drawn at one distance and a car that
+    reacted at another, and the reaction never happened at all. Reading one
+    number in one place is the fix; which number it is matters less than that.
+
+    Resolution order is "most specific wins": the zone the document declared,
+    then the scene parameter the baseline uses, then the default. Both sources
+    are clamped to the stage range, because a threshold in metres is not a
+    threshold in pixels.
+    """
+    zone = next(
+        (
+            obj
+            for obj in scene.objects
+            if ROLE_TO_PRIMITIVE.get(obj.role) == "zone"
+            and obj.role == "safe_distance"
+            and isinstance(obj.props.get("radius"), (int, float))
+            and not isinstance(obj.props.get("radius"), bool)
+        ),
+        None,
+    )
+    if zone is not None:
+        return _stage_distance(zone, "zone", "radius", DEFAULT_SAFE_DISTANCE)
+    declared = _scene_number(scene, "safe_distance", DEFAULT_SAFE_DISTANCE)
+    return _clamp_stage("zone", "radius", declared)
+
+
 def _relation(obj: StoryboardObject, name: str) -> str | None:
     """A relation prop's target id, or None. Validation has already run."""
     value = obj.props.get(name)
@@ -370,7 +481,13 @@ def _lane_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
 
     boxes: dict[str, _Box] = {}
 
-    safe = _scene_number(scene, "safe_distance", DEFAULT_SAFE_DISTANCE)
+    # The same number `_to_zone` draws and `proximity_gate` fires at. It has to
+    # be: this ratio decides how far off the lane the obstacles sit, and the gate
+    # decides whether the car reacts to them. Two sources meant a document could
+    # get a car that reacted at one distance and obstacles placed for another —
+    # which is exactly how the avoidance run came out with a car that drove
+    # through everything.
+    safe = _safe_distance(scene)
     offset = safe * LANE_OBSTACLE_OFFSET_RATIO
     first_x = stage.width * LANE_OBSTACLE_FIRST_X_RATIO
     spacing = stage.width * LANE_OBSTACLE_SPACING_RATIO
@@ -730,9 +847,15 @@ def _glyph_to_draw(obj: StoryboardObject) -> str | None:
     return None
 
 
-def _to_body(obj: StoryboardObject, box: _Box) -> BodyElement:
+def _to_body(
+    obj: StoryboardObject,
+    box: _Box,
+    scene: StoryboardScene,
+    stage: RenderStage,
+) -> BodyElement:
     width, height = _body_size(obj)
     is_obstacle = obj.role == "obstacle"
+    path, duration = _flight(obj, box, scene, stage)
     return BodyElement(
         id=obj.id,
         role=obj.role,
@@ -746,14 +869,56 @@ def _to_body(obj: StoryboardObject, box: _Box) -> BodyElement:
         inner_ratio=OBSTACLE_INNER_RATIO if is_obstacle else 1.0,
         heading=_number(obj, "heading", 0.0),
         glyph=_glyph_to_draw(obj),
+        path=path,
+        duration=duration,
         props=dict(obj.props),
     )
+
+
+def _flight(
+    obj: StoryboardObject,
+    box: _Box,
+    scene: StoryboardScene,
+    stage: RenderStage,
+) -> tuple[list[RenderPoint], float]:
+    """The parabola this body travels, and how long one pass takes.
+
+    Empty on every preset but `field`, and that is not a special case so much as
+    the definition: `lane` carries a car along a corridor, `chain` and `hub` hold
+    their bodies still, and `field` is the preset whose bodies are thrown.
+
+    The curve is `_arc_points` — **the same one the `trace` gets**. That is the
+    point of putting it here rather than in the player: the trajectory the lesson
+    draws and the path the ball flies cannot disagree, because there is one of
+    them. The player interpolates along these samples and evaluates no physics at
+    all (decision D3).
+
+    The speed is `PIXELS_PER_SPEED`-shaped in spirit but lives here, so a throw
+    takes about the same time whatever its range: a 45° throw and a 15° one are
+    the same launch at the same speed, and the longer arc is the longer flight.
+    """
+    if scene.scene_type != "field":
+        return [], 0.0
+    if obj.role == "obstacle":
+        return [], 0.0
+
+    heading = _number(obj, "heading", 45.0)
+    span = _field_slot(scene, stage)
+    points = _arc_points(RenderPoint(x=box.x, y=box.y), heading, span, stage)
+    if len(points) < 2:
+        return [], 0.0
+
+    arc = sum(
+        math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y)
+        for index in range(1, len(points))
+    )
+    return points, max(arc / THROW_PIXELS_PER_SECOND, THROW_MIN_DURATION)
 
 
 def _to_emitter(obj: StoryboardObject, boxes: dict[str, _Box]) -> EmitterElement:
     anchor = _relation(obj, "of")
     box = _anchored_box(obj, anchor, boxes, "emitter")
-    radius = _number(obj, "radius", DEFAULT_SENSOR_RADIUS)
+    radius = _stage_distance(obj, "emitter", "radius", DEFAULT_SENSOR_RADIUS)
     if radius <= 0:
         raise LayoutError(f"`{obj.id}` 的 `radius` 是 {radius}，必须大于 0")
     return EmitterElement(
@@ -766,7 +931,7 @@ def _to_emitter(obj: StoryboardObject, boxes: dict[str, _Box]) -> EmitterElement
         fov=_bounded(obj, "fov", DEFAULT_FOV, MIN_FOV, MAX_FOV),
         rays=int(_bounded(obj, "rays", float(DEFAULT_SENSOR_RAYS), 1, float(MAX_SENSOR_RAYS))),
         anchor=anchor,
-        props=dict(obj.props),
+        props=_props_for(obj, "emitter"),
     )
 
 
@@ -784,7 +949,7 @@ def _to_zone(obj: StoryboardObject, scene: StoryboardScene, boxes: dict[str, _Bo
     box = _anchored_box(obj, anchor, boxes, "zone")
     declared = obj.props.get("radius")
     uses_scene_param = not isinstance(declared, (int, float)) or isinstance(declared, bool)
-    radius = _number(obj, "radius", _scene_number(scene, "safe_distance", DEFAULT_SAFE_DISTANCE))
+    radius = _stage_distance(obj, "zone", "radius", _safe_distance(scene))
     if radius <= 0:
         raise LayoutError(f"`{obj.id}` 的半径是 {radius}，必须大于 0")
     return ZoneElement(
@@ -796,7 +961,7 @@ def _to_zone(obj: StoryboardObject, scene: StoryboardScene, boxes: dict[str, _Bo
         radius=radius,
         anchor=anchor,
         binds={"radius": "scene.safe_distance"} if uses_scene_param else {},
-        props=dict(obj.props),
+        props=_props_for(obj, "zone"),
     )
 
 
@@ -1056,6 +1221,7 @@ def _to_vector(
     box = _anchored_box(obj, anchor, boxes, "vector")
     length = _vector_lengths(scene)[obj.id]
     angle = math.radians(_to_canvas_angle(_number(obj, "direction", 0.0)))
+    magnitude = abs(_number(obj, "magnitude", 1.0))
     return VectorElement(
         id=obj.id,
         role=obj.role,
@@ -1064,6 +1230,10 @@ def _to_vector(
         y=box.y,
         dx=math.cos(angle) * length,
         dy=math.sin(angle) * length,
+        # The ratio the player multiplies a live `magnitude` by. Handed over
+        # rather than re-derived so the normalisation above stays the only
+        # description of how long an arrow is.
+        length_scale=length / magnitude if magnitude > 0 else 0.0,
         anchor=anchor,
         props=dict(obj.props),
     )
@@ -1090,6 +1260,9 @@ def _to_trace(
         y=box.y,
         points=_arc_points(RenderPoint(x=box.x, y=box.y), heading, span, stage),
         anchor=anchor,
+        # So the player can turn a live `length` into "how much of the curve to
+        # draw" without restating `TRACE_LENGTH_REFERENCE`.
+        length_reference=TRACE_LENGTH_REFERENCE,
         props=dict(obj.props),
     )
 
@@ -1206,7 +1379,9 @@ def _to_element(
         box = boxes.get(obj.id)
         if box is None:
             raise LayoutError(f"`{obj.id}`（{primitive}）没有被摆放：预设没有给它位置")
-        return _to_readout(obj, box) if primitive == "readout" else _to_body(obj, box)
+        if primitive == "readout":
+            return _to_readout(obj, box)
+        return _to_body(obj, box, scene, stage)
     if primitive == "emitter":
         return _to_emitter(obj, boxes)
     if primitive == "zone":
@@ -1303,6 +1478,24 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
             element.id: element.anchor
             for element in elements
             if isinstance(element, (EmitterElement, ZoneElement, TraceElement, VectorElement))
+            and element.anchor is not None
+        },
+        # Which zone is whose threshold, read off the relations rather than off
+        # prop names. `behaviors.js` needs a number for `proximity_gate`, and it
+        # used to look for `safe_distance` on the *body* — a name that happens to
+        # exist in the hand-written baseline (it is a `scene` param there) and
+        # does not exist in any document that roles a zone instead. The avoidance
+        # run wrote `safe_zone.radius`, the lookup came back null, the gate
+        # `continue`d, and the car drove straight through its obstacles while the
+        # lesson on screen was about deciding to avoid them.
+        #
+        # A `safe_distance`-role zone whose `of` is a body *is* that body's
+        # threshold. Nothing needs the model to name a prop correctly.
+        thresholds={
+            element.anchor: element.id
+            for element in elements
+            if isinstance(element, ZoneElement)
+            and element.role == "safe_distance"
             and element.anchor is not None
         },
         elements=elements,

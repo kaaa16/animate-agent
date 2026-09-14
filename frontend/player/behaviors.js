@@ -8,25 +8,30 @@
  *
  * What decides which behaviour applies is derived, never hand-listed:
  *
- * | element                                   | behaviour          |
- * |-------------------------------------------|--------------------|
- * | `body` carrying a numeric `speed`          | `linear_motion`    |
- * | any body, against the obstacles around it  | `proximity_gate`   |
- * | a body that just went dangerous            | `clearance_choice` |
- * | `traveler` bound to a `path_id`            | `hop_along_path`   |
+ * | element                                    | behaviour          |
+ * |--------------------------------------------|--------------------|
+ * | `body` with a baked `path` and a `duration` | `ballistic`        |
+ * | `body` carrying a numeric `speed`           | `linear_motion`    |
+ * | any body, against the obstacles around it   | `proximity_gate`   |
+ * | a body that just went dangerous             | `clearance_choice` |
+ * | `traveler` bound to a `path_id`             | `hop_along_path`   |
  *
- * A body with no `speed` simply does not move — not a special case, just the
- * absence of the prop `linear_motion` reads.
+ * A body with no `speed` and no `path` simply does not move — not a special
+ * case, just the absence of what either reads.
  *
  * **No LLM runs here, ever.** Playback is pure arithmetic on the spec, which is
  * why the same spec always produces the same frames.
  *
- * `linear_motion` here is a **lane** model: advance along +x at `speed`, offset
- * sideways to dodge. It is not a ballistic model, and pretending otherwise would
- * be wrong — a projectile follows a parabola, which the plan defers to a later
- * slice along with the `field` preset. The name is the registry's; the motion is
- * what the `lane` preset means by it.
+ * The two motions are genuinely different and the difference is where the
+ * arithmetic lives. `linear_motion` is a **lane** model — advance along +x at
+ * `speed`, offset sideways to dodge — and the player computes it. `ballistic`
+ * moves a body along a polyline `layout.py` already sampled from the parabola a
+ * throw at that angle would follow; this file only interpolates. That is
+ * decision D3 applied to motion: the curve is the code's job, and the player's
+ * job is to be somewhere along it at time `t`.
  */
+
+import { pointAlong } from "./primitives.js";
 
 /** Stage pixels travelled per second at `speed === 1`. */
 const PIXELS_PER_SPEED = 90;
@@ -60,6 +65,17 @@ export function createSimulation(scene, stage) {
   for (const element of scene.elements) {
     if (element.kind === "emitter" && element.anchor) sensors.set(element.anchor, element.id);
   }
+  // Which zone is whose threshold, resolved by layout from the relations. See
+  // `RenderScene.thresholds` — the short version is that looking for a prop
+  // called `safe_distance` on the body works for the baseline and silently fails
+  // for every document that roled a zone instead, which is what the avoidance
+  // run did.
+  const thresholds = scene.thresholds ?? {};
+  const byId = new Map(scene.elements.map((element) => [element.id, element]));
+  // Who the gate applies to: any body that has a threshold, whether it got one
+  // from a zone or from carrying a sensor. A body with neither never goes
+  // dangerous — the correct answer for an obstacle.
+  const gated = new Set([...Object.keys(thresholds), ...sensors.keys()]);
 
   return {
     t: 0,
@@ -84,15 +100,35 @@ export function createSimulation(scene, stage) {
 
       for (const [id, base] of home) live.set(id, { ...base });
 
-      // 1. linear motion. The dodge is read from the previous frame, so this
-      //    frame draws the decision that was already made rather than one being
-      //    made mid-move.
+      // 1. motion. The dodge is read from the previous frame, so this frame
+      //    draws the decision that was already made rather than one being made
+      //    mid-move.
       for (const element of scene.elements) {
         if (element.kind !== "body") continue;
-        const speed = lookup(element.id, "speed", null);
-        if (typeof speed !== "number") continue;
         const node = live.get(element.id);
         const base = home.get(element.id);
+
+        // Ballistic first, because it is the more specific statement: a body
+        // with a baked flight path is a thrown body, whatever its `speed` says.
+        // The loop repeats, which is what makes a still frame's throw visible
+        // at all — a step is a moment and `setStep` starts it from t=0, so a
+        // one-shot arc would end the beat with the ball on the ground and the
+        // rest of the step holding nothing.
+        const duration = element.duration;
+        if (element.path && element.path.length >= 2 && duration > 0) {
+          const travelled = (this.t % duration) / duration;
+          const point = pointAlong(element.path, travelled);
+          node.x = point.x;
+          node.y = point.y;
+          // Published so a trace anchored to this body can be drawn only as far
+          // as the body has flown, which is what makes 轨迹 appear to be written
+          // by the thing tracing it.
+          node.progress = travelled;
+          continue;
+        }
+
+        const speed = lookup(element.id, "speed", null);
+        if (typeof speed !== "number") continue;
         // Wrap horizontally only: a lane is a corridor, and wrapping y would
         // teleport a car out of its lane.
         node.x = wrap(base.x + this.t * speed * PIXELS_PER_SPEED, stage.width);
@@ -101,16 +137,40 @@ export function createSimulation(scene, stage) {
 
       // 2. proximity gate, for sensing bodies only. Two distances matter and
       //    they are not the same one: the sensor's `radius` bounds what can be
-      //    seen at all, and `safe_distance` decides what counts as too close.
-      //    Reading `safe_distance` off the body walks the lookup's scene tier,
-      //    which is how a `scene.safe_distance` slider reaches it.
+      //    seen at all, and the threshold decides what counts as too close.
+      //
+      //    The threshold has two sources, tried in that order:
+      //
+      //    - the zone layout resolved as this body's `safe_distance` role one,
+      //      which is the shape a real document writes (`safe_zone.radius`);
+      //    - `safe_distance` on the body, which walks the lookup's scene tier
+      //      and is how the hand-written baseline's `scene.safe_distance`
+      //      slider reaches it.
+      //
+      //    Only the second used to exist, and it is why the avoidance run's car
+      //    never went dangerous: the document roled a zone instead of setting a
+      //    scene param, the lookup returned null, and this loop `continue`d past
+      //    every frame. Nothing errored. The car simply drove through.
       this.danger = new Map();
-      for (const [bodyId, sensorId] of sensors) {
+      for (const bodyId of gated) {
         const node = live.get(bodyId);
         if (!node) continue;
-        const safe = lookup(bodyId, "safe_distance", null);
+        const thresholdId = thresholds[bodyId];
+        const safe = thresholdId
+          ? lookup(thresholdId, "radius", byId.get(thresholdId)?.radius ?? null)
+          : lookup(bodyId, "safe_distance", null);
         if (typeof safe !== "number") continue;
-        const reach = lookup(sensorId, "radius", Number.POSITIVE_INFINITY);
+        // No sensor in the scene means nothing bounds the range, not that
+        // nothing is measured. The avoidance document's decision scene is
+        // exactly that: a car, a threshold circle and an obstacle, no lidar —
+        // it is about the *judgement*, and the ranging happened in the scene
+        // before. Keying participation off the emitter alone meant the gate
+        // never ran there, so the car drove through an obstacle that was 12px
+        // away while the threshold circle around it was 24px across.
+        const sensorId = sensors.get(bodyId);
+        const reach = sensorId
+          ? lookup(sensorId, "radius", Number.POSITIVE_INFINITY)
+          : Number.POSITIVE_INFINITY;
         const nearest = nearestDistance(node, obstacles, live, bodyId);
         if (nearest !== null && nearest <= reach && nearest < safe) {
           this.danger.set(bodyId, true);

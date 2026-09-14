@@ -36,7 +36,12 @@ from animate_agent.rendering.models import (
     TravelerElement,
     ZoneElement,
 )
-from animate_agent.rendering.registry import T1_PRIMITIVES, Glyph, GlyphPart
+from animate_agent.rendering.registry import (
+    STAGE_RANGES,
+    T1_PRIMITIVES,
+    Glyph,
+    GlyphPart,
+)
 from animate_agent.storyboard.models import (
     PropValue,
     StoryboardIR,
@@ -1154,3 +1159,212 @@ def test_an_undrawable_prop_value_is_clamped_rather_than_thrown() -> None:
 
     assert isinstance(fan, EmitterElement)
     assert fan.fov == layout.MIN_FOV
+
+
+# --------------------------------------------------------------------------
+# Units: a distance in the document is not a distance on the stage
+# --------------------------------------------------------------------------
+
+
+def _zoned(scene_type: str, radius: object) -> StoryboardScene:
+    """A car with an obstacle and one threshold circle, in `scene_type`."""
+    return _scene(
+        [
+            _car(),
+            _object("obstacle-a", "obstacle"),
+            _object("safe", "safe_distance", "安全距离", of="car", radius=radius),
+        ],
+        scene_type=scene_type,
+    )
+
+
+def test_a_radius_in_the_documents_units_is_held_to_the_stage() -> None:
+    """`safe_zone.radius: 0.8` is eight tenths of a metre *and* of a pixel.
+
+    The avoidance document wrote that, and every layer accepted it — a legal
+    positive float is a legal radius, and nothing in the vocabulary said which
+    unit it was in. The circle was invisible on a 960-pixel stage, and the only
+    symptom was that the lesson about 安全距离 had no circle in it.
+    """
+    scene = layout_scene(_zoned("lane", 0.8))
+    zone = next(element for element in scene.elements if element.id == "safe")
+    low, _ = STAGE_RANGES[("zone", "radius")]
+
+    assert zone.radius == low
+
+
+def test_the_prop_carries_the_same_number_that_was_drawn() -> None:
+    """The drawn circle and the reading gate must not disagree.
+
+    `proximity_gate` reads the threshold out of the element's `props`, so leaving
+    the raw 0.8 there while drawing a 24-pixel circle would mean the car reacts
+    at one distance and the circle shows another — a label and a thing that
+    disagree, which is the failure the `safe_distance` binding exists to prevent.
+    """
+    scene = layout_scene(_zoned("lane", 0.8))
+    zone = next(element for element in scene.elements if element.id == "safe")
+
+    assert zone.props["radius"] == zone.radius
+
+
+def test_a_stage_sized_radius_is_left_alone() -> None:
+    """The clamp is a backstop, not a policy: a legal value survives untouched."""
+    scene = layout_scene(_zoned("lane", 150))
+    zone = next(element for element in scene.elements if element.id == "safe")
+
+    assert zone.radius == 150
+    assert zone.props["radius"] == 150
+
+
+def test_the_lane_and_the_gate_read_the_same_threshold() -> None:
+    """Obstacle offset and danger threshold come from one number.
+
+    `_lane_boxes` places obstacles at half the threshold off the lane, and
+    `proximity_gate` fires when the nearest one is inside it — so the two have to
+    be the same threshold or the car either reacts to nothing or is never able to
+    escape. They used to read different sources (`scene.params` in the placer, the
+    zone's own `radius` in the gate), which is why the avoidance run's car drove
+    straight through everything.
+    """
+    zone = next(obj for obj in _zoned("lane", 120).objects if obj.id == "safe")
+    scene = layout_scene(_zoned("lane", 120))
+    laid_out = {element.id: element for element in scene.elements}
+    obstacle = laid_out["obstacle-a"]
+
+    offset = abs(obstacle.y - laid_out["car"].y)
+    assert offset == pytest.approx(zone.props["radius"] * layout.LANE_OBSTACLE_OFFSET_RATIO)
+    assert offset < zone.props["radius"]
+
+
+# --------------------------------------------------------------------------
+# field: the throw is baked so the player only interpolates
+# --------------------------------------------------------------------------
+
+
+def test_a_field_body_carries_the_path_it_flies() -> None:
+    """The ball travels the same curve the trajectory draws.
+
+    One curve, not two: `_flight` calls `_arc_points`, which is what `_to_trace`
+    calls. A second implementation in JavaScript — evaluating the parabola per
+    frame — is the drift this avoids, and decision D3 puts the arithmetic here.
+    """
+    scene = layout_scene(
+        _field([_ball(heading=45), _object("path", "trajectory", "轨迹", of="ball")])
+    )
+    ball = next(element for element in scene.elements if element.id == "ball")
+    trace = next(element for element in scene.elements if element.id == "path")
+
+    assert len(ball.path) == len(trace.points)
+    assert ball.path[0] == ball.path[0]
+    assert (ball.path[0].x, ball.path[0].y) == pytest.approx((ball.x, ball.y))
+    assert ball.duration > 0
+
+
+def test_a_lane_body_has_no_flight_path() -> None:
+    """`lane` carries a car along a corridor; it does not throw it."""
+    scene = layout_scene(_scene([_car(), _object("obstacle-a", "obstacle")]))
+    car = next(element for element in scene.elements if element.id == "car")
+
+    assert car.path == []
+    assert car.duration == 0.0
+
+
+def test_a_steeper_throw_takes_longer() -> None:
+    """Duration comes from the arc's length, so the picture stays physical.
+
+    A 竖直上抛 and a 平抛 are the same launch at the same speed, so the shorter
+    arc is genuinely over sooner. Baking one duration for both would have the
+    ball crawl up a short vertical line while it races across a long flat one.
+    """
+    flat = layout_scene(_field([_ball(heading=5)]))
+    steep = layout_scene(_field([_ball(heading=45)]))
+    durations = {
+        index: next(element for element in scene.elements if element.id == "ball").duration
+        for index, scene in (("flat", flat), ("steep", steep))
+    }
+
+    assert durations["steep"] > durations["flat"]
+
+
+# --------------------------------------------------------------------------
+# Vectors and traces: the ratio the player needs, baked rather than retyped
+# --------------------------------------------------------------------------
+
+
+def test_a_vector_publishes_the_scale_that_resized_it() -> None:
+    """A live `magnitude` can only resize the arrow if the ratio comes with it.
+
+    Layout normalises lengths *within* a scene (`_vector_lengths`), so the player
+    cannot multiply by a constant — and restating the normalisation in JavaScript
+    would be two implementations of one rule. The baked ratio is what keeps
+    `direction: 0 / 45 / 90` swinging the arrow instead of drawing it three times.
+    """
+    scene = layout_scene(
+        _field([_ball(), _object("v", "velocity", "初速度", of="ball", magnitude=5)])
+    )
+    vector = next(element for element in scene.elements if element.id == "v")
+
+    assert vector.length_scale == pytest.approx(5 * vector.length_scale / 5)
+    assert vector.length_scale > 0
+    assert math.hypot(vector.dx, vector.dy) == pytest.approx(5 * vector.length_scale)
+
+
+def test_a_trace_publishes_the_length_that_means_all_of_it() -> None:
+    """Same argument as the vector's ratio: the player must not retype the rule."""
+    scene = layout_scene(
+        _field([_ball(), _object("path", "trajectory", "轨迹", of="ball", length=200)])
+    )
+    trace = next(element for element in scene.elements if element.id == "path")
+
+    assert trace.length_reference == layout.TRACE_LENGTH_REFERENCE
+
+
+# --------------------------------------------------------------------------
+# thresholds: which zone is whose, read off the relations
+# --------------------------------------------------------------------------
+
+
+def test_the_threshold_map_names_the_zone_a_body_wears() -> None:
+    """Derived from the scene graph, not from a prop name.
+
+    `behaviors.js` used to look for `safe_distance` on the *body*. That works for
+    the hand-written baseline — it puts the number in `scene.params` — and fails
+    silently for every document that roles a zone instead, which is what the
+    avoidance run did: the gate `continue`d every frame and the car never went
+    dangerous.
+    """
+    scene = layout_scene(_zoned("lane", 120))
+
+    assert scene.thresholds == {"car": "safe"}
+
+
+def test_a_coverage_zone_is_not_a_threshold() -> None:
+    """Only the `safe_distance` role means "the distance this body reacts at".
+
+    The avoidance document also has 左侧可通行空间 and 右侧可通行空间 circles on the
+    same car. Folding those in would make the last one written win, which is the
+    same "a role maps to exactly one primitive" hazard one layer up.
+    """
+    scene = layout_scene(
+        _scene(
+            [
+                _car(),
+                _object("obstacle-a", "obstacle"),
+                _object("safe", "safe_distance", "安全距离", of="car", radius=120),
+                _object("left", "coverage", "左侧空间", of="car", radius=120),
+            ]
+        )
+    )
+
+    assert scene.thresholds == {"car": "safe"}
+
+
+def test_a_scene_with_no_threshold_zone_has_an_empty_map() -> None:
+    """The baseline sets `scene.safe_distance`, so its gate reads the scene tier.
+
+    Both paths survive: the map is empty here and `behaviors.js` falls through to
+    `safe_distance` on the body, which walks down to `params`.
+    """
+    scene = layout_scene(_scene([_car(), _object("obstacle-a", "obstacle")]))
+
+    assert scene.thresholds == {}

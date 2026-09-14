@@ -25,6 +25,7 @@ from animate_agent.rendering.registry import (
     PRIMITIVE_BY_NAME,
     REQUIRED_RELATIONS,
     ROLE_TO_PRIMITIVE,
+    STAGE_RANGES,
     T1_PRIMITIVES,
     T2_GLYPHS,
     Glyph,
@@ -223,6 +224,90 @@ def test_every_pending_primitive_says_what_to_use_instead() -> None:
     assert set(PENDING_ALTERNATIVES) == set(PENDING_PRIMITIVES)
 
 
+# --------------------------------------------------------------------------
+# live_props — the layer below `drawable`: declared is not the same as consumed
+# --------------------------------------------------------------------------
+
+
+def test_a_live_prop_is_a_declared_prop() -> None:
+    """A beat can only move something the object is allowed to carry."""
+    for primitive in T1_PRIMITIVES:
+        assert set(primitive.live_props) <= set(primitive.props), primitive.name
+
+
+def test_a_pending_primitive_promises_nothing() -> None:
+    """Nothing draws it, so nothing about it can be live."""
+    for primitive in T1_PRIMITIVES:
+        if not primitive.drawable:
+            assert primitive.live_props == (), primitive.name
+
+
+def test_every_stage_range_names_a_real_prop() -> None:
+    """A range for a prop that does not exist would be silently unreachable."""
+    for primitive_name, prop in STAGE_RANGES:
+        primitive = PRIMITIVE_BY_NAME[primitive_name]
+        assert prop in primitive.props, f"{primitive_name}.{prop}"
+
+
+def test_a_stage_ranged_prop_is_live() -> None:
+    """Stating a unit for a prop no beat may move would be a unit with no reader.
+
+    All three current entries are distances a beat can change, and that is not a
+    coincidence: a distance is exactly the kind of thing a lesson walks from one
+    value to another (安全距离 0.8m → 1.2m), so having a unit and being live go
+    together. If a ranged prop turns out not to be live, this test is the place
+    that says so out loud.
+    """
+    for primitive_name, prop in STAGE_RANGES:
+        assert prop in PRIMITIVE_BY_NAME[primitive_name].live_props, primitive_name
+
+
+def _prop_line(vocabulary: str, primitive_name: str) -> str:
+    """The one prop line for `primitive_name`, before any of it is interpreted."""
+    return next(
+        line for line in vocabulary.splitlines() if line.startswith(f"- `{primitive_name}`：")
+    )
+
+
+def test_the_vocabulary_separates_what_a_beat_can_change() -> None:
+    """The two groups have to be visibly different, because the rule differs.
+
+    Setting `glyph` once on the object is correct and is what both hand-written
+    samples do; setting it *per beat* is the defect `step_state_inert` rejects.
+    A single undifferentiated prop list is what let the model write seven dead
+    beats in the projectile document without ever being told there was a rule.
+    """
+    vocabulary = render_vocabulary()
+
+    for primitive in T1_PRIMITIVES:
+        if not primitive.drawable:
+            continue
+        line = _prop_line(vocabulary, primitive.name)
+        live_part, _, static_part = line.partition("只能整体设置一次")
+
+        for prop in primitive.live_props:
+            assert f"`{prop}`" in live_part, f"{primitive.name}.{prop} 不在「可被节拍改变」里"
+        for prop in primitive.props:
+            if prop in primitive.live_props:
+                continue
+            assert f"`{prop}`" in static_part, f"{primitive.name}.{prop} 不在「只能整体设置一次」里"
+
+
+def test_the_vocabulary_states_the_unit_of_a_distance() -> None:
+    """The model cannot write pixels if it was never told the unit is pixels.
+
+    Every ranged prop says its bounds on the same line as the prop, because a
+    unit stated in a separate section is a unit the model reads after deciding
+    what to write.
+    """
+    vocabulary = render_vocabulary()
+
+    for (primitive_name, prop), (low, high) in STAGE_RANGES.items():
+        line = _prop_line(vocabulary, primitive_name)
+        assert "舞台像素" in line, primitive_name
+        assert f"{low:g}~{high:g}" in line, f"{primitive_name}.{prop}"
+
+
 def test_vocabulary_lists_consumable_props_as_control_targets() -> None:
     vocabulary = render_vocabulary()
 
@@ -390,6 +475,46 @@ def _js_lists() -> tuple[set[str], set[str]]:
         set(re.findall(r"^\s*([a-z_]+):", drawers.group(1), re.M)),
         set(re.findall(r'"([a-z_]+)"', pending.group(1))),
     )
+
+
+def _js_live_props() -> dict[str, list[str]]:
+    """`registry.js`'s `LIVE_PROPS`, as the file states it. Parsed, not imported."""
+    source = _player_registry_source()
+    block = re.search(r"export const LIVE_PROPS = \{(.*?)\n\};", source, re.S)
+    assert block is not None, "registry.js 里找不到 LIVE_PROPS"
+    return {
+        name: re.findall(r'"([a-z_]+)"', props)
+        for name, props in re.findall(r"^\s*([a-z_]+): \[(.*?)\],", block.group(1), re.M | re.S)
+    }
+
+
+def test_the_player_reads_the_same_props_the_validator_allows() -> None:
+    """`live_props` is a claim about the code that draws — this checks the code.
+
+    The validator rejects a beat that sets a prop outside `Primitive.live_props`,
+    and the prompt offers that list to the model as "可被节拍改变". Both of those
+    are statements about `primitives.js`, made from Python. If a name is on the
+    list that no drawer reads, the prompt is making a promise the player breaks:
+    the model writes a beat, validation waves it through, and the picture is
+    identical before and after.
+
+    That is not hypothetical. `vector.direction` was registered, validated and
+    written as `0 / 45 / 90` across three beats of the projectile document, and
+    `drawVector` read `element.dx` — one arrow, three times. Twenty of the 29
+    beats in the three sample documents were like this, and 6 of the 7 scenes
+    came out as stills.
+
+    Parsed rather than imported because pytest must not need Node, and because
+    what is worth checking is what the two files *say*. `tools/player_smoke.mjs`
+    is the check that the drawers actually work.
+    """
+    declared = {
+        primitive.name: list(primitive.live_props)
+        for primitive in T1_PRIMITIVES
+        if primitive.live_props
+    }
+
+    assert _js_live_props() == declared
 
 
 def test_the_player_accounts_for_every_registered_primitive() -> None:

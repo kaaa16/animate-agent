@@ -57,6 +57,39 @@ const DRAWERS = {
  */
 export const PENDING_KINDS = ["region", "wave"];
 
+/**
+ * kind -> the props the drawers in `primitives.js` read at playback.
+ *
+ * The mirror of `Primitive.live_props` in `rendering/registry.py`, written out
+ * by hand for the same reason `PENDING_KINDS` is: so that the two lists drifting
+ * apart is a failing test rather than a picture that quietly does not move.
+ *
+ * The Python side is the one that matters — `step_state_inert` rejects a beat
+ * that sets a prop not in this table, and the Storyboard Agent's prompt is
+ * generated from it. This copy exists so that claim can be checked against the
+ * code that actually draws: a name listed here that no drawer reads makes the
+ * prompt a promise the player breaks, which is exactly how `drawVector` spent
+ * a whole document drawing one arrow while the model wrote three different
+ * directions.
+ *
+ * Adding a prop here without making a drawer read it is therefore the one thing
+ * not to do. If a prop should not be settable per beat, leave it out — the
+ * validator will say so, with the list of props that would work instead.
+ */
+export const LIVE_PROPS = {
+  body: ["speed", "heading", "scale", "visible", "danger"],
+  emitter: ["radius", "enabled"],
+  zone: ["radius", "enabled"],
+  link: ["active"],
+  traveler: ["speed", "progress", "state"],
+  trace: ["length", "visible"],
+  vector: ["magnitude", "direction"],
+  axis: ["range", "ticks"],
+  dimension: ["label"],
+  angle: ["degrees", "radius"],
+  readout: ["text", "align", "tone"],
+};
+
 export const DRAWABLE_KINDS = Object.keys(DRAWERS);
 
 export function drawElement(ctx, element, view) {
