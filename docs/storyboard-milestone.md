@@ -741,6 +741,102 @@ lane 幕：safe_zone.radius     = 0.8    ← 「安全距离 0.8 米」→ 0.8 �
 `ruff` 0、`ruff format --check`（新写的两处已改，仓库里 16 个旧文件的格式欠账仍未动）、`mypy` 0（34 文件）、**276 passed**。
 三份真实产物冒烟：避障 68、ROS 80、抛体 96 次绘制，无异常。
 
+## 声明 ≠ 会动：20 个死节拍，以及让它们动起来（2026-09-14）
+
+用户打开两个播放器链接，反馈是「**连动画效果都没了，而是两张图**」。实测证实了这句话，而且比它更严重。
+
+**先量，不猜。** 用与 `player_smoke.mjs` 同样的推进方式（每拍跑 3 秒，逐元素量最大位移）：
+
+| 场景 | 预设 | 会动的元素 |
+|---|---|---|
+| 避障 `system-lidar` | hub | **无** |
+| 避障 `avoidance-decision` | lane | car / safe_zone / left_space / right_space（后三个只是跟着车平移） |
+| 抛体 scene-1 ~ scene-5 | field | **全部无** |
+
+**7 个场景只有 1 个会动。** 再把每个节拍写下的 `object_states` 逐条对到「有没有代码读它」：
+
+| 文档 | 节拍写下的状态 | 没人读取的 |
+|---|---|---|
+| 抛体 | 19 | **17**（`vector.direction`×7、`vector.magnitude`×4、`angle.degrees`×4、`trace.length`×2） |
+| 避障 | 10 | 3（`emitter.enabled`×2、`body.danger`×1） |
+| 合计 | 29 | **20** |
+
+最刺眼的一处：抛体 scene-1 的五拍讲的就是「初速度方向不同 → 平抛 / 斜抛 / 竖直上抛」。模型写得**完全正确**——`direction` 依次 `0 / 45 / 90`，一条都没错，而 `drawVector` 画的是：
+
+```js
+const tipX = node.x + element.dx;   // 从不调用 view.lookup
+```
+
+箭头纹丝不动。**模型对了，schema 对了，校验台也放过了，画的时候没人读。**
+
+**这是上一轮那条命题的下一层。** 上一轮是「**登记 ≠ 能画**」（`drawable` 门禁）；这一轮是「**声明 ≠ 会动**」——一个属性被声明、被校验台放行、被节拍赋值，却没有任何渲染代码消费它。
+
+### 四类根因
+
+**① 节拍的状态没有消费者（20/29）——最大的一条。** `view.lookup` 是节拍改变画面的**唯一通道**，而只有五个绘制函数走它（`drawEmitter`/`drawZone` 读 `radius`、`drawLink` 读 `active`、`drawReadout` 读 `text`，加上两个行为读 `speed`/`safe_distance`）。其余一律直接读烘焙好的数字。
+
+关键事实：`layout.py` 的每个转换器都以 `props=dict(obj.props)` 结尾，**属性原样留在 spec 里**——播放器看得到 `direction`/`degrees`/`length`，只是没人读。所以这一条**不需要改契约**，只需要绘制函数改读 `lookup`，烘焙值退化为兜底。
+
+**② `field` 没有任何运动行为。** `ballistic` 是按计划推迟的，于是抛体的 5 幕**从构造上**就是静图：`_arc_points` 明明已经把弹道算出来了（49 个采样点），但它只喂给 `trace`，**球本身不在上面走**。
+
+**③ 避障那一幕的危险判定是死的。** `behaviors.js` 从**车身**上找阈值（`lookup(bodyId, "safe_distance")`），走查表第 4 层 `scene.params`。手写基线样本正好把 `safe_distance` 放在那里，所以基线是对的；而真文档里模型写的是 `safe_zone.radius`——`car.safe_distance` 不存在、`scene.params` 是 `{}`，于是 `continue` 掉每一帧，**危险永不触发，避让也永不触发**。小车只会匀速右滑。文档讲的是避障决策，而决策没有发生。
+
+**④ 量纲。** 同一个词，模型眼里是米、布局眼里是像素（上一轮已量过，见上）。`hub` 那一幕的全部内容是「激光雷达扫描前方 180°」，而它画成了一个 16 像素的斑点。
+
+### 改法：一处声明，四处消费
+
+**`Primitive.live_props`** 声明「哪些属性在播放期真的会被读」——`props` 回答「能不能设」，它回答「设了有没有用」。它与 `drawable` 是同构的两个问题，失败也是同一种：`drawable` 低了会让整份分镜在布局层作废，`live_props` 低了会让一整拍在屏幕上静止，**两者都不报错**。
+
+- **校验台**新增 `step_state_inert`：节拍的 `object_states` 只能动 `live_props` 里的属性。**只对 `object_states` 生效，不对 `obj.props` 生效**——`glyph` 本来就不该逐拍改，`direction` 本来就该。这一条把今天的 20 个死节拍全部变成一次**带解释的重试**。
+- **提示词**把属性分成「可被节拍改变」与「只能整体设置一次」两组。这不是新规则，是把**已有的区别第一次说出来**。
+- **`registry.js` 手写一份 `LIVE_PROPS`**，Python 测试断言两边**逐键相等**。手写而非派生，正是为了让「两边不一致」变成一个红测试——和 `PENDING_KINDS` 同一个理由。
+
+**八个绘制函数改读 `lookup`**：`vector` 的 `direction`/`magnitude`、`angle` 的 `degrees`、`trace` 的 `length`/`visible`、`axis` 的 `range`/`ticks`、`body` 的 `heading`/`danger`/`visible`/`scale`、`emitter`/`zone` 的 `enabled`、`dimension` 的 `label`、`readout` 的 `tone`、`traveler` 的 `progress`/`state`。
+
+两个比例**由布局烘焙下来，不在 JS 里重算**：`VectorElement.length_scale`（矢量长度是**场景内**归一化的，最大 `magnitude` 拿满长度）与 `TraceElement.length_reference`。让 JS 重述这条规则就是两处实现、必然漂移。
+
+**`field` 拿到运动。** `layout._flight` 把 `_arc_points` 算出的抛物线挂到球身上（`BodyElement.path` + `duration`）——**与 `trace` 是同一条曲线**，所以「课里画的轨迹」和「球飞的路径」不可能不一致。播放器只做插值，**不做任何物理**（D3）。`duration` 由弧长除以 `THROW_PIXELS_PER_SECOND` 得出，所以 45° 与 15° 是同一次投掷，长弧就是飞得久。
+
+**`RenderScene.thresholds`** 把 body id 映到挂在它身上的 `safe_distance` 角色 zone——**由场景图推导，不问模型怎么写属性名**。这是 ③ 的修法，和 `_chain_boxes` 问「有没有 link 碰它」是同一个动作。同时 `_lane_boxes` 的障碍物偏移改成读**同一个数**：偏移量与危险阈值本来就该同源，两个来源意味着「车在一个距离上反应、障碍物按另一个距离摆」。
+
+顺带：`proximity_gate` 不再要求场景里有 emitter。阈值是**判断**，不是传感器——避障那份的决策幕正是「有车、有阈值圈、有障碍物，没有雷达」。
+
+### 顺带堵掉的一个终局陷阱
+
+词表写着 traveler「沿 link **或 trace** 移动」，而 `_to_traveler` 只认 link，`along` 指向 trace 会抛 `LayoutError`——**布局跑在最后一次 LLM 调用之后**，于是一条提示词承诺、代码拒绝的路径。改掉措辞之外，校验台新增 `relation_wrong_kind`：引用解析得开不等于布局用得动。
+
+### 冒烟工具自己也有同一个盲点（这一段是这一轮最有用的意外）
+
+新增的运行期检查是「**任意相邻两拍画出来的调用序列不得完全相同**」——`step_state_inert` 在运行期的孪生检查，一个查契约、一个查实际画出来的东西。
+
+第一次跑它就报了 `avoidance-decision` 的 step-5 静止，而**这是误报**，且是它自己的两个缺陷：
+
+- `fakeContext` 的 `record` 往 `calls` 里塞的是 `{name, args}` 对象，而新检查用 `calls.join("|")` 序列化——每个调用都变成 `[object Object]`，**两拍永远相等**。换句话说：一条用来抓「画面没变」的检查，因为看不见画面而恒真。修成显式序列化。
+- 更根本的一条：它把样式赋值记成了普通字段。而 `applyHighlight` **只**设 `shadowColor`/`shadowBlur`——**高亮就是一次样式变更**。不记样式，就等于把「绝大多数节拍唯一的动作」从记录里抹掉。改成 `defineProperty` 记录赋值。
+
+原始注释「样式属性只会被赋值、不会被读回，所以普通字段够用」在写它的那天是对的，在这一轮变成错的：**检查读的是什么，决定了记录必须记什么。**
+
+### 门禁与实测
+
+`ruff` 0、`ruff format --check`（新增行干净，仓库既有格式欠账仍未动）、`mypy` 0（34 文件）、**301 passed**（276 → 301，+25）。
+
+在**已落盘的** storyboard 上重跑布局（`tools/layout_storyboard.py`，零 LLM）后：
+
+| | 之前 | 之后 |
+|---|---|---|
+| 会动的场景 | 1/7 | **7/7** |
+| 相邻两拍画面相同的节拍 | — | **0/27** |
+| 避障车进入危险态 | 否 | **是**，最大侧移 12.8px |
+| 抛体球飞行 | 5 幕全静止 | **5 幕全飞** |
+
+**诚实边界：这不是真链路的产物。** 上面这一栏是在**旧的** storyboard JSON 上重跑布局得到的——它证明了「消费端通了」，**没有**证明「模型在新提示词下会写出合规的东西」。真链路要先看模型能不能学会 `radius` 用舞台像素、节拍只动 live 属性；那要花掉几次 LLM 调用，且这一轮的环境里没有可用的 key，**留作下一步**。
+
+### 已知的、这一轮故意不修的
+
+- **`body.heading` 只旋转朝向，不改变 lane 的行驶方向。** 手写基线 `{"car": {"heading": -30}}` 的原意是「转向绕行」，而绕行是由 `clearance_choice` 的侧移实现的。让 `heading` 也改行驶方向会与 lane 的环绕、避让两条逻辑打架。**有意简化**，与待办里「避让几何化」合并考虑。
+- **节拍把属性设成它已经是的值** —— 抛体 scene-4 的第 2、3 拍写 `magnitude: 7`、`direction: 0`，与对象自身的值一字不差，所以**效果上**仍是空拍（尽管它现在是「合法」的）。这是 M4 跟进 2（`control_default_conflicts_with_prop`）的同类，属于「值与既有一致」而不是「属性无人消费」。校验台看不出，运行期检查也看不出（高亮不同使画面确实不同）。**记录，未修。**
+- **高亮仍然是大多数节拍唯一的变化**，而它的显著性早在 M1 ② 就记为不足。7/7 会动 ≠ 7/7 好看。
+
 ## 待办与已知风险
 
 - **S1 已完成（2026-09-13）：真文档跑出了真 StoryboardIR。**
