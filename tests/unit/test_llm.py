@@ -160,6 +160,25 @@ def test_quotes_around_a_value_are_not_part_of_it(
     assert os.environ["DEEPSEEK_KEY"] == "sk-quoted"
 
 
+def test_a_byte_order_mark_does_not_break_the_first_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows editors still offer "UTF-8 with BOM". Decoding as plain `utf-8`
+    # leaves the mark glued to the first name, so it parses as U+FEFF +
+    # "DEEPSEEK_KEY" — a variable nobody reads, and the real key never loads.
+    # Silently, which is the whole failure mode this loader exists to remove.
+    monkeypatch.delenv("DEEPSEEK_KEY", raising=False)
+    path = tmp_path / ".env"
+    path.write_bytes(b"\xef\xbb\xbfDEEPSEEK_KEY=sk-after-bom\n")
+
+    assert load_env_file(path) == ["DEEPSEEK_KEY"]
+    assert os.environ["DEEPSEEK_KEY"] == "sk-after-bom"
+    # No name anywhere may carry the mark: that is the shape of the bug, and it
+    # is invisible in a diff. Built from its code point so this file stays ASCII
+    # and no invisible character ends up in the source.
+    assert not any(name.startswith(chr(0xFEFF)) for name in os.environ)
+
+
 def test_a_missing_env_file_is_not_an_error(tmp_path: Path) -> None:
     # Exporting the variable directly is a normal way to work, so a missing file
     # must not be a fault the caller has to guard against.

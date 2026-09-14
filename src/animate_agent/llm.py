@@ -111,7 +111,12 @@ def load_env_file(path: Path = ENV_FILE) -> list[str]:
     if not path.is_file():
         return []
     filled: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # `utf-8-sig`, not `utf-8`: Windows editors still offer "UTF-8 with BOM", and
+    # a BOM would otherwise ride along on the *first* name in the file, so the
+    # name parses as U+FEFF + "DEEPSEEK_KEY" — a variable nobody asked for,
+    # while the real key silently never loads. `utf-8-sig` decodes plain UTF-8
+    # byte-for-byte identically, so this costs nothing on a BOM-less file.
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
         name, separator, value = line.partition("=")
         if not separator:
             continue  # a blank line, or a comment that assigns nothing
