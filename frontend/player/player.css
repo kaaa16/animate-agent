@@ -1,0 +1,244 @@
+/*
+ * Player stylesheet.
+ *
+ * The custom properties below are copied from `frontend/demo/styles.css:1-17`,
+ * which is where this project's visual language already lives. They live in the
+ * spec's consumers, never in the spec: a colour in a `RenderSpec` could not
+ * follow `body.danger` when it flips during playback (decision D1).
+ *
+ * Those 12 variables are also the theme `stage.js` reads at boot. If a name
+ * changes here and not there, `readTheme` falls back to its own literals and the
+ * page quietly loses its palette — so the two lists are kept in the same order.
+ */
+
+:root {
+  color-scheme: dark;
+  --bg: #07080d;
+  --panel: rgba(13, 18, 28, 0.86);
+  --panel-strong: rgba(19, 27, 41, 0.94);
+  --line: rgba(83, 246, 255, 0.32);
+  --line-hot: #42f7ff;
+  --magenta: #ff2fd6;
+  --yellow: #f4f06d;
+  --green: #5dff9c;
+  --text: #ecfbff;
+  --muted: #91a6b8;
+  --danger: #ff5e7a;
+  --shadow: 0 0 28px rgba(66, 247, 255, 0.16);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 12% 8%, rgba(66, 247, 255, 0.09), transparent 42%),
+    radial-gradient(circle at 88% 92%, rgba(255, 47, 214, 0.08), transparent 46%),
+    var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 26px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-strong);
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--magenta);
+}
+
+h1 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.goal {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 62ch;
+}
+
+.transport {
+  display: flex;
+  gap: 8px;
+}
+
+.transport button {
+  min-width: 62px;
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.transport button:hover {
+  border-color: var(--line-hot);
+  box-shadow: var(--shadow);
+}
+
+.layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+  padding: 18px 26px 26px;
+  min-height: 0;
+}
+
+.stage-wrap {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  /*
+   * A floor on the height, not a preference. The canvas sizes itself as
+   * `height: 100%` of this box, and this box's height comes from a grid row
+   * being stretched — which collapses to 0 if anything upstream stops
+   * stretching. A 0-height canvas draws nothing and reports no error, so the
+   * page would look blank rather than broken. This makes that impossible.
+   */
+  min-height: min(62vh, 620px);
+}
+
+/* The canvas is sized by CSS and its backing store by `stage.js`, so the
+   drawing buffer always matches the device pixel ratio. */
+#stage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+}
+
+.error {
+  position: absolute;
+  inset: 16px auto auto 16px;
+  max-width: min(560px, 78%);
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--danger);
+  background: rgba(28, 8, 14, 0.92);
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  overflow: auto;
+}
+
+h2 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--line-hot);
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.control {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 10px;
+  font-size: 13px;
+}
+
+.control input[type="range"] {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: var(--line-hot);
+}
+
+.control output {
+  color: var(--line-hot);
+  font-variant-numeric: tabular-nums;
+}
+
+.control-button {
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.control-button:hover {
+  border-color: var(--line-hot);
+}
+
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.step {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.step.is-current {
+  border-color: var(--line-hot);
+  box-shadow: var(--shadow);
+}
+
+.step-title {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--line-hot);
+}
+
+.step-body {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.step.is-current .step-body {
+  color: var(--text);
+}

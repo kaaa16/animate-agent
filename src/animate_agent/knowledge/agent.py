@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import re
-from typing import Any, cast
+from typing import Any
 
 from animate_agent.documents.models import DocumentIR
+from animate_agent.json_utils import extract_json_object
 from animate_agent.knowledge.fidelity import (
     FIDELITY_SYSTEM_PROMPT,
     FidelityReport,
@@ -14,29 +13,13 @@ from animate_agent.knowledge.fidelity import (
 )
 from animate_agent.knowledge.models import LessonIR
 from animate_agent.knowledge.prompts import KNOWLEDGE_SYSTEM_PROMPT, build_knowledge_prompt
-from animate_agent.llm import LLMClient
+from animate_agent.llm import DEFAULT_MAX_TOKENS, LLMClient
 
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_MAX_SCENES = 10
 DEFAULT_TEMPERATURE = 0.4
 DEFAULT_REQUIRE_FULL_COVERAGE = True
 DEFAULT_VERIFY_FIDELITY = False
-
-
-def _extract_json(raw: str) -> dict[str, Any]:
-    """Extract a JSON object from an LLM response, tolerating fences and prose."""
-    text = raw.strip()
-    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        text = text[start : end + 1]
-    parsed: Any = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise ValueError(f"LLM 输出不是 JSON 对象: {type(parsed)!r}")
-    return cast("dict[str, Any]", parsed)
 
 
 def _derive_lesson_id(document: DocumentIR) -> str:
@@ -104,9 +87,11 @@ class KnowledgeAgent:
         ]
         last_error = ""
         for _attempt in range(1, self._max_retries + 1):
-            raw = await self._llm.chat(messages, temperature=self._temperature, max_tokens=8192)
+            raw = await self._llm.chat(
+                messages, temperature=self._temperature, max_tokens=DEFAULT_MAX_TOKENS
+            )
             try:
-                data = _extract_json(raw)
+                data = extract_json_object(raw)
                 lesson = self._validate(document, data)
                 if self._verify_fidelity:
                     report = await self._check_fidelity(document, lesson)
@@ -135,7 +120,7 @@ class KnowledgeAgent:
             {"role": "user", "content": build_fidelity_prompt(document, lesson)},
         ]
         raw = await self._llm.chat(messages, temperature=0.0, max_tokens=2048)
-        return FidelityReport.model_validate(_extract_json(raw))
+        return FidelityReport.model_validate(extract_json_object(raw))
 
     def _validate(self, document: DocumentIR, data: dict[str, Any]) -> LessonIR:
         data = dict(data)

@@ -1,0 +1,115 @@
+{
+  "storyboard_id": "storyboard-ros-pub-sub",
+  "lesson_id": "lesson-ros-pub-sub",
+  "document_id": "doc-ros-pub-sub",
+  "title": "ROS 发布/订阅链路",
+  "subject": "机器人",
+  "eyebrow": "ROS · 话题通信",
+  "scenes": [
+    {
+      "id": "shot-1",
+      "scene_type": "chain",
+      "teaching_goal": "看懂一条话题消息从发布到订阅的完整路径",
+      "lesson_scene_ids": ["scene-1"],
+      "objects": [
+        {
+          "id": "talker",
+          "role": "node",
+          "label": "Publisher 节点",
+          "props": {},
+          "source_refs": []
+        },
+        {
+          "id": "cmd-topic",
+          "role": "topic",
+          "label": "/cmd_vel",
+          "props": { "from": "talker", "to": "base", "active": true },
+          "source_refs": []
+        },
+        {
+          "id": "twist",
+          "role": "message",
+          "label": "Twist 消息",
+          "props": { "along": "cmd-topic", "speed": 0.5, "state": "待发布" },
+          "source_refs": []
+        },
+        {
+          "id": "base",
+          "role": "node",
+          "label": "Subscriber 节点",
+          "props": {},
+          "source_refs": []
+        },
+        {
+          "id": "runtime",
+          "role": "vehicle",
+          "label": "机器人运行时",
+          "props": { "heading": 0 },
+          "source_refs": []
+        },
+        {
+          "id": "message-type",
+          "role": "hud",
+          "label": "消息类型",
+          "props": { "text": "geometry_msgs/Twist", "align": "left" },
+          "source_refs": []
+        }
+      ],
+      "steps": [
+        {
+          "id": "graph",
+          "title": "生成知识拓扑",
+          "description": "手册里的节点与话题被抽成一张可点击的拓扑图。",
+          "highlights": ["talker", "cmd-topic", "base"],
+          "object_states": {},
+          "key_points": ["节点", "话题"]
+        },
+        {
+          "id": "publish",
+          "title": "发布者写入话题",
+          "description": "发布者把 Twist 消息写进 /cmd_vel，令牌开始沿链路前进。",
+          "highlights": ["talker", "twist"],
+          "object_states": { "twist": { "state": "已发布" } },
+          "key_points": ["发布", "消息载荷"]
+        },
+        {
+          "id": "receive",
+          "title": "订阅者收到回调",
+          "description": "订阅者收到消息后触发回调，机器人运行时随之改变状态。",
+          "highlights": ["base", "runtime"],
+          "object_states": { "twist": { "state": "已接收" } },
+          "key_points": ["回调", "驱动运行时"]
+        },
+        {
+          "id": "inspect",
+          "title": "反向定位源码",
+          "description": "点话题或消息类型，可以反向高亮写出它的那个节点。",
+          "highlights": ["cmd-topic", "message-type", "talker"],
+          "object_states": {},
+          "key_points": ["源码关联", "消息类型"]
+        }
+      ],
+      "controls": [
+        {
+          "id": "message-speed",
+          "type": "slider",
+          "label": "消息速度",
+          "target_property": "twist.speed",
+          "min": 0.2,
+          "max": 1.5,
+          "default": 0.5,
+          "step": 0.1
+        },
+        {
+          "id": "next-shot",
+          "type": "button",
+          "label": "推进镜头",
+          "target_property": "timeline",
+          "action": "advance_timeline"
+        }
+      ],
+      "params": {},
+      "renderer_hint": "canvas_2d"
+    }
+  ]
+}

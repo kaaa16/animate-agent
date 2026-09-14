@@ -9,6 +9,22 @@ from typing import Any
 
 import httpx
 
+#: Output budget for one chat call. The configured endpoint serves a *reasoning*
+#: model: `max_tokens` covers the hidden reasoning plus the visible answer, and
+#: on the storyboard prompt the reasoning alone runs to ~23k tokens. A tight
+#: budget is spent entirely on reasoning, which returns HTTP 200 with an empty
+#: body — not an error the transport can flag.
+DEFAULT_MAX_TOKENS = 32768
+
+
+class LLMBudgetExhaustedError(RuntimeError):
+    """The model spent its whole output budget on reasoning and never answered.
+
+    Deliberately not a `ValueError`: the agents retry on `ValueError`, and
+    retrying at the same budget cannot succeed — it just burns another slow,
+    expensive reasoning call.
+    """
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -54,9 +70,21 @@ class LLMClient:
         choices = data.get("choices")
         if not choices:
             raise ValueError(f"LLM returned no choices: {data}")
-        content = choices[0].get("message", {}).get("content")
+
+        choice = choices[0]
+        content = choice.get("message", {}).get("content")
         if not isinstance(content, str):
             raise ValueError(f"LLM returned non-string content: {content!r}")
+        if not content.strip():
+            # Left undetected, an exhausted budget surfaces further down as
+            # "Expecting value: line 1 column 1", which blames the JSON instead
+            # of the budget and sends you looking in the wrong place.
+            if choice.get("finish_reason") == "length":
+                raise LLMBudgetExhaustedError(
+                    f"模型把 max_tokens({max_tokens}) 全部用在推理上，没有产出正文。"
+                    "请调大 max_tokens——用同样的预算重试没有意义。"
+                )
+            raise ValueError(f"LLM 返回空正文（finish_reason={choice.get('finish_reason')}）")
         return content
 
     async def aclose(self) -> None:

@@ -1,0 +1,130 @@
+{
+  "storyboard_id": "storyboard-robot-obstacle-avoidance",
+  "lesson_id": "lesson-robot-obstacle-avoidance",
+  "document_id": "doc-robot-obstacle-avoidance",
+  "title": "小车避障教学动画",
+  "subject": "机器人",
+  "eyebrow": "避障 · 决策逻辑",
+  "scenes": [
+    {
+      "id": "shot-1",
+      "scene_type": "lane",
+      "teaching_goal": "看懂从测距到转向的完整避障决策链",
+      "lesson_scene_ids": ["scene-1"],
+      "objects": [
+        {
+          "id": "car",
+          "role": "vehicle",
+          "label": "小车",
+          "props": { "speed": 1.0, "heading": 0, "glyph": "car" },
+          "source_refs": []
+        },
+        {
+          "id": "lidar",
+          "role": "sensor",
+          "label": "2D 激光雷达",
+          "props": { "radius": 150, "fov": 270, "of": "car" },
+          "source_refs": []
+        },
+        {
+          "id": "safe-zone",
+          "role": "safe_distance",
+          "label": "安全距离",
+          "props": { "of": "car" },
+          "source_refs": []
+        },
+        {
+          "id": "obstacle-a",
+          "role": "obstacle",
+          "label": "障碍物 A",
+          "props": { "glyph": "obstacle_octagon" },
+          "source_refs": []
+        },
+        {
+          "id": "obstacle-b",
+          "role": "obstacle",
+          "label": "障碍物 B",
+          "props": { "glyph": "obstacle_octagon" },
+          "source_refs": []
+        }
+      ],
+      "steps": [
+        {
+          "id": "scan",
+          "title": "雷达扫描",
+          "description": "雷达向前方扇形区域发射多条测距射线。",
+          "highlights": ["lidar"],
+          "object_states": { "lidar": { "enabled": true } },
+          "key_points": ["雷达测距", "扇形扫描"]
+        },
+        {
+          "id": "detect",
+          "title": "命中障碍",
+          "description": "最近回波被标记为危险候选点。",
+          "highlights": ["lidar", "obstacle-a"],
+          "object_states": { "obstacle-a": { "danger": true } },
+          "key_points": ["最近回波", "危险候选点"]
+        },
+        {
+          "id": "decide",
+          "title": "阈值判断",
+          "description": "最近距离低于安全距离时，控制器进入避障状态。",
+          "highlights": ["car", "obstacle-a"],
+          "object_states": { "car": { "danger": true } },
+          "key_points": ["安全距离", "避障状态"]
+        },
+        {
+          "id": "avoid",
+          "title": "转向绕行",
+          "description": "控制器比较左右空旷程度，选择更安全的一侧。",
+          "highlights": ["car", "obstacle-a", "obstacle-b"],
+          "object_states": { "car": { "heading": -30, "danger": false } },
+          "key_points": ["左右空旷度", "选择转向"]
+        }
+      ],
+      "controls": [
+        {
+          "id": "speed",
+          "type": "slider",
+          "label": "车速",
+          "target_property": "car.speed",
+          "min": 0.4,
+          "max": 2.2,
+          "default": 1.0,
+          "step": 0.1
+        },
+        {
+          "id": "lidar-radius",
+          "type": "slider",
+          "label": "雷达半径",
+          "target_property": "lidar.radius",
+          "min": 90,
+          "max": 210,
+          "default": 150,
+          "step": 5,
+          "unit": "px"
+        },
+        {
+          "id": "safe-distance",
+          "type": "slider",
+          "label": "安全距离",
+          "target_property": "scene.safe_distance",
+          "min": 45,
+          "max": 120,
+          "default": 76,
+          "step": 2,
+          "unit": "px"
+        },
+        {
+          "id": "reset",
+          "type": "button",
+          "label": "重置",
+          "target_property": "scene",
+          "action": "reset_scene"
+        }
+      ],
+      "params": { "safe_distance": 76 },
+      "renderer_hint": "canvas_2d"
+    }
+  ]
+}

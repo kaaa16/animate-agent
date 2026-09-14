@@ -16,9 +16,18 @@ animation:
     - three_3d
 
 agent:
+  # 单个 storyboard 场景里的教学节拍（step）数量上限，与下面的下限一起读。
+  # 注意：这是「一幕里的节拍数」，不是「文档里的幕数」——幕数由 LessonIR 的覆盖关系决定。
   max_storyboard_steps: 7
   require_visual_objects: true
   require_interactive_demo: true
+
+storyboard:
+  # 单个场景的节拍数下限。上限沿用上面的 agent.max_storyboard_steps。
+  min_storyboard_steps: 3
+  # 比 knowledge 的 0.4 低：这一层是 schema 密集型，创作部分上游已经做完。
+  temperature: 0.3
+  max_retries: 3
 
 llm:
   base_url: https://api.deepseek.com

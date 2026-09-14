@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>智教 · 分镜播放器</title>
+    <link rel="stylesheet" href="./player.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div>
+        <p class="eyebrow" id="eyebrow"></p>
+        <h1 id="title">载入中…</h1>
+        <p class="goal" id="goal"></p>
+      </div>
+      <div class="transport">
+        <button type="button" id="prev" title="上一拍（←）">◀</button>
+        <button type="button" id="play" title="播放 / 暂停（空格）">暂停</button>
+        <button type="button" id="next" title="下一拍（→）">▶</button>
+        <button type="button" id="reset" title="回到第一拍">重置</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="stage-wrap">
+        <canvas id="stage"></canvas>
+        <!--
+          Errors are rendered on the page rather than swallowed. A blank canvas
+          and a badly-drawn one are indistinguishable to a person looking at the
+          screen, so the player says which one it is (decision: visible errors).
+        -->
+        <pre class="error" id="error" hidden></pre>
+      </section>
+
+      <aside class="side">
+        <div>
+          <h2>控制台</h2>
+          <div class="controls" id="controls"></div>
+        </div>
+        <div class="steps-block">
+          <h2>教学节拍</h2>
+          <ol class="steps" id="steps"></ol>
+        </div>
+      </aside>
+    </main>
+
+    <script type="module" src="./player.js"></script>
+  </body>
+</html>

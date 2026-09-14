@@ -7,7 +7,8 @@ import httpx
 import pytest
 
 from animate_agent.documents.models import DocumentBlock, DocumentIR, DocumentSource, Section
-from animate_agent.knowledge.agent import KnowledgeAgent, _extract_json
+from animate_agent.json_utils import extract_json_object
+from animate_agent.knowledge.agent import KnowledgeAgent
 from animate_agent.knowledge.fidelity import FidelityReport, build_fidelity_prompt
 from animate_agent.knowledge.models import LessonIR
 from animate_agent.llm import LLMClient, LLMConfig
@@ -103,11 +104,11 @@ def _run_generate(
 
 
 def test_extract_json_strips_fence() -> None:
-    assert _extract_json('```json\n{"a": 1}\n```') == {"a": 1}
+    assert extract_json_object('```json\n{"a": 1}\n```') == {"a": 1}
 
 
 def test_extract_json_extracts_from_prose() -> None:
-    assert _extract_json('结果如下：{"a": 1} 完成') == {"a": 1}
+    assert extract_json_object('结果如下：{"a": 1} 完成') == {"a": 1}
 
 
 def _complete_lesson(**overrides) -> dict:

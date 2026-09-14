@@ -1,0 +1,6 @@
+{
+  "name": "animate-agent-player",
+  "private": true,
+  "type": "module",
+  "description": "Marks this directory as ESM so Node can import the player modules. The browser does not need it (the script tag carries type=\"module\"), but without it Node resolves the .js files as CommonJS and `tools/player_smoke.mjs` cannot run. Scoped to this folder on purpose: the sibling frontend/package.json belongs to the Next app and must not change."
+}
