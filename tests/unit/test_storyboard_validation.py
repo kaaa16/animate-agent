@@ -121,13 +121,23 @@ def _storyboard_dict() -> dict[str, Any]:
                         "label": "安全距离",
                         "props": {"radius": 76, "of": "car"},
                     },
+                    # A `readout`, because the fixture had none and the prop
+                    # groups are where the two live/static rules differ. This is
+                    # also the shape the hand-written ROS sample uses: alignment
+                    # declared once on the panel, not walked by a beat.
+                    {
+                        "id": "hud",
+                        "role": "caption",
+                        "label": "决策说明",
+                        "props": {"text": "距离 > 安全距离 → 直行", "align": "left"},
+                    },
                 ],
                 "steps": [
                     {
                         "id": "step-1",
                         "title": "雷达扫描",
                         "description": "雷达向前方扇形区域发射多条测距射线，返回每个方向的距离",
-                        "highlights": ["lidar"],
+                        "highlights": ["lidar", "hud"],
                         "key_points": ["安全距离"],
                     },
                     {
@@ -175,6 +185,11 @@ def _storyboard_dict() -> dict[str, Any]:
 
 def _scene(data: dict[str, Any]) -> dict[str, Any]:
     return data["scenes"][0]
+
+
+def _object(data: dict[str, Any], object_id: str) -> dict[str, Any]:
+    """One object of the fixture scene, by id. Indices move; ids do not."""
+    return next(obj for obj in _scene(data)["objects"] if obj["id"] == object_id)
 
 
 def _codes(data: dict[str, Any], *, lesson: LessonIR | None = None) -> set[str]:
@@ -462,6 +477,48 @@ def test_the_same_prop_is_fine_set_once_on_the_object() -> None:
     codes = _codes(_mutation(mutate))
 
     assert "step_state_inert" not in codes
+
+
+def test_a_prop_that_is_settled_at_layout_time_is_not_a_beat_prop() -> None:
+    """`readout.align` was on the live list, and nothing read it at playback.
+
+    Alignment is decided once, when the layout places the panel (`_align_of` in
+    `layout.py`), and baked onto the element. So a beat writing
+    `{"hud": {"align": "center"}}` used to pass every gate it could: the prop is
+    real, it is registered, and the prompt offered it as 可被节拍改变 — while the
+    panel stayed exactly where it was. `step_state_inert` waved it through *by
+    design*, because the gate trusts that table, and the table was wrong.
+
+    The JS↔Python drift test could not catch it either, for a reason worth
+    keeping: both files said the same wrong thing. A mirror finds divergence, not
+    a shared mistake. `axis.origin` is the precedent, and the reason the rule is
+    phrased as "does a drawer read it" rather than "is it nice to vary".
+    """
+
+    def mutate(data: dict[str, Any]) -> None:
+        _scene(data)["steps"][1]["object_states"] = {"hud": {"align": "center"}}
+
+    codes = _codes(_mutation(mutate))
+
+    assert "step_state_inert" in codes
+    assert "unknown_step_prop" not in codes  # `align` is readout's own prop
+
+
+def test_the_same_align_is_fine_set_once_on_the_panel() -> None:
+    """The rule's other half: asking for it once is what a panel is for.
+
+    Without this, "move `align` out of `live_props`" would be indistinguishable
+    from "ban `align`", and the hand-written ROS sample — which sets it on the
+    object — would be writing something the validator forbade.
+    """
+
+    def mutate(data: dict[str, Any]) -> None:
+        _object(data, "hud")["props"]["align"] = "center"
+
+    codes = _codes(_mutation(mutate))
+
+    assert "step_state_inert" not in codes
+    assert codes == set()
 
 
 def test_step_state_inert_names_what_the_beat_could_change() -> None:

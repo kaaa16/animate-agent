@@ -252,7 +252,19 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         roles=("hud", "decision", "caption", "code", "formula"),
         props=("text", "align", "tone"),
         relations=(),
-        live_props=("text", "align", "tone"),
+        # `align` is not here, for the reason `axis.origin` is not: it is settled
+        # once, at layout time (`_align_of`), and `drawReadout` reads the baked
+        # value straight off the element rather than asking `view.lookup`. A
+        # panel that re-aligns itself between beats is also a worse picture than
+        # one that does not. It stays in `props`, where asking for it once is a
+        # real request — the hand-written ROS sample does exactly that.
+        #
+        # It was on this list, and that mattered: the prop is real, it is
+        # registered, the prompt offered it as 可被节拍改变, so `step_state_inert`
+        # waved it through by design. The gate's own table held the defect the
+        # gate exists to catch, and the JS↔Python drift test could not see it,
+        # because both files said the same wrong thing.
+        live_props=("text", "tone"),
         note="文本面板；公式在这里是构建期渲好的 path，不是可解析文本",
     ),
 )

@@ -350,11 +350,25 @@ export function drawReadout(ctx, element, view) {
   ctx.fillStyle = view.theme.text;
   ctx.font = "14px Inter, 'Microsoft YaHei', sans-serif";
   ctx.textBaseline = "middle";
-  ctx.textAlign = "left";
+  // Deliberately `element.align` and not `view.lookup(element.id, "align", …)`:
+  // alignment is settled once when the layout places the panel, so the baked
+  // value *is* the answer, and a panel that re-aligns itself between beats reads
+  // as a glitch rather than as a beat. `LIVE_PROPS` in `registry.js` leaves the
+  // name out to say the same thing from the other side. It went unread entirely
+  // before this — the layout computed it, the schema carried it, the drawer
+  // ignored it and drew everything left.
+  ctx.textAlign =
+    element.align === "center" || element.align === "right" ? element.align : "left";
+  const textX =
+    ctx.textAlign === "left"
+      ? left + padding
+      : ctx.textAlign === "right"
+        ? left + width - padding
+        : element.x;
   lines.forEach((line, index) => {
     // `fillText`, never `innerHTML` — spec text is data, and the player does not
     // hand it to anything that parses (decision D4).
-    ctx.fillText(line, left + padding, top + padding + lineHeight * (index + 0.5));
+    ctx.fillText(line, textX, top + padding + lineHeight * (index + 0.5));
   });
   ctx.restore();
 }

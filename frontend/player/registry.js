@@ -87,7 +87,11 @@ export const LIVE_PROPS = {
   axis: ["range", "ticks"],
   dimension: ["label"],
   angle: ["degrees", "radius"],
-  readout: ["text", "align", "tone"],
+  // `align` is absent on purpose. Layout settles it once (`_align_of` in
+  // `layout.py`) and `drawReadout` reads the baked value; nothing asks
+  // `view.lookup` for it. It used to be listed and was not read, which is the
+  // one shape of wrong this table exists to make impossible — see the note above.
+  readout: ["text", "tone"],
 };
 
 export const DRAWABLE_KINDS = Object.keys(DRAWERS);

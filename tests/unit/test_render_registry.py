@@ -262,6 +262,25 @@ def test_a_stage_ranged_prop_is_live() -> None:
         assert prop in PRIMITIVE_BY_NAME[primitive_name].live_props, primitive_name
 
 
+def test_a_prop_settled_at_layout_time_stays_out_of_live_props() -> None:
+    """The named case behind the rule, so the table cannot drift back into it.
+
+    `readout.align` was declared live. Alignment is decided once by `_align_of`
+    and baked onto the element; `drawReadout` reads that baked value and never
+    asks `view.lookup` for it. So the name was a promise about the drawing code,
+    written in the table `step_state_inert` trusts — and a beat writing
+    `{"hud": {"align": "center"}}` was accepted by every layer and moved nothing.
+
+    Both halves are asserted, because the fix has to land between them: `align`
+    stays a prop a *scene* sets once (the hand-written ROS sample does exactly
+    that), and stops being one a *beat* moves.
+    """
+    readout = PRIMITIVE_BY_NAME["readout"]
+
+    assert "align" in readout.props
+    assert "align" not in readout.live_props
+
+
 def _prop_line(vocabulary: str, primitive_name: str) -> str:
     """The one prop line for `primitive_name`, before any of it is interpreted."""
     return next(
