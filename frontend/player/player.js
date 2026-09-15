@@ -338,9 +338,8 @@ function loadScene(index) {
 }
 
 async function main() {
-  const specUrl =
-    new URLSearchParams(window.location.search).get("spec") ||
-    "/data/generated/render-robot_obstacle_avoidance.json";
+  const params = new URLSearchParams(window.location.search);
+  const specUrl = params.get("spec") || "/data/generated/render-robot_obstacle_avoidance.json";
 
   let spec;
   try {
@@ -362,8 +361,19 @@ async function main() {
   state.viewport = createStage(ui.canvas, spec.stage);
   state.viewport.resize();
 
-  loadScene(0);
+  // `?scene=N&step=N` opens the player at a given beat. Added for acceptance:
+  // a headless screenshot can only capture whatever is on screen when it fires,
+  // so without this the only frame anyone could look at was the first beat of
+  // the first scene — which is exactly how "four identical rounded rectangles"
+  // got recorded for one document and never checked in the other two.
+  //
+  // Out of range is clamped rather than rejected, here and in `setStep`: a bad
+  // index in a URL should still show you a picture, not a blank page.
+  const sceneIndex = Number(params.get("scene") ?? 0);
+  const stepIndex = Number(params.get("step") ?? 0);
+  loadScene(Number.isInteger(sceneIndex) ? Math.max(0, Math.min(spec.scenes.length - 1, sceneIndex)) : 0);
   bind();
+  if (Number.isInteger(stepIndex) && stepIndex > 0) setStep(stepIndex);
   requestAnimationFrame(tick);
 }
 
