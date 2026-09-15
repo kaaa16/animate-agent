@@ -131,13 +131,23 @@ def _storyboard_dict() -> dict[str, Any]:
                         "label": "决策说明",
                         "props": {"text": "距离 > 安全距离 → 直行", "align": "left"},
                     },
+                    # An `axis`, because `range` is a *required prop* and the
+                    # fixture had no primitive that declares one. A lane scene
+                    # with a coordinate axis is a little odd; it is here so that
+                    # the rule has something to fire on.
+                    {
+                        "id": "axis_x",
+                        "role": "x_axis",
+                        "label": "水平方向",
+                        "props": {"range": 10, "ticks": 5},
+                    },
                 ],
                 "steps": [
                     {
                         "id": "step-1",
                         "title": "雷达扫描",
                         "description": "雷达向前方扇形区域发射多条测距射线，返回每个方向的距离",
-                        "highlights": ["lidar", "hud"],
+                        "highlights": ["lidar", "hud", "axis_x"],
                         "key_points": ["安全距离"],
                     },
                     {
@@ -502,6 +512,39 @@ def test_a_prop_that_is_settled_at_layout_time_is_not_a_beat_prop() -> None:
 
     assert "step_state_inert" in codes
     assert "unknown_step_prop" not in codes  # `align` is readout's own prop
+
+
+def test_required_prop_missing() -> None:
+    """An omission that leaves a complete, well-formed, meaningless drawing.
+
+    `axis` without `range` is a shaft, five evenly spaced notches and an
+    arrowhead. Nothing is blank, nothing throws, and it is not a coordinate axis
+    — the tick labels come from `range` and there is nothing to label with. The
+    projectile document's two axes were both like this and every check waved them
+    through, because every check asked whether a thing that *was* written was
+    legal, and none asked whether a thing that *had* to be written was there.
+
+    `drawAxis` had the right sentence written above it the whole time. A comment
+    is not a gate.
+    """
+
+    def mutate(data: dict[str, Any]) -> None:
+        del _object(data, "axis_x")["props"]["range"]
+
+    codes = _codes(_mutation(mutate))
+
+    assert "required_prop_missing" in codes
+    assert "unknown_step_prop" not in codes  # `range` 是这个角色自己的属性
+
+
+def test_an_axis_that_declares_its_range_is_fine() -> None:
+    """The rule's other half: the fixture carries `range` and reports nothing.
+
+    Without this, "reject an axis with no `range`" would be indistinguishable
+    from "reject axes", and the two axes in `data/generated/` that *do* label
+    their ticks would be the ones rejected.
+    """
+    assert _codes(_storyboard_dict()) == set()
 
 
 def test_the_same_align_is_fine_set_once_on_the_panel() -> None:

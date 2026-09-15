@@ -120,6 +120,7 @@ def validate_storyboard(
         )
         _check_references(scene, where, issues)
         _check_required_relations(scene, where, issues)
+        _check_required_props(scene, where, issues)
         _check_steps(scene, where, limits, issues)
         _check_controls(scene, where, issues)
         _check_orphans(scene, where, issues)
@@ -555,6 +556,49 @@ def _check_required_relations(
                 "填同一场景内另一个对象的 id。没有它布局层算不出这个对象画在哪，"
                 f"画面会缺一块但不会报错。本场景合法 id："
                 f"{'、'.join(sorted(obj2.id for obj2 in scene.objects))}",
+            )
+        )
+
+
+def _check_required_props(
+    scene: StoryboardScene,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """Every object must carry the props its drawing is meaningless without.
+
+    The next question out from `_check_required_relations`, and a different kind
+    of failure. That one catches an object with no geometry, so its symptom is a
+    hole in the picture. This one catches an object that is drawn completely and
+    teaches nothing: an `axis` with no `range` is a shaft, five evenly spaced
+    notches and an arrowhead — a well-formed drawing of something that is not a
+    coordinate axis. Three axes across the sample documents' descendants omitted
+    it, nothing reported anything, and the only symptom was that a lesson about
+    motion along axes had notched arrows on it instead.
+
+    So the missing check here is not "is a thing absent" but "is a thing still
+    what it claims to be", which is why it belongs in the validator rather than
+    in a comment next to the drawer. `drawAxis` had the right sentence written
+    above it the whole time. **A comment is not a gate.**
+    """
+    for obj_index, obj in enumerate(scene.objects):
+        primitive_name = ROLE_TO_PRIMITIVE.get(obj.role)
+        if primitive_name is None:
+            continue  # unknown_role already reported
+        primitive = PRIMITIVE_BY_NAME[primitive_name]
+        missing = [
+            prop for prop in primitive.required_props if obj.props.get(prop) is None
+        ]
+        if not missing:
+            continue
+        issues.append(
+            ValidationIssue(
+                "required_prop_missing",
+                f"{where}.objects[{obj_index}].props",
+                f"角色 `{obj.role}`（图元 `{primitive_name}`）必须写出属性 "
+                f"{'、'.join(f'`{prop}`' for prop in missing)}——"
+                "缺了它画面照样画得出来、也不会报错，只是画出来的不是它该有的样子"
+                f"（{primitive.note}）",
             )
         )
 

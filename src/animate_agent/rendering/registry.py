@@ -73,6 +73,23 @@ class Primitive:
     #: their primitive. A test asserts this is a subset of `relations`.
     required_relations: tuple[str, ...] = ()
 
+    #: Props the drawing is **meaningless** without — the next question out from
+    #: `required_relations`, asked the other way round.
+    #:
+    #: `required_relations` asks "can the layout compute where this goes". This
+    #: asks "does the result still teach anything". An `axis` with no `range` has
+    #: a complete, well-formed geometry: a shaft, five evenly spaced notches, an
+    #: arrowhead. It just is not a coordinate axis — it is a notched arrow, and
+    #: `drawAxis` says as much where it decides whether to label the ticks. The
+    #: projectile document drew two of those and called them 坐标轴.
+    #:
+    #: So the failure this prevents is not a missing object but a plausible one,
+    #: which is the harder kind to notice: nothing is blank, nothing throws, and
+    #: the picture is simply not a picture of the thing the narration describes.
+    #: Same criterion the project already applies to layout — `layout_error`
+    #: exists because "可读性失败必须让生成失败，而不是交给人眼发现".
+    required_props: tuple[str, ...] = ()
+
     #: Whether the pipeline can *draw* this primitive today.
     #:
     #: Not the same question as "is it in the contract". `RegionElement` and
@@ -205,7 +222,13 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         # `origin` is not here: no drawer reads it. `range` drives the tick
         # labels, which is what turns an unlabelled arrow into a coordinate axis.
         live_props=("range", "ticks"),
-        note="带刻度与标签的坐标轴，可成对交于原点",
+        # `range` is the whole difference between an axis and a notched arrow.
+        # Three of the three axes in the sample documents' descendants omitted
+        # it, and nothing said so: the drawing was complete and meaningless.
+        required_props=("range",),
+        note="带刻度与标签的坐标轴，可成对交于原点。"
+        "**没有 `range` 它就只是一根带刻痕的箭头**——刻度数字由 `range` 给出，"
+        "缺了它画面上不会有任何东西报错，只是这根轴不再表示任何量",
     ),
     Primitive(
         name="dimension",
@@ -288,6 +311,16 @@ REQUIRED_RELATIONS: dict[str, tuple[str, ...]] = {
     primitive.name: primitive.required_relations
     for primitive in T1_PRIMITIVES
     if primitive.required_relations
+}
+
+#: primitive name -> the props it cannot be *meaningfully drawn* without. The
+#: companion to `REQUIRED_RELATIONS`, one question further out: that one is about
+#: geometry that cannot be computed, this one about a drawing that computes fine
+#: and teaches nothing.
+REQUIRED_PROPS: dict[str, tuple[str, ...]] = {
+    primitive.name: primitive.required_props
+    for primitive in T1_PRIMITIVES
+    if primitive.required_props
 }
 
 #: primitive name -> the props a *beat* may move. Derived, so `step_state_inert`
@@ -629,6 +662,11 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
             parts.append(f"可被节拍改变：{live_text}")
         if static:
             parts.append("只能整体设置一次：" + "、".join(f"`{prop}`" for prop in static))
+        if primitive.required_props:
+            parts.append(
+                "**必须填写**（缺了画面照样画得出来，只是画出来的不是它该有的样子）："
+                + "、".join(f"`{prop}`" for prop in primitive.required_props)
+            )
         mandatory = primitive.required_relations
         optional = tuple(rel for rel in primitive.relations if rel not in mandatory)
         if mandatory:

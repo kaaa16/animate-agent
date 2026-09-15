@@ -24,6 +24,7 @@ from animate_agent.rendering.registry import (
     PENDING_PRIMITIVES,
     PRESET_BY_NAME,
     PRIMITIVE_BY_NAME,
+    REQUIRED_PROPS,
     REQUIRED_RELATIONS,
     ROLE_TO_PRIMITIVE,
     STAGE_RANGES,
@@ -381,6 +382,50 @@ def test_the_vocabulary_marks_required_relations_as_mandatory() -> None:
         assert "必须填写" in line, name
         for relation in required:
             assert f"`{relation}`" in line, f"{name}.{relation}"
+
+
+# --------------------------------------------------------------------------
+# Required props — the line between "drawn" and "drawn as the thing it is"
+# --------------------------------------------------------------------------
+
+
+def test_required_props_are_declared_props() -> None:
+    """A primitive cannot require a prop it does not declare."""
+    for primitive in T1_PRIMITIVES:
+        assert set(primitive.required_props) <= set(primitive.props), primitive.name
+
+
+def test_a_required_prop_is_a_live_prop() -> None:
+    """A required prop nothing reads would be `readout.align` with a gate on top.
+
+    Required *and* inert is the worst combination in the table: the vocabulary
+    asks the model for a value, the validator insists on it, and no drawer looks
+    at it. Requiring a prop is only meaningful because something consumes it.
+    """
+    for primitive in T1_PRIMITIVES:
+        for prop in primitive.required_props:
+            assert prop in primitive.live_props, f"{primitive.name}.{prop}"
+
+
+def test_the_vocabulary_marks_required_props_as_mandatory() -> None:
+    """A model can only obey a rule it was told about — the D5 failure again."""
+    vocabulary = render_vocabulary()
+
+    for name, required in REQUIRED_PROPS.items():
+        line = next(line for line in vocabulary.splitlines() if line.startswith(f"- `{name}`："))
+        assert "**必须填写**（缺了" in line, name
+        for prop in required:
+            assert f"`{prop}`" in line, f"{name}.{prop}"
+
+
+def test_axis_range_is_the_current_required_prop() -> None:
+    """Named, so the mechanism cannot be quietly emptied or quietly grown.
+
+    An `axis` with no `range` is exactly the notched arrow `drawAxis` warns about
+    in a comment above itself — and a comment did not stop three of them from
+    being drawn, in a lesson about motion along coordinate axes.
+    """
+    assert REQUIRED_PROPS == {"axis": ("range",)}
 
 
 def test_the_fallback_preset_is_offered_last() -> None:
