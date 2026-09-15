@@ -37,8 +37,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from animate_agent.rendering.registry import Glyph
 from animate_agent.storyboard.models import PropValue
 
 #: Bumped when a change would make an older player mis-draw a newer spec. The
@@ -369,4 +370,37 @@ class RenderSpec(_Model):
     subject: str = ""
     eyebrow: str = ""
     stage: RenderStage = Field(default_factory=RenderStage)
+    #: The glyph geometry the scenes below refer to, by name.
+    #:
+    #: Carried in the spec rather than fetched by the player, for the same reason
+    #: every other number is: the spec is the player's *only* input, and a spec
+    #: that draws differently depending on what else is on disk is not a contract.
+    #: It also keeps the player's fetch count at one, which is asserted.
+    #:
+    #: Only the glyphs this spec actually names are here — the other four in
+    #: `registry.T2_GLYPHS` are not copied into every file that does not use them.
+    glyphs: dict[str, Glyph] = Field(default_factory=dict)
     scenes: list[RenderScene] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _a_named_glyph_must_travel_with_the_spec(self) -> RenderSpec:
+        """A `body.glyph` with no geometry behind it is not a drawable spec.
+
+        Without this the player is handed a name it cannot resolve and has to
+        decide between throwing and drawing the plain shape — and both are worse
+        than a layout that refused to produce the file. This is the same shape as
+        `required_relations`: the failure is knowable here, so it is a failure
+        here, rather than something the next layer has to notice.
+        """
+        named = {
+            element.glyph
+            for scene in self.scenes
+            for element in scene.elements
+            if isinstance(element, BodyElement) and element.glyph is not None
+        }
+        missing = sorted(named - set(self.glyphs))
+        if missing:
+            raise ValueError(
+                f"这些字形被 body 引用了，spec 却没有带上它们的几何：{'、'.join(missing)}"
+            )
+        return self

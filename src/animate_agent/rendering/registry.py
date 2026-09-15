@@ -434,6 +434,14 @@ class Glyph(BaseModel):
 
     name: str = Field(min_length=1, max_length=32)
     view_box: tuple[float, float, float, float]
+    #: The box around what the glyph actually draws, `[x, y, width, height]` in
+    #: view-box units — the same shape as `view_box`, and not the same thing.
+    #: `view_box` is the grid the icon set designed on and it is *padded*; fitting
+    #: it draws the glyph smaller than the body that asked for it, by however much
+    #: the set happens to pad. Required, and computed by `tools/build_glyphs.py`
+    #: rather than declared, because a hand-typed number would go stale silently
+    #: the moment the pinned upstream version moved the art.
+    ink_box: tuple[float, float, float, float]
     domain: str = Field(min_length=1, max_length=24)
     #: Provenance, e.g. "tabler:car". Assets are build-time products of an icon
     #: set plus a normalisation script; hand-edited `d` strings are not allowed.
@@ -451,21 +459,27 @@ class GlyphDeclaration:
     note: str
 
 
-#: Keep this small. Four target documents are expected to need 10~15 glyphs
-#: total; anything that can be composed from T1 should be, rather than drawn.
+#: Every name here has data in `assets/glyphs/`, and that is asserted rather
+#: than intended: `tests/unit/test_render_glyphs.py` builds the set from the
+#: directory and requires it to equal this one. The two can drift in a way that
+#: nothing else would notice — `layout._glyph_to_draw` drops a requested glyph
+#: it has no data for and draws the parametric shape instead, so a declared name
+#: with no file is a promise to the model that the picture quietly breaks.
+#:
+#: Keep this small. Anything composable from T1 should be composed, not drawn —
+#: the rule that used to be a comment here and is now enforced is that a glyph
+#: earns its place by being a *shape*, and a regular polygon computed from two
+#: numbers is not one. `obstacle_octagon` was declared on exactly that mistake:
+#: its source was `hand:octagon`, and both `layout.py:162` and `models.py:99`
+#: record the opposite decision (D1) — the baseline's obstacle is 8 vertices
+#: alternating between `r` and `0.78r`, parametric on purpose.
 T2_GLYPHS: tuple[GlyphDeclaration, ...] = (
-    GlyphDeclaration("car", "robotics", "tabler:car", "避障小车的车身"),
-    GlyphDeclaration("wheel", "robotics", "tabler:car-wheel", "可独立旋转的车轮"),
-    GlyphDeclaration("steering_wheel", "robotics", "tabler:steering-wheel", "转向决策的视觉锚点"),
+    GlyphDeclaration("car", "robotics", "tabler:car", "避障小车的车身，轮子是可独立转动的 part"),
     GlyphDeclaration("lidar", "robotics", "tabler:radar", "激光雷达本体"),
     GlyphDeclaration("robot", "robotics", "tabler:robot", "移动机器人本体"),
-    GlyphDeclaration("cpu", "robotics", "tabler:cpu", "控制器/计算节点"),
+    GlyphDeclaration("cpu", "robotics", "tabler:cpu", "控制器、计算节点、ROS 节点"),
     GlyphDeclaration("server", "cloud", "tabler:server", "服务端"),
     GlyphDeclaration("package", "cloud", "tabler:package", "消息载荷"),
-    GlyphDeclaration(
-        "obstacle_octagon", "robotics", "hand:octagon", "八角障碍物，比通用多边形更像障碍"
-    ),
-    GlyphDeclaration("protractor", "physics", "game-icons:protractor", "角度标注"),
 )
 
 T2_GLYPH_NAMES: frozenset[str] = frozenset(g.name for g in T2_GLYPHS)

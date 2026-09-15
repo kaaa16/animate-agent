@@ -436,6 +436,7 @@ def test_the_glyph_appears_as_soon_as_its_data_does(
     glyph = Glyph(
         name="car",
         view_box=(0, 0, 24, 24),
+        ink_box=(2, 5, 20, 15),
         domain="robotics",
         source="tabler:car",
         parts={"body": GlyphPart(d="M0 0h24v24H0z", mode="stroke")},

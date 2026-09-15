@@ -41,7 +41,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# `.` is the repo root, so `tools.*` imports the same way the tools are run
+# (`python -m tools.build_glyphs`). Build-time geometry belongs to the tools
+# rather than the shipped package, and a test that cannot reach it either does
+# not get written or gets written against a copy.
+pythonpath = ["src", "."]
 
 [tool.ruff]
 line-length = 100

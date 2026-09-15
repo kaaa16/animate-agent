@@ -38,6 +38,7 @@ import {
   roundRectPath,
   sectorPath,
 } from "./atoms.js";
+import { drawGlyph } from "./glyphs.js";
 
 /** Font for a primitive's own annotations — tick values, measurements, names. */
 const ANNOTATION_FONT = "13px Inter, 'Microsoft YaHei', sans-serif";
@@ -111,11 +112,15 @@ function applyHighlight(ctx, theme, highlighted) {
 }
 
 export function drawBody(ctx, element, view) {
-  if (element.glyph) {
+  const glyph = element.glyph ? view.glyphs?.[element.glyph] : null;
+  if (element.glyph && !glyph) {
     // Not a fallback: drawing the plain shape instead would look deliberate.
+    // `RenderSpec` already refuses to be constructed with a `body.glyph` the
+    // spec does not carry, so reaching here means the player was handed a spec
+    // that never went through the contract — an older file, or a hand-edited
+    // one.
     throw new Error(
-      `字形 \`${element.glyph}\` 还没有数据（assets/glyphs/ 为空）；` +
-        `body \`${element.id}\` 无法绘制`,
+      `spec 里没有字形 \`${element.glyph}\` 的几何；body \`${element.id}\` 无法绘制`,
     );
   }
   if (view.lookup(element.id, "visible", true) === false) return;
@@ -139,29 +144,37 @@ export function drawBody(ctx, element, view) {
   ctx.translate(node.x, node.y);
   ctx.rotate(heading);
 
-  if (element.shape === "circle") {
-    circlePath(ctx, 0, 0, (element.width * size) / 2);
-  } else if (element.shape === "polygon") {
-    polygonPath(
-      ctx,
-      0,
-      0,
-      (element.width * size) / 2,
-      element.sides ?? 6,
-      // A point-up polygon, so an octagon sits on a flat edge the way the
-      // baseline's obstacles do rather than on a vertex.
-      rad(-90 + 180 / (element.sides ?? 6)),
-      element.inner_ratio ?? 1,
-    );
+  if (glyph) {
+    // The glyph brings its own geometry and its own styling; the parametric
+    // path below is what a body draws when it did not ask for one. What the two
+    // still share is everything that is *about the body* rather than about its
+    // outline: the highlight, the rotation, the direction triangle, the label.
+    drawGlyph(ctx, glyph, element.width * size, element.height * size, color);
   } else {
-    roundRectPath(ctx, 0, 0, element.width * size, element.height * size, 8);
-  }
+    if (element.shape === "circle") {
+      circlePath(ctx, 0, 0, (element.width * size) / 2);
+    } else if (element.shape === "polygon") {
+      polygonPath(
+        ctx,
+        0,
+        0,
+        (element.width * size) / 2,
+        element.sides ?? 6,
+        // A point-up polygon, so an octagon sits on a flat edge the way the
+        // baseline's obstacles do rather than on a vertex.
+        rad(-90 + 180 / (element.sides ?? 6)),
+        element.inner_ratio ?? 1,
+      );
+    } else {
+      roundRectPath(ctx, 0, 0, element.width * size, element.height * size, 8);
+    }
 
-  ctx.fillStyle = view.theme.panel;
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = color;
-  ctx.stroke();
+    ctx.fillStyle = view.theme.panel;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+  }
 
   // The direction triangle, now drawn whenever the body has a width to put it
   // on: with a live `heading` it is the one part of a rectangle that shows which

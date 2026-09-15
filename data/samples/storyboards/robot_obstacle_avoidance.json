@@ -37,14 +37,14 @@
           "id": "obstacle-a",
           "role": "obstacle",
           "label": "障碍物 A",
-          "props": { "glyph": "obstacle_octagon" },
+          "props": {},
           "source_refs": []
         },
         {
           "id": "obstacle-b",
           "role": "obstacle",
           "label": "障碍物 B",
-          "props": { "glyph": "obstacle_octagon" },
+          "props": {},
           "source_refs": []
         }
       ],

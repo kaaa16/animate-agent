@@ -1,0 +1,25 @@
+{
+  "domain": "cloud",
+  "ink_box": [
+    3.0,
+    2.0,
+    18.0,
+    20.0
+  ],
+  "name": "package",
+  "parts": {
+    "outline": {
+      "d": "M12 3l8 4.5l0 9l-8 4.5l-8 -4.5l0 -9l8 -4.5 M12 12l8 -4.5 M12 12l0 9 M12 12l-8 -4.5 M16 5.25l-8 4.5",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:package@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

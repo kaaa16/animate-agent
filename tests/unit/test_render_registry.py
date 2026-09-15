@@ -457,6 +457,7 @@ def _glyph(**part_overrides: Any) -> dict[str, Any]:
     return {
         "name": "car",
         "view_box": (0, 0, 24, 24),
+        "ink_box": (1, 1, 20, 15),
         "domain": "robotics",
         "source": "tabler:car",
         "parts": {"body": part},
@@ -505,6 +506,20 @@ def test_glyph_accepts_a_well_formed_asset() -> None:
 
     assert glyph.parts["body"].mode == "stroke"
     assert glyph.view_box == (0, 0, 24, 24)
+
+
+def test_glyph_requires_an_ink_box() -> None:
+    """`ink_box` is what the player fits, so a glyph without one draws nothing.
+
+    Not a defaulted field, and the reason is in `glyphs.js`: `Math.min(h / NaN)`
+    is `NaN`, `NaN > 0` is false, and the drawer returns before drawing. A glyph
+    missing this field would be an invisible object in a spec that validated —
+    the same silent shape as a dropped `mode`.
+    """
+    missing = {key: value for key, value in _glyph().items() if key != "ink_box"}
+
+    with pytest.raises(ValidationError):
+        Glyph.model_validate(missing)
 
 
 def test_spin_parts_may_declare_an_anchor() -> None:

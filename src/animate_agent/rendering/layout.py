@@ -71,6 +71,7 @@ from animate_agent.rendering.registry import (
     PENDING_ALTERNATIVES,
     PENDING_PRIMITIVES,
     ROLE_TO_PRIMITIVE,
+    Glyph,
     stage_range,
 )
 from animate_agent.storyboard.models import (
@@ -286,15 +287,16 @@ _BODY_SIZES: dict[str, tuple[float, float]] = {
     "object": (64.0, 48.0),
 }
 
-#: Glyph data lives in `assets/glyphs/` and lands in M3. Until a glyph has data
-#: the player refuses to draw it, so layout keeps the *requested* name in
-#: `props.glyph` (copied verbatim like everything else) and draws the parametric
-#: shape instead of emitting a `glyph` field the renderer would reject.
+#: Glyph data lives in `assets/glyphs/` as build-time products of
+#: `tools/build_glyphs.py`. Layout reads the directory rather than the
+#: declaration list, so a glyph whose data is missing degrades to the parametric
+#: shape instead of handing the player a name it cannot resolve.
 #:
-#: This is not a silent downgrade: for an obstacle, an 8-point star *is* the
-#: picture, and for the car the gap is visible and recorded. The check reads the
-#: directory, so the day the data exists the glyphs start appearing with no code
-#: change here.
+#: The gap that gate used to cover is closed from the other side now: the test
+#: suite requires the declared set and the directory to be the same set, so
+#: "declared but undrawable" is a failing test rather than a picture that is
+#: quietly a rounded rectangle. What is left here is the honest fallback for a
+#: half-installed checkout.
 GLYPH_DATA_DIR = Path(__file__).resolve().parents[3] / "assets" / "glyphs"
 
 
@@ -302,6 +304,20 @@ def _available_glyphs() -> frozenset[str]:
     if not GLYPH_DATA_DIR.is_dir():
         return frozenset()
     return frozenset(path.stem for path in GLYPH_DATA_DIR.glob("*.json"))
+
+
+def _load_glyph(name: str) -> Glyph:
+    """One glyph's geometry, validated against the schema it ships in.
+
+    A malformed asset is a `LayoutError` and not a pydantic error escaping from
+    six frames down: the CLI and the pipeline both know how to report the first
+    one, and the file has a name that belongs in the message.
+    """
+    path = GLYPH_DATA_DIR / f"{name}.json"
+    try:
+        return Glyph.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise LayoutError(f"字形数据 `{path}` 读不出来或不合 schema：{exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -1508,6 +1524,18 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
 def layout_storyboard(storyboard: StoryboardIR, *, stage: RenderStage | None = None) -> RenderSpec:
     """Place every scene. The one call the pipeline and the CLI both use."""
     stage = stage or RenderStage()
+    scenes = [layout_scene(scene, stage=stage) for scene in storyboard.scenes]
+    # Collected from the laid-out scenes rather than from the storyboard, so what
+    # is embedded is exactly what survived `_glyph_to_draw` — a glyph the model
+    # asked for and layout dropped does not get shipped anyway.
+    used = sorted(
+        {
+            element.glyph
+            for scene in scenes
+            for element in scene.elements
+            if isinstance(element, BodyElement) and element.glyph is not None
+        }
+    )
     return RenderSpec(
         storyboard_id=storyboard.storyboard_id,
         lesson_id=storyboard.lesson_id,
@@ -1516,5 +1544,6 @@ def layout_storyboard(storyboard: StoryboardIR, *, stage: RenderStage | None = N
         subject=storyboard.subject,
         eyebrow=storyboard.eyebrow,
         stage=stage,
-        scenes=[layout_scene(scene, stage=stage) for scene in storyboard.scenes],
+        glyphs={name: _load_glyph(name) for name in used},
+        scenes=scenes,
     )

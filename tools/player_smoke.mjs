@@ -58,6 +58,28 @@ const STYLE_PROPERTIES = [
   "textBaseline",
 ];
 
+/**
+ * `Path2D` is a browser global, and `glyphs.js` builds one per glyph part from
+ * the `d` string the spec carries. Node has none, so a car body would fail the
+ * smoke run with `Path2D is not defined` — a failure that says nothing about
+ * whether the picture is right. Same reasoning as `measureText` below: emulate
+ * the platform the player actually runs on.
+ *
+ * The `d` string is kept so a recorded `stroke` call can still be told apart by
+ * what it draws rather than only by how many times it was called.
+ */
+class RecordingPath2D {
+  constructor(d) {
+    this.d = d;
+  }
+
+  /** Without this a recorded `stroke(...)` reads `stroke([object Object])`. */
+  toString() {
+    return this.d;
+  }
+}
+globalThis.Path2D = RecordingPath2D;
+
 /** A 2D context that records calls instead of rasterising. */
 function fakeContext() {
   const calls = [];
@@ -79,6 +101,9 @@ function fakeContext() {
     // rotated frame rather than adding an angle at every corner.
     translate: record("translate"),
     rotate: record("rotate"),
+    // A glyph is drawn in its own view-box units, so the glyph drawer scales
+    // into them rather than converting every coordinate.
+    scale: record("scale"),
     quadraticCurveTo: record("quadraticCurveTo"),
     fill: record("fill"),
     stroke: record("stroke"),
@@ -115,7 +140,7 @@ function fakeContext() {
  * runs. `binds` in particular: without that tier a bound property keeps the
  * value layout baked in, which is exactly the bug the tier exists to prevent.
  */
-function viewFor(scene, simulation, stepIndex, theme, overrides = {}) {
+function viewFor(scene, simulation, stepIndex, theme, overrides = {}, glyphs = {}) {
   const byId = new Map(scene.elements.map((element) => [element.id, element]));
   const obstacleIds = scene.elements
     .filter((element) => element.role === "obstacle")
@@ -130,6 +155,10 @@ function viewFor(scene, simulation, stepIndex, theme, overrides = {}) {
     obstacleRadius: new Map(
       obstacleIds.map((id) => [id, Number(byId.get(id)?.props?.radius ?? 0)]),
     ),
+    // `RenderSpec.glyphs`, handed through like the theme: the player resolves a
+    // `body.glyph` name against geometry the spec carries, never against a file
+    // it goes and finds.
+    glyphs,
     highlighted: new Set(step?.highlights ?? []),
     isDangerous: (id) => simulation.isDangerous(id),
     lookup: (elementId, prop, fallback) => {
@@ -338,7 +367,7 @@ function main() {
           maxLateral = Math.max(maxLateral, Math.abs(node.y - startY));
         }
       }
-      const view = viewFor(scene, simulation, stepIndex, THEME);
+      const view = viewFor(scene, simulation, stepIndex, THEME, {}, spec.glyphs ?? {});
       const beat = [];
       const shape = [];
       for (const element of scene.elements) {

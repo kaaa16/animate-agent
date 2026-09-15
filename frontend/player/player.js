@@ -107,6 +107,10 @@ function buildView() {
     elementById: state.byId,
     obstacleIds: state.obstacleIds,
     obstacleRadius: state.obstacleRadius,
+    // Glyph geometry travels in the spec (`RenderSpec.glyphs`), so the player
+    // resolves a `body.glyph` name against data it already holds rather than a
+    // file it would have to go and find.
+    glyphs: state.spec.glyphs ?? {},
     highlighted: new Set(step?.highlights ?? []),
     isDangerous: (id) => state.sim.isDangerous(id),
   };
