@@ -19,6 +19,7 @@ from animate_agent.rendering.registry import (
     BEHAVIORS,
     BUTTON_ACTIONS,
     CONSUMABLE_PROPS,
+    LIVE_PROPS_BY_PRIMITIVE,
     PENDING_ALTERNATIVES,
     PENDING_PRIMITIVES,
     PRESET_BY_NAME,
@@ -534,6 +535,78 @@ def test_the_player_reads_the_same_props_the_validator_allows() -> None:
     }
 
     assert _js_live_props() == declared
+
+
+def _props_the_player_looks_up() -> set[str]:
+    """Every prop named as the second argument of a `lookup` call in the player.
+
+    Only the second argument. The receiver varies — `element.id` in the drawers,
+    `element.anchor` when an emitter asks for the heading of the thing it is
+    mounted on, a bare local in `behaviors.js` — so the prop name is the one
+    position that is always the same, and it is the one that matters.
+
+    Comments are stripped first, and that is not tidiness: the comment recording
+    *why* `readout.align` is read off the element rather than through `lookup`
+    names it as a `lookup` argument. A check that counted mentions would read a
+    note about a prop's absence as evidence of its presence.
+    """
+    found: set[str] = set()
+    for source in _player_sources().values():
+        found |= set(re.findall(r"\blookup\([^,]+,\s*\"([a-z_]+)\"", source))
+    return found
+
+
+def test_every_live_prop_is_one_the_player_actually_looks_up() -> None:
+    """The mechanical form of the layer the drift test cannot reach.
+
+    `test_the_player_reads_the_same_props_the_validator_allows` compares two
+    hand-written lists. That catches divergence and nothing else: when
+    `readout.align` was declared live and read by nobody, both files said the
+    same wrong thing and the test was green — a mirror does not find a shared
+    mistake. This one goes to the code itself and asks whether a `lookup` call
+    anywhere names the prop.
+
+    This is the assertion that would have caught `align`, and it is written to
+    fail on the general shape rather than on that one name: a prop in this
+    difference is a prop `step_state_inert` permits a beat to set, the prompt
+    offers as 可被节拍改变, and no drawer reads. Twenty-nine beats of the sample
+    documents and six of seven scenes were stills the last time nothing asked.
+
+    A grep is not a proof. It sees the calling convention in use today and would
+    miss a prop read by some other route — but every route in the player goes
+    through `lookup`, which is the point of the function, and the alternative is
+    no check at all.
+    """
+    live = {prop for props in LIVE_PROPS_BY_PRIMITIVE.values() for prop in props}
+    read = _props_the_player_looks_up()
+
+    unread = sorted(live - read)
+
+    assert unread == [], f"这些属性被声明为「可被节拍改变」，但没有任何 lookup 读它们：{unread}"
+
+
+#: Props a drawer looks up that are deliberately *not* live.
+#:
+#: `safe_distance` is the whole list, and it is the honest exception rather than
+#: an oversight: `proximity_gate` reads it, the hand-written baseline exposes it
+#: as a slider, and `CONSUMABLE_PROPS` is where it belongs. What no document does
+#: is walk it beat by beat, so it is a control target, not a beat prop.
+NOT_LIVE_LOOKUPS = frozenset({"safe_distance"})
+
+
+def test_a_prop_the_player_looks_up_is_not_quietly_unsettable() -> None:
+    """The other direction, which is the easier one to leave half-done.
+
+    A drawer that starts reading a prop nobody declared live gets a working
+    picture and a tier that a beat can never reach — the value can only come from
+    a control override or `scene.params`. That is correct for `safe_distance` and
+    would be a silent omission for anything else, so the exception is named
+    rather than assumed.
+    """
+    live = {prop for props in LIVE_PROPS_BY_PRIMITIVE.values() for prop in props}
+    undeclared = sorted(_props_the_player_looks_up() - live - NOT_LIVE_LOOKUPS)
+
+    assert undeclared == [], f"这些属性被 lookup 读了，却没进 live_props：{undeclared}"
 
 
 def test_the_player_accounts_for_every_registered_primitive() -> None:
