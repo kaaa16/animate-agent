@@ -56,7 +56,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from tools.path_bbox import path_bbox
+from tools.path_bbox import arcs, path_bbox
 
 from animate_agent.rendering.registry import T2_GLYPHS
 
@@ -81,6 +81,10 @@ class GlyphSource:
     icon: str
     art_paths: int
     parts: dict[str, tuple[int, ...]]
+    #: Parts that turn about their own arc centre. A list of names rather than a
+    #: flag on each part, so "what moves in this glyph" is one line you can read.
+    #: The anchor is measured from the geometry; see `_spin_anchor`.
+    spin: tuple[str, ...] = ()
 
 
 def _outline(count: int) -> dict[str, tuple[int, ...]]:
@@ -96,9 +100,19 @@ GLYPH_SOURCES: dict[str, GlyphSource] = {
     # (`M5 17a2 ...` / `M15 17a2 ...`), 2 is the chassis. Front is the right-hand
     # one because the car faces +x, which is also the direction `body.heading`
     # rotates away from.
+    #
+    # Neither wheel spins, and the reason is geometric rather than an omission:
+    # both are exact circles, so rotating one about its own centre is the identity
+    # and the picture does not change by a pixel. The parts are split anyway
+    # because a wheel that *did* have spokes would need it, and because merging
+    # them back would be the thing that made it impossible.
     "car": GlyphSource("car", 3, {"body": (2,), "wheelRear": (0,), "wheelFront": (1,)}),
+    # Tabler's radar is a 90-degree sweep sector plus the two range arcs, so path 0
+    # is the arm and 1/2 are the dish it sweeps over. The arm's arcs are centred on
+    # (12, 12) — the corner the two straight edges meet at — so it turns in place
+    # rather than orbiting, which is what makes 雷达扫描 a moving picture.
+    "lidar": GlyphSource("radar", 3, {"sweep": (0,), "outline": (1, 2)}, spin=("sweep",)),
     "robot": GlyphSource("robot", 9, _outline(9)),
-    "lidar": GlyphSource("radar", 3, _outline(3)),
     "cpu": GlyphSource("cpu", 10, _outline(10)),
     "server": GlyphSource("server", 4, _outline(4)),
     "package": GlyphSource("package", 5, _outline(5)),
@@ -170,15 +184,23 @@ def build_glyph(name: str, source: GlyphSource) -> dict[str, object]:
     if view_box is None or stroke_width is None:
         raise BuildError(f"`{source.icon}` 的 <svg> 少了 viewBox 或 stroke-width")
 
-    parts: dict[str, dict[str, object]] = {
-        part: {
-            "d": " ".join(paths[index] for index in indices),
+    parts: dict[str, dict[str, object]] = {}
+    for part, indices in source.parts.items():
+        geometry = " ".join(paths[index] for index in indices)
+        entry: dict[str, object] = {
+            "d": geometry,
             "mode": STROKE,
             "fill_rule": "nonzero",
             "stroke_width": float(stroke_width.group(1)),
         }
-        for part, indices in source.parts.items()
-    }
+        if part in source.spin:
+            # `spin` and `anchor` travel together or not at all. A part marked as
+            # turning with no centre to turn about is a part the player cannot
+            # place, and the failure would be an icon that sits still — which
+            # looks exactly like an icon that is meant to.
+            entry["anchor"] = list(_spin_anchor(name, part, geometry))
+            entry["spin"] = True
+        parts[part] = entry
     box = [float(value) for value in view_box.group(1).split()]
     ink = _ink_box(parts)
     _check_ink_inside_view_box(name, ink, box)
@@ -191,6 +213,35 @@ def build_glyph(name: str, source: GlyphSource) -> dict[str, object]:
         "source": f"tabler:{source.icon}@{TABLER_VERSION}",
         "parts": parts,
     }
+
+
+def _spin_anchor(name: str, part: str, geometry: str) -> tuple[float, float]:
+    """The point a turning part turns about: the centre of its largest arc.
+
+    Measured rather than declared, for the same reason as `ink_box` — an anchor
+    typed next to geometry that can move is two things that silently stop
+    agreeing, and the symptom here is an arm that orbits its icon instead of
+    swinging inside it.
+
+    It is also the honest rule rather than a convenience: a part turns about the
+    centre of the arc it is drawn from. The radar's arm is drawn from a r=9 arc
+    centred on (12, 12), and the car's wheels from r=2 arcs centred on
+    themselves — so both would derive correctly, which is the check that the rule
+    is a rule and not a fit to one example.
+
+    A `spin` part with no arc has no derivable centre, and the build fails rather
+    than picking a default. Silently defaulting to the ink box's middle would
+    turn a sweep into something that wobbles, and nothing downstream could tell
+    that apart from a design choice.
+    """
+    found = list(arcs(geometry))
+    if not found:
+        raise BuildError(
+            f"`{name}` 的 part `{part}` 标了 spin，但它的路径里没有圆弧，推不出旋转中心。"
+            f"要么给它一段圆弧，要么别让它转——转一个没有圆心的东西只会让它乱飞"
+        )
+    largest = max(found, key=lambda arc: arc.radius)
+    return (round(largest.cx, 4), round(largest.cy, 4))
 
 
 def _ink_box(parts: dict[str, dict[str, object]]) -> list[float]:

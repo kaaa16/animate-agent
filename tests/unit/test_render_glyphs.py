@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tools.path_bbox import path_bbox
+from tools.path_bbox import arcs, path_bbox
 
 from animate_agent.rendering.registry import T2_GLYPHS, Glyph
 
@@ -84,49 +84,115 @@ def test_every_glyph_draws_inside_its_own_view_box(path: Path) -> None:
     assert ink_y + ink_height <= view_y + view_height + INK_TOLERANCE, path.stem
 
 
-@pytest.mark.parametrize("path", _glyph_files(), ids=lambda path: path.stem)
-def test_every_glyph_has_a_part_named_outline_or_a_reason_not_to(path: Path) -> None:
-    """`outline` is the convention for a glyph that is one picture.
+#: The glyphs that are more than one picture, and what their parts are.
+#:
+#: Everything else is one part called `outline`. A name only appears here because
+#: splitting it was a decision: merging a car and its wheels, or a radar and its
+#: arm, into a single path is the thing `parts` exists to prevent — and so is
+#: splitting something that has no reason to move on its own. A new entry is
+#: meant to be noticed.
+MULTI_PART: dict[str, set[str]] = {
+    "car": {"body", "wheelFront", "wheelRear"},
+    "lidar": {"outline", "sweep"},
+}
 
-    The car is the exception, and it is the case the schema's `parts` exists for:
-    its wheels have to turn without the chassis turning. Any *new* exception will
-    fail here, which is the point — a second multi-part glyph should be a
-    decision someone made on purpose, not something that appeared.
-    """
+
+@pytest.mark.parametrize("path", _glyph_files(), ids=lambda path: path.stem)
+def test_a_glyph_is_one_picture_unless_it_is_named_above(path: Path) -> None:
     glyph = _load(path)
-    if glyph.name == "car":
-        assert set(glyph.parts) == {"body", "wheelFront", "wheelRear"}
+    expected = MULTI_PART.get(glyph.name)
+    if expected is None:
+        assert list(glyph.parts) == ["outline"], f"{path.stem} 的 part 划分没有说明理由"
         return
 
-    assert list(glyph.parts) == ["outline"], f"{path.stem} 的 part 划分没有说明理由"
+    assert set(glyph.parts) == expected
 
 
-def test_a_wheel_turns_about_a_centre_that_can_be_measured() -> None:
-    """The anchor a wheel spins about is derivable, so it is not typed anywhere.
+def test_a_turning_part_carries_the_point_it_turns_about() -> None:
+    """`spin` without `anchor` is a promise the player cannot keep.
 
-    `GlyphPart.anchor` is a declared field with no reader yet: the schema has it,
-    nothing emits it, nothing consumes it. That is the shape this project keeps
-    catching, and the difference here is that it is named as pending rather than
-    assumed done. What this test pins is the half that must not be hand-written
-    when the reader arrives — a wheel is a circle, so its centre is the middle of
-    its own bounding box, and typing `[17, 17]` next to a computed `d` is how the
-    two silently stop agreeing.
-
-    Today the assertion is just that the derivation works and gives a circle.
-    When the wheel turns, the anchor is this number, not a new one.
+    The player throws on that pair rather than drawing the part still, because a
+    part that was meant to turn and does not is indistinguishable on screen from
+    one that was never meant to. This is the data half of the same rule.
     """
+    for path in _glyph_files():
+        for name, part in _load(path).parts.items():
+            if not part.spin:
+                continue
+            assert part.anchor is not None, f"{path.stem}.{name} 标了 spin 却没有 anchor"
+
+
+def test_the_lidar_arm_turns_and_the_car_wheels_do_not() -> None:
+    """The named reader, and the named non-reader, so neither drifts silently.
+
+    The lidar's arm is what `anchor`/`spin` were for: Tabler's radar path 0 is a
+    90-degree sector, so rotating it about the corner the straight edges meet at
+    is a picture that changes. The car's wheels are the case that *looks* like it
+    should turn and must not be made to: both are exact circles, so rotating one
+    about its own centre is the identity — code that would run every frame and
+    move nothing, which is the same inert shape as a prop no drawer reads.
+
+    Asserting the negative is the unusual half and the deliberate one. A wheel
+    marked `spin` would look like a feature in the data and be invisible in the
+    picture, and nothing else here would notice.
+    """
+    lidar = _load(GLYPH_DIR / "lidar.json")
     car = _load(GLYPH_DIR / "car.json")
 
-    centres = {}
-    for name, part in car.parts.items():
-        if not name.startswith("wheel"):
-            continue
-        min_x, min_y, max_x, max_y = path_bbox(part.d)
-        centres[name] = ((min_x + max_x) / 2, (min_y + max_y) / 2)
-        # A circle is as wide as it is tall — the property `anchor` relies on to
-        # be a single point rather than two.
-        assert max_x - min_x == pytest.approx(max_y - min_y), name
+    assert lidar.parts["sweep"].spin
+    assert lidar.parts["sweep"].anchor == (12.0, 12.0)
+    assert not lidar.parts["outline"].spin
 
-    assert centres == {"wheelFront": (17.0, 17.0), "wheelRear": (7.0, 17.0)}
-    # Both wheels share an axis, which is what makes the car sit level.
-    assert len({y for _, y in centres.values()}) == 1
+    for name, part in car.parts.items():
+        assert not part.spin, f"车字形的 {name} 不该转：正圆绕圆心转是恒等变换"
+
+
+def test_the_anchor_is_the_centre_of_the_arc_the_part_is_drawn_from() -> None:
+    """The rule the build uses, restated here against the shipped data.
+
+    `tools/build_glyphs.py` derives an anchor as the centre of the part's largest
+    arc rather than taking a number someone typed beside the geometry. This
+    checks the committed files still satisfy that — so an anchor that was
+    hand-edited, or measured against a version of the art that has since moved,
+    fails here rather than as an arm that orbits its own icon.
+
+    The two cases are both checked because one of them is not in the data: the
+    car's wheels satisfy the rule too, and asserting that is what separates "a
+    rule" from "a fit to the one example that needed it".
+    """
+    lidar = _load(GLYPH_DIR / "lidar.json")
+    sweep = list(arcs(lidar.parts["sweep"].d))
+    assert sweep, "扫描臂没有圆弧，推不出圆心"
+    largest = max(sweep, key=lambda arc: arc.radius)
+
+    assert lidar.parts["sweep"].anchor == pytest.approx((largest.cx, largest.cy))
+    # Both of the arm's arcs share a centre — a radius-1 hub arc and the radius-9
+    # sweep — which is why "the largest arc" is not a choice between two answers.
+    assert {(round(arc.cx, 6), round(arc.cy, 6)) for arc in sweep} == {(12.0, 12.0)}
+
+    car = _load(GLYPH_DIR / "car.json")
+    for name in ("wheelFront", "wheelRear"):
+        wheel = max(arcs(car.parts[name].d), key=lambda arc: arc.radius)
+        min_x, min_y, max_x, max_y = path_bbox(car.parts[name].d)
+        assert (wheel.cx, wheel.cy) == ((min_x + max_x) / 2, (min_y + max_y) / 2), name
+
+
+PLAYER_DIR = Path(__file__).resolve().parents[2] / "frontend" / "player"
+
+
+def test_the_player_reads_the_spin_fields() -> None:
+    """The data has to reach the drawing code, not just the schema.
+
+    `anchor` and `spin` were in `GlyphPart` from the first commit with nothing
+    emitting them and nothing reading them — a declared field is not a feature,
+    which is the failure this whole round is about. This is the cheap half of the
+    check; `tools/player_smoke.mjs` is the half that drives the drawer and
+    compares two frames of the arm, and it is the one that would catch a reader
+    that read the fields and then did nothing with them.
+    """
+    source = (PLAYER_DIR / "glyphs.js").read_text(encoding="utf-8")
+
+    assert "part.spin" in source
+    assert "part.anchor" in source
+    # A turn rather than a nudge: translation would also make two frames differ.
+    assert "ctx.rotate(" in source

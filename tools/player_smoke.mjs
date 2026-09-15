@@ -492,11 +492,127 @@ function main() {
       console.log(line);
     }
   }
+  const spinFailure = checkSpinningPartsTurn();
+  if (spinFailure) {
+    console.error(`\n❌ ${spinFailure}`);
+    return 1;
+  }
+
   console.log(
     `\n✅ 共绘制 ${drawn} 次，无异常。` +
       `强口径静拍：${shapeStill}/${transitions} 处相邻节拍几何与上一拍完全相同。`,
   );
   return 0;
+}
+
+/**
+ * A part marked `spin` has to actually turn, and no sample document can show it.
+ *
+ * None of the three hand-written samples gives a body the `lidar` glyph — the
+ * lidar in the avoidance sample is an `emitter`, which draws a fan and never
+ * calls the glyph drawer at all — so the sweep arm is data no spec in this repo
+ * exercises. Without this check, `anchor` and `spin` would be two more fields
+ * declared, validated, shipped, and read by nothing, which is the exact failure
+ * this round exists to close.
+ *
+ * So the drawer is driven directly: one body carrying the lidar glyph, drawn at
+ * two different times, and the two *pictures* compared rather than the code
+ * inspected. Same standard as everything else here — what came out of the
+ * renderer, not what the source says it does.
+ *
+ * The glyph is read from `assets/glyphs/` rather than from a spec, which is the
+ * one place that is right: the player must resolve glyphs out of the spec it was
+ * handed, but a harness checking the *asset* is exactly the thing that should
+ * open the asset.
+ */
+function checkSpinningPartsTurn() {
+  const path = new URL("../assets/glyphs/lidar.json", import.meta.url);
+  let glyph;
+  try {
+    glyph = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    return `读不出 ${path.pathname}：${error.message}`;
+  }
+  const sweep = glyph.parts?.sweep;
+  if (!sweep?.spin || !sweep?.anchor) {
+    return "lidar 字形的 sweep part 没有 spin/anchor——雷达就不会扫，而画面看起来和它有意的静止一样";
+  }
+
+  const element = {
+    id: "sensor-unit",
+    kind: "body",
+    role: "device",
+    label: "2D 激光雷达",
+    x: 100,
+    y: 100,
+    tone: "normal",
+    props: {},
+    binds: {},
+    shape: "rect",
+    width: 72,
+    height: 56,
+    sides: 6,
+    inner_ratio: 1,
+    heading: 0,
+    glyph: "lidar",
+    path: [],
+    duration: 0,
+  };
+  const drawAt = (time) => {
+    const ctx = fakeContext();
+    drawElement(ctx, element, {
+      live: new Map([[element.id, { x: element.x, y: element.y }]]),
+      time,
+      theme: THEME,
+      elementById: new Map([[element.id, element]]),
+      obstacleIds: [],
+      obstacleRadius: new Map(),
+      glyphs: { lidar: glyph },
+      highlighted: new Set(),
+      isDangerous: () => false,
+      lookup: (_id, _prop, fallback) => fallback,
+    });
+    return serializeCalls(ctx.calls);
+  };
+
+  const start = drawAt(0);
+  const later = drawAt(2);
+  if (start === later) {
+    return "lidar 的扫描臂在 t=0 与 t=2 画出的调用序列完全相同——标了 spin 却没转起来";
+  }
+
+  // Counting `rotate(` alone would not be a check. `drawBody` always writes
+  // `ctx.rotate(heading)` — at `heading: 0` that is `rotate(0)`, so the substring
+  // is present whether or not the arm turns. What is asserted is the *angle*:
+  // two of them, the heading's zero and the arm's, and the arm's proportional to
+  // simulated time.
+  //
+  // Proportionality is the part that matters. A single non-zero angle would also
+  // be produced by a constant, by a random number, or by an accumulator that
+  // drifts — and "the same spec draws the same frames" is the property the whole
+  // pipeline is built around. Doubling the time has to double the angle.
+  const spinAngles = (picture) =>
+    [...picture.matchAll(/rotate\(([-\d.eE+]+)\)/g)]
+      .map((match) => Number(match[1]))
+      .filter((angle) => angle !== 0);
+
+  const none = spinAngles(start);
+  const single = spinAngles(later);
+  if (none.length !== 0) {
+    return `t=0 时扫描臂已经转了（角度 ${none.join("、")}）——每一步节拍都从 t=0 重来，起点必须是它被画出来的样子`;
+  }
+  if (single.length !== 1) {
+    return `t=2 时预期恰好一个非零的 rotate（扫描臂的），实际有 ${single.length} 个：${single.join("、")}`;
+  }
+  const doubled = spinAngles(drawAt(4))[0];
+  if (Math.abs(doubled - 2 * single[0]) > 1e-9) {
+    return `扫描臂的角度不是按模拟时间线性来的：t=2 是 ${single[0]}，t=4 是 ${doubled}，后者不是前者的两倍`;
+  }
+  console.log(
+    `  ✓ 旋转 part：lidar 的扫描臂绕 anchor 转，t=2 时 ${single[0].toFixed(3)} rad，` +
+      `t=4 时 ${doubled.toFixed(3)} rad（随模拟时间线性，可复现）`,
+  );
+  return null;
 }
 
 process.exit(main());

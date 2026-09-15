@@ -33,6 +33,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 #: How many chords approximate one curve. See the accuracy note in the module
 #: docstring — this is chosen for "well under a pixel", not for exactness.
@@ -127,7 +128,32 @@ def _quadratic(
     ]
 
 
-def _arc(
+@dataclass(frozen=True, slots=True)
+class Arc:
+    """One `A` command in centre form.
+
+    Kept as a value rather than only as sampled points because the **centre** is
+    what a rotating part turns about, and the centre is a property of the
+    geometry rather than something to type beside it. `tools/build_glyphs.py`
+    takes a spinning part's anchor from here, which is the same policy as
+    `ink_box`: measure, do not transcribe.
+    """
+
+    cx: float
+    cy: float
+    rx: float
+    ry: float
+    phi: float
+    theta: float
+    delta: float
+
+    @property
+    def radius(self) -> float:
+        """How big this arc is, for picking the largest one. Circular arcs only."""
+        return max(self.rx, self.ry)
+
+
+def _arc_geometry(
     start: tuple[float, float],
     rx: float,
     ry: float,
@@ -135,11 +161,15 @@ def _arc(
     large_arc: int,
     sweep: int,
     end: tuple[float, float],
-) -> list[tuple[float, float]]:
-    """An `A` command as sampled points, per the endpoint-to-centre conversion in
-    SVG 1.1 appendix F.6.5."""
+) -> Arc | None:
+    """An `A` in centre form, per the endpoint-to-centre conversion in SVG 1.1
+    appendix F.6.5.
+
+    `None` for a zero radius, which the spec defines as a straight line to the
+    endpoint — no arc, and so no centre to turn about.
+    """
     if rx == 0 or ry == 0:
-        return [end]
+        return None
     x1, y1 = start
     x2, y2 = end
     rx, ry = abs(rx), abs(ry)
@@ -183,17 +213,32 @@ def _arc(
     elif sweep and delta < 0:
         delta += 2 * math.pi
 
+    return Arc(cx=cx, cy=cy, rx=rx, ry=ry, phi=phi, theta=theta, delta=delta)
+
+
+def _arc_points(arc: Arc) -> list[tuple[float, float]]:
+    """Sample an `Arc` into points. The last one is the arc's own endpoint."""
+    cos_phi, sin_phi = math.cos(arc.phi), math.sin(arc.phi)
     return [
         (
-            cx + rx * math.cos(t) * cos_phi - ry * math.sin(t) * sin_phi,
-            cy + rx * math.cos(t) * sin_phi + ry * math.sin(t) * cos_phi,
+            arc.cx + arc.rx * math.cos(t) * cos_phi - arc.ry * math.sin(t) * sin_phi,
+            arc.cy + arc.rx * math.cos(t) * sin_phi + arc.ry * math.sin(t) * cos_phi,
         )
-        for t in (theta + delta * index / ARC_SAMPLES for index in range(1, ARC_SAMPLES + 1))
+        for t in (
+            arc.theta + arc.delta * index / ARC_SAMPLES for index in range(1, ARC_SAMPLES + 1)
+        )
     ]
 
 
-def path_points(d: str) -> Iterator[tuple[float, float]]:
-    """Every point on the path that can bound it: endpoints and sampled curves."""
+def _walk(d: str) -> Iterator[tuple[list[tuple[float, float]], Arc | None]]:
+    """One pass over the path, one entry per command.
+
+    Yields `(points, arc)`: the points that command contributes, and its `Arc` if
+    it was an `A` that had one. One walker rather than two, because the current
+    point is threaded through every command — a second pass that only wanted the
+    arcs would have to re-derive it, and two state machines over the same grammar
+    is two chances to disagree about `s`/`t` reflection or subpath starts.
+    """
     x = y = 0.0
     start_x = start_y = 0.0
     #: Reflection source for `S`/`T`, which reuse the previous curve's control
@@ -210,23 +255,23 @@ def path_points(d: str) -> Iterator[tuple[float, float]]:
         if upper == "M":
             x, y = (x + args[0], y + args[1]) if relative else (args[0], args[1])
             start_x, start_y = x, y
-            yield x, y
+            yield [(x, y)], None
         elif upper == "L":
             x, y = (x + args[0], y + args[1]) if relative else (args[0], args[1])
-            yield x, y
+            yield [(x, y)], None
         elif upper == "H":
             x = x + args[0] if relative else args[0]
-            yield x, y
+            yield [(x, y)], None
         elif upper == "V":
             y = y + args[0] if relative else args[0]
-            yield x, y
+            yield [(x, y)], None
         elif upper == "C":
             points = [
                 (args[0] + x, args[1] + y) if relative else (args[0], args[1]),
                 (args[2] + x, args[3] + y) if relative else (args[2], args[3]),
                 (args[4] + x, args[5] + y) if relative else (args[4], args[5]),
             ]
-            yield from _cubic(here, points[0], points[1], points[2])
+            yield _cubic(here, points[0], points[1], points[2]), None
             x, y = points[2]
             cubic_control = points[1]
         elif upper == "S":
@@ -239,7 +284,7 @@ def path_points(d: str) -> Iterator[tuple[float, float]]:
                 (args[0] + x, args[1] + y) if relative else (args[0], args[1]),
                 (args[2] + x, args[3] + y) if relative else (args[2], args[3]),
             ]
-            yield from _cubic(here, control1, points[0], points[1])
+            yield _cubic(here, control1, points[0], points[1]), None
             x, y = points[1]
             cubic_control = points[0]
         elif upper == "Q":
@@ -247,7 +292,7 @@ def path_points(d: str) -> Iterator[tuple[float, float]]:
                 (args[0] + x, args[1] + y) if relative else (args[0], args[1]),
                 (args[2] + x, args[3] + y) if relative else (args[2], args[3]),
             ]
-            yield from _quadratic(here, points[0], points[1])
+            yield _quadratic(here, points[0], points[1]), None
             x, y = points[1]
             quad_control = points[0]
         elif upper == "T":
@@ -255,21 +300,37 @@ def path_points(d: str) -> Iterator[tuple[float, float]]:
                 here if quad_control is None else (2 * x - quad_control[0], 2 * y - quad_control[1])
             )
             end = (args[0] + x, args[1] + y) if relative else (args[0], args[1])
-            yield from _quadratic(here, control, end)
+            yield _quadratic(here, control, end), None
             x, y = end
             quad_control = control
         elif upper == "A":
             end = (args[5] + x, args[6] + y) if relative else (args[5], args[6])
-            yield from _arc(here, args[0], args[1], args[2], int(args[3]), int(args[4]), end)
+            arc = _arc_geometry(here, args[0], args[1], args[2], int(args[3]), int(args[4]), end)
+            # A zero radius is a straight line to the endpoint, and there is no
+            # centre to turn about — but it is still a point on the path.
+            yield (_arc_points(arc) if arc else [end]), arc
             x, y = end
         elif upper == "Z":
             x, y = start_x, start_y
-            yield x, y
+            yield [(x, y)], None
 
         if upper not in "CS":
             cubic_control = None
         if upper not in "QT":
             quad_control = None
+
+
+def path_points(d: str) -> Iterator[tuple[float, float]]:
+    """Every point on the path that can bound it: endpoints and sampled curves."""
+    for points, _ in _walk(d):
+        yield from points
+
+
+def arcs(d: str) -> Iterator[Arc]:
+    """Every elliptical arc on the path, in path order."""
+    for _, arc in _walk(d):
+        if arc is not None:
+            yield arc
 
 
 def path_bbox(d: str, *, pad: float = 0.0) -> tuple[float, float, float, float]:

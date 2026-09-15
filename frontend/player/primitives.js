@@ -149,7 +149,11 @@ export function drawBody(ctx, element, view) {
     // path below is what a body draws when it did not ask for one. What the two
     // still share is everything that is *about the body* rather than about its
     // outline: the highlight, the rotation, the direction triangle, the label.
-    drawGlyph(ctx, glyph, element.width * size, element.height * size, color);
+    //
+    // `view.time` goes in because a glyph may carry a part that turns on its own
+    // — the lidar's sweep arm. It is simulation time, not wall time, so the arm
+    // is at the same angle on the same frame of the same spec every run.
+    drawGlyph(ctx, glyph, element.width * size, element.height * size, color, view.time);
   } else {
     if (element.shape === "circle") {
       circlePath(ctx, 0, 0, (element.width * size) / 2);
