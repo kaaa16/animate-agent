@@ -30,6 +30,34 @@ import { createSimulation } from "../frontend/player/behaviors.js";
 import { drawElement } from "../frontend/player/registry.js";
 import { fitTransform } from "../frontend/player/stage.js";
 
+/**
+ * The context properties `fakeContext` records — and the ones `serializeCalls`
+ * can subtract again.
+ *
+ * Recorded because a highlight *is* a style change. `applyHighlight` sets
+ * `shadowColor`/`shadowBlur` and nothing else, so a plain field would swallow
+ * the only thing most beats do, and the "no two beats alike" check below would
+ * call every highlight-only beat a still. It did, on the first run: the
+ * avoidance document's 系统四大组成 and 前方180度扫描 beats differ in which
+ * elements glow and in nothing else.
+ *
+ * Named as a list because the stricter reading further down exists to subtract
+ * exactly these. `textAlign` is the one a drawer also reads *back*
+ * (`drawReadout` picks its text origin from it) — which the recording supports,
+ * because each property is defined with a getter as well as a setter.
+ */
+const STYLE_PROPERTIES = [
+  "fillStyle",
+  "strokeStyle",
+  "lineWidth",
+  "globalAlpha",
+  "shadowColor",
+  "shadowBlur",
+  "font",
+  "textAlign",
+  "textBaseline",
+];
+
 /** A 2D context that records calls instead of rasterising. */
 function fakeContext() {
   const calls = [];
@@ -65,24 +93,7 @@ function fakeContext() {
     // context that no browser provides.
     measureText: (text) => ({ width: String(text).length * 7 }),
   };
-  // Style properties are assigned and never read back by the drawers — but they
-  // are recorded, because a highlight *is* a style change. `applyHighlight` sets
-  // `shadowColor`/`shadowBlur` and nothing else, so a plain field would swallow
-  // the only thing most beats do, and the "no two beats alike" check below would
-  // call every highlight-only beat a still. It did, on the first run: the
-  // avoidance document's 系统四大组成 and 前方180度扫描 beats differ in which
-  // elements glow and in nothing else.
-  for (const name of [
-    "fillStyle",
-    "strokeStyle",
-    "lineWidth",
-    "globalAlpha",
-    "shadowColor",
-    "shadowBlur",
-    "font",
-    "textAlign",
-    "textBaseline",
-  ]) {
+  for (const name of STYLE_PROPERTIES) {
     let value = null;
     Object.defineProperty(ctx, name, {
       get: () => value,
@@ -224,8 +235,11 @@ function touchDistance(scene, obstacleId) {
  * first version of that check reported the avoidance scene's step-5 as a still,
  * and every element in it as "same", for exactly this reason.
  */
-function serializeCalls(calls) {
-  return calls.map(({ name, args }) => `${name}(${args.map(String).join(",")})`).join("|");
+function serializeCalls(calls, { geometryOnly = false } = {}) {
+  const kept = geometryOnly
+    ? calls.filter(({ name }) => !STYLE_PROPERTIES.includes(name))
+    : calls;
+  return kept.map(({ name, args }) => `${name}(${args.map(String).join(",")})`).join("|");
 }
 
 /**
@@ -289,6 +303,9 @@ function main() {
   );
 
   let drawn = 0;
+  // The stricter reading, tallied across every scene and printed at the end.
+  let transitions = 0;
+  let shapeStill = 0;
   for (const scene of spec.scenes) {
     const simulation = createSimulation(scene, spec.stage);
     const everDanger = new Set();
@@ -323,6 +340,7 @@ function main() {
       }
       const view = viewFor(scene, simulation, stepIndex, THEME);
       const beat = [];
+      const shape = [];
       for (const element of scene.elements) {
         const ctx = fakeContext();
         try {
@@ -342,9 +360,14 @@ function main() {
           return 1;
         }
         beat.push(`${element.id}: ${serializeCalls(ctx.calls)}`);
+        shape.push(`${element.id}: ${serializeCalls(ctx.calls, { geometryOnly: true })}`);
         drawn += 1;
       }
-      pictures.push({ id: scene.steps[stepIndex].id, calls: beat.join("\n") });
+      pictures.push({
+        id: scene.steps[stepIndex].id,
+        calls: beat.join("\n"),
+        geometry: shape.join("\n"),
+      });
     }
 
     // Every beat must draw something different from the one before it.
@@ -368,6 +391,47 @@ function main() {
         );
         return 1;
       }
+    }
+
+    // The same comparison again with the style assignments subtracted — a
+    // second, stricter reading of "did this beat change the picture".
+    //
+    // **Reported, not asserted**, like `maxLateral` and `closestApproach` above,
+    // and for a reason that is not squeamishness: the contract permits these
+    // beats. `StoryboardStep` lets a beat consist of a highlight alone, and the
+    // avoidance document's 系统组成 scene is exactly that on purpose — step 1
+    // lights the whole system, step 2 lights the lidar, and nothing is supposed
+    // to move. A harness that failed here would be stricter than the schema and
+    // would reject legal output.
+    //
+    // It still has to be *measured*, because the failure this round was about
+    // lives in exactly this blind spot. The projectile document's five beats
+    // rotated the highlight between 球 / 坐标轴 / v₀ and never moved anything;
+    // the weak reading called all five fine, and the only reason anyone noticed
+    // was a person watching the screen. Printed with names here so the number
+    // comes from this tool rather than from a one-off script — measured over
+    // every spec under `data/`, 31 of 164 adjacent pairs are highlight-only, and
+    // over the three current `r2-*` documents it is 1 of 38: the `hub` second
+    // beat, which `docs/storyboard-milestone.md` already records as a hole.
+    //
+    // Counted in *adjacent pairs*, not beats. A scene's first beat has nothing
+    // before it and can never be a repeat, so counting beats puts a floor under
+    // the denominator that is not a measurement — which is exactly how the table
+    // in the milestone doc first read `0/22` where the honest figure is `0/17`.
+    const shapeStills = [];
+    for (let index = 1; index < pictures.length; index += 1) {
+      transitions += 1;
+      if (pictures[index].geometry === pictures[index - 1].geometry) {
+        shapeStill += 1;
+        shapeStills.push(`${pictures[index - 1].id}→${pictures[index].id}`);
+      }
+    }
+    if (shapeStills.length > 0) {
+      console.log(
+        `    ⚠️ 本幕 ${shapeStills.length}/${pictures.length - 1} 处相邻节拍几何与上一拍` +
+          `完全相同，画面只换了高亮：${shapeStills.join("、")}` +
+          `（契约允许，但整幕都是它，就成了一叠幻灯片）`,
+      );
     }
     console.log(
       `  ${scene.id}（${scene.preset}）: ${scene.elements.length} 个元素 × ` +
@@ -399,7 +463,10 @@ function main() {
       console.log(line);
     }
   }
-  console.log(`\n✅ 共绘制 ${drawn} 次，无异常。`);
+  console.log(
+    `\n✅ 共绘制 ${drawn} 次，无异常。` +
+      `强口径静拍：${shapeStill}/${transitions} 处相邻节拍几何与上一拍完全相同。`,
+  );
   return 0;
 }
 
