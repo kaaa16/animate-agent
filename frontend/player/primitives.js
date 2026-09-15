@@ -47,8 +47,14 @@ const ANNOTATION_FONT = "13px Inter, 'Microsoft YaHei', sans-serif";
  *
  * `fillText`, never `innerHTML`: a label here is model-authored data (decision
  * D4). The annotation primitives draw their own text because a `dimension` with
- * no number on it is not a drawing of a dimension — unlike a `body`'s name,
- * which is a caption about the object rather than part of its geometry.
+ * no number on it is not a drawing of a dimension.
+ *
+ * The note that used to end that sentence — that a `body`'s name is "a caption
+ * about the object rather than part of its geometry", as though that settled it
+ * — had it backwards. Being a caption is exactly why it belongs on screen, and
+ * `drawVector`, `drawAxis`, `drawDimension` and `drawAngle` all draw theirs. A
+ * `body` was the one scene object that did not, and the four identical rounded
+ * rectangles of the avoidance document were the result.
  */
 function annotation(ctx, view, text, x, y) {
   if (!text) return;
@@ -163,6 +169,21 @@ export function drawBody(ctx, element, view) {
   // the repo ever showed one.
   drawHeading(ctx, element, color, size, heading);
   ctx.restore();
+
+  // The name the storyboard gave this object. Outside the rotated frame, so the
+  // caption stays upright however the body is turned, and below the shape rather
+  // than across it — the body is the thing being pointed at, and a caption over
+  // its middle hides it.
+  //
+  // This was not drawn at all. Every one of the three documents' bodies carried a
+  // `label` in the spec, and the avoidance document's first beat teaches
+  // 底盘 / 电机控制器 / 2D激光雷达 / 避障控制程序 while the picture showed four
+  // identical rounded rectangles. The glyph work (M3-c) is the other half of that
+  // gap; this half had already been paid for by layout and thrown away here.
+  if (element.label) {
+    const half = (Math.max(element.height ?? 0, element.width ?? 0) * size) / 2;
+    annotation(ctx, view, element.label, node.x, node.y + half + 13);
+  }
 }
 
 /** The little direction triangle the baseline puts on its car (`app.js:732`). */

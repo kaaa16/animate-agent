@@ -676,6 +676,40 @@ def test_every_named_drawer_exists_in_primitives_js() -> None:
         assert f"export function {drawer}(" in primitives, f"primitives.js 里没有 {drawer}"
 
 
+def _drawer_source(name: str) -> str:
+    """One drawer's source, so a check can ask what *that drawer* reads.
+
+    Not the whole file, and the difference is the whole point of the test below:
+    the whole file answers "does anything read this", which is far weaker than
+    "does this drawer read it".
+    """
+    source = (PLAYER_DIR / "primitives.js").read_text(encoding="utf-8")
+    match = re.search(rf"export function {name}\(.*?\n\}}", source, re.S)
+    assert match is not None, f"primitives.js 里找不到 {name}"
+    return match.group(0)
+
+
+def test_a_body_draws_the_label_the_storyboard_gave_it() -> None:
+    """A body is a thing in the scene, and every other thing draws its name.
+
+    A *named* check rather than a general one, and the reason is worth writing
+    down so it is not mistaken for a net that catches the class. The obvious
+    generalisation — "a drawer must surface every field the storyboard fills" —
+    would not have caught this: `element.label` *is* read in `primitives.js`, by
+    `drawVector`, `drawAxis`, `drawDimension` and `drawAngle`. Any file-level
+    check passes. The omission was per-kind, in the one drawer that skipped it,
+    and nothing derivable from the models distinguishes a `body` from an `axis`
+    on this question — which is why the honest instrument is a name, not a rule.
+
+    What it cost, and why it is worth locking down: the avoidance document's
+    first beat teaches 底盘 / 电机控制器 / 2D激光雷达 / 避障控制程序 and the
+    picture showed four identical rounded rectangles. All 17 bodies across the
+    three documents carried a `label` — baked by layout, present in every spec —
+    and this one drawer did not read it.
+    """
+    assert "element.label" in _drawer_source("drawBody")
+
+
 def _player_sources() -> dict[str, str]:
     """Player JS with comments stripped.
 
