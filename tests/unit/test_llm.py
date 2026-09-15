@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,21 @@ from animate_agent.llm import (
     LLMConfig,
     load_env_file,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ() -> Iterator[None]:
+    """Undo what `load_env_file` writes straight into `os.environ`.
+
+    The function exists to mutate the process environment, so `monkeypatch`
+    cannot unwind it — monkeypatch only reverts its own edits. Without this, a
+    key one test loaded stays set for every test that runs after it, and the
+    suite turns order-dependent in a way nothing announces.
+    """
+    before = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(before)
 
 
 def _chat(payload: dict[str, Any], *, max_tokens: int = 8192) -> str:

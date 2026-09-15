@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from animate_agent import cli
+from animate_agent import cli, llm
 from animate_agent.documents.models import DocumentIR
 from animate_agent.knowledge.models import LessonIR, LessonScene
 from animate_agent.rendering.models import RenderSpec
@@ -43,6 +43,13 @@ def test_missing_key_reports_clearly(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("DEEPSEEK_KEY", raising=False)
+    # Clearing the variable is no longer enough to mean "there is no key": since
+    # the loader landed, a `.env` at the repository root is a second source, so
+    # on a developer's machine this test would sail past the check and dial the
+    # API for real — failing, and charging for it. Point the loader at a file
+    # that is not there, so "no key" is a property of the test and not of
+    # whoever happens to be running it.
+    monkeypatch.setattr(llm, "ENV_FILE", tmp_path / "absent.env")
     path = _write_sample(tmp_path)
 
     exit_code = cli.main([str(path)])
