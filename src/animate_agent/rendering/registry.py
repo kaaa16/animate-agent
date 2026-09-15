@@ -143,7 +143,8 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         props=("speed", "heading", "scale", "visible", "danger", "glyph"),
         relations=(),
         live_props=("speed", "heading", "scale", "visible", "danger"),
-        note="基础形状由 glyph 选（圆/矩形/多边形/胶囊）；glyph 可指向 T2 字形。"
+        note="基础形状由角色决定；`glyph` 是可选的实物图标，写了就画成那个图标"
+        "（见下面的字形清单），不写就画基础形状。"
         "`object` 是兜底角色，只在确实没有合适角色时才用——留它是为了让每个被抽出的"
         "对象都有地方去，而不是被硬塞进某个不匹配的域角色",
     ),
@@ -473,13 +474,27 @@ class GlyphDeclaration:
 #: its source was `hand:octagon`, and both `layout.py:162` and `models.py:99`
 #: record the opposite decision (D1) — the baseline's obstacle is 8 vertices
 #: alternating between `r` and `0.78r`, parametric on purpose.
+#: `note` is the whole offer. It is printed to the model word for word, so it has
+#: to say what the icon *is* and why a lesson would reach for it — the list used
+#: to print bare names, and the real chain asked for a glyph zero times across
+#: three documents while eleven written notes sat unread right here.
 T2_GLYPHS: tuple[GlyphDeclaration, ...] = (
-    GlyphDeclaration("car", "robotics", "tabler:car", "避障小车的车身，轮子是可独立转动的 part"),
-    GlyphDeclaration("lidar", "robotics", "tabler:radar", "激光雷达本体"),
+    GlyphDeclaration(
+        "car",
+        "robotics",
+        "tabler:car",
+        "避障小车、移动平台的车身；车头朝右，`heading` 是从右开始转的",
+    ),
+    GlyphDeclaration(
+        "lidar",
+        "robotics",
+        "tabler:radar",
+        "激光雷达本体；扫描臂会自己转，讲「雷达在扫」的那一拍用它最省事",
+    ),
     GlyphDeclaration("robot", "robotics", "tabler:robot", "移动机器人本体"),
     GlyphDeclaration("cpu", "robotics", "tabler:cpu", "控制器、计算节点、ROS 节点"),
-    GlyphDeclaration("server", "cloud", "tabler:server", "服务端"),
-    GlyphDeclaration("package", "cloud", "tabler:package", "消息载荷"),
+    GlyphDeclaration("server", "cloud", "tabler:server", "服务端、云端服务"),
+    GlyphDeclaration("package", "cloud", "tabler:package", "消息载荷、传输中的数据包"),
 )
 
 T2_GLYPH_NAMES: frozenset[str] = frozenset(g.name for g in T2_GLYPHS)
@@ -707,7 +722,21 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
 
     lines.append("")
     lines.append("## 可用领域字形 glyph（只能用在 `body` 的 `glyph` 属性上）")
-    lines.append("、".join(f"`{g.name}`" for g in T2_GLYPHS))
+    # Printed as a bare name list until now, while every `note` below sat written
+    # and unread. The measured cost: across the three sample documents the real
+    # chain asked for a glyph zero times. The names were never the problem — a
+    # model that has never been told what `package` is for has no reason to
+    # prefer it to the rectangle it gets for free.
+    lines.append(
+        "字形是**一幅固定的实物线稿**：颜色、线宽、部件都改不了，只能按名字挑。"
+        "该不该用的判据是「**这个对象在文档里是不是一个具体的实物**」——"
+        "小车、雷达、控制器、服务器、数据包是；"
+        "安全距离、空旷程度、判断结论不是，那些该用 `zone` / `readout` / `dimension`。"
+        "不写不会错，只是画面更抽象；写对了，那一拍一眼就认得出画的是什么。"
+        "只有 `body` 有这个属性，`emitter`／`zone`／`link`／`traveler`／`readout` 都没有。"
+    )
+    for glyph in T2_GLYPHS:
+        lines.append(f"- `{glyph.name}`（{glyph.domain}）：{glyph.note}")
 
     lines.append("")
     lines.append("## 可用行为 behavior")

@@ -172,6 +172,58 @@ def test_vocabulary_mentions_every_drawable_name() -> None:
         assert f"`{action}`" in vocabulary
 
 
+def _glyph_section(vocabulary: str) -> list[str]:
+    """The glyph section's lines, header excluded, stopping at the next `## `."""
+    lines = vocabulary.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("## 可用领域字形"))
+    rest = lines[start + 1 :]
+    end = next((i for i, line in enumerate(rest) if line.startswith("## ")), len(rest))
+    return rest[:end]
+
+
+def test_the_vocabulary_explains_every_glyph_instead_of_listing_its_name() -> None:
+    """A name with no note is an offer the model cannot evaluate.
+
+    `GlyphDeclaration.note` was written for all six glyphs and printed for none of
+    them — `render_vocabulary` rendered the set as a bare `、`-joined name list.
+    Getting the glyphs drawn was never going to be enough on its own: across the
+    three sample documents the real chain asked for a glyph zero times, and a
+    model that has never been told what `package` is for has no reason to prefer
+    it to the rounded rectangle it gets for free.
+
+    Structural rather than "the string appears somewhere", for the reason spelled
+    out above `_offered_role_lines`: a name is offered by a line that offers it.
+    """
+    entries = [line for line in _glyph_section(render_vocabulary()) if line.startswith("- ")]
+
+    assert len(entries) == len(T2_GLYPHS)
+    for glyph, entry in zip(T2_GLYPHS, entries, strict=True):
+        assert entry.startswith(f"- `{glyph.name}`"), entry
+        assert glyph.note in entry, f"`{glyph.name}` 只印了名字，没印它是干什么的"
+
+
+def test_the_vocabulary_says_when_a_glyph_beats_a_plain_shape() -> None:
+    """Explaining the icons is half the offer; the other half is the judgement.
+
+    Six accurate descriptions with no rule for reaching for one leaves the
+    original question open one level up. The rule here is the one that keeps the
+    picture legible in both directions: a glyph is for a *thing the document
+    names*, and the abstract quantities around it belong to `zone`/`readout` —
+    without the second half, a model that took the hint would put icons on the
+    safe-distance circle and the decision panel too.
+    """
+    section = _glyph_section(render_vocabulary())
+    prose = "\n".join(line for line in section if not line.startswith("- "))
+
+    assert "具体" in prose, "没有说清楚什么时候该用字形"
+    # The exclusion matters as much as the inclusion: it is what stops a model
+    # that read the section from hanging an icon on a threshold circle.
+    assert "`zone`" in prose and "`readout`" in prose
+    # And the constraint that `glyph` is a `body`-only prop, which a model would
+    # otherwise try on an emitter and get an unknown-prop rejection for.
+    assert "只有 `body`" in prose
+
+
 def _offered_role_lines(vocabulary: str) -> list[str]:
     """The `role` list a model reads, before any of it is filtered.
 
