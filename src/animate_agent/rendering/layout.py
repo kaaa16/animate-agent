@@ -40,8 +40,10 @@ the only reason M1 (`legacy.py`) was built before this module.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+import unicodedata
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 
@@ -101,6 +103,76 @@ class _Box:
     y: float
     width: float
     height: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Frame:
+    """What a preset may arrange in, once the panels have taken their corner.
+
+    **Panels are a corner, not a column**, and that distinction is the whole
+    reason this exists. `FIELD_RIGHT_RATIO = 0.60` and `HUB_RADIUS_X_RATIO = 0.22`
+    were both chosen to keep clear of the readouts — sized, in each case, for a
+    stack of panels that the scenes using that preset have never produced. A
+    `field` scene with one caption was still laying itself out around a
+    seven-panel wall.
+
+    So a preset asks *how far right may I go at this height*, and gets an answer
+    about the panels that are actually there. Above, below or between them the
+    answer is the stage margin; level with one, it is that panel's left edge.
+
+    A preset that would reach into a panel it cannot see — because it places
+    several things at different heights — is still caught by `_check_fit`. This
+    is a shape a preset can use, not a gate.
+    """
+
+    #: Stage minus `STAGE_MARGIN_RATIO` on all four sides.
+    left: float
+    top: float
+    right: float
+    bottom: float
+    #: The panels the layout decided, as boxes. Empty when the scene has none.
+    panels: tuple[_Box, ...] = ()
+
+    def _beside(self, y: float, half_height: float) -> list[_Box]:
+        """The panels at this height — the ones that are in the way sideways.
+
+        `_check_fit` calls two boxes overlapping only when *both* axes overlap, so
+        one axis of clearance is enough for them to read as separate. This is that
+        rule, applied to a band instead of to one box.
+        """
+        return [
+            box
+            for box in self.panels
+            if box.y - box.height / 2 < y + half_height and box.y + box.height / 2 > y - half_height
+        ]
+
+    def right_of(self, y: float, half_height: float = 0.0) -> float:
+        """The rightmost **edge** allowed for something occupying `y ± half_height`.
+
+        An edge rather than a centre, so a caller subtracts half of whatever it
+        is placing. That keeps the one number a preset cannot derive — the size
+        of the thing it is about to put down — at the call site, where the size
+        came from in the first place.
+        """
+        edges = [box.x - box.width / 2 for box in self._beside(y, half_height)]
+        return min([self.right, *[edge - PANEL_CLEARANCE for edge in edges]])
+
+    def left_of(self, y: float, half_height: float = 0.0) -> float:
+        """The mirror of `right_of`, for the presets that grow both ways."""
+        edges = [box.x + box.width / 2 for box in self._beside(y, half_height)]
+        return max([self.left, *[edge + PANEL_CLEARANCE for edge in edges]])
+
+
+def _frame(stage: RenderStage, panels: dict[str, _Box]) -> _Frame:
+    margin_x = stage.width * STAGE_MARGIN_RATIO
+    margin_y = stage.height * STAGE_MARGIN_RATIO
+    return _Frame(
+        left=margin_x,
+        top=margin_y,
+        right=stage.width - margin_x,
+        bottom=stage.height - margin_y,
+        panels=tuple(panels.values()),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -167,11 +239,10 @@ OBSTACLE_SIDES = 8
 OBSTACLE_INNER_RATIO = 0.78
 
 #: A `chain` is a left-to-right pipeline, so its nodes sit on a horizontal spine
-#: at 252/600 — above centre, which leaves the lower third for the actor row and
-#: keeps the spine clear of the readouts' column.
+#: at 252/600 — above centre, which leaves the lower third for the actor row.
+#: How far the spine runs, left and right, is the frame's to say: see
+#: `_chain_boxes`.
 CHAIN_Y_RATIO = 0.42
-CHAIN_LEFT_RATIO = 0.16
-CHAIN_RIGHT_RATIO = 0.84
 #: Bodies that are not part of the pipeline itself (the thing being driven) sit
 #: below it. Same relationship the ROS baseline has between its two nodes on
 #: y=230 and the `RobotCar` "runtime" at y=430: the chain is not the subject.
@@ -185,25 +256,30 @@ GENERIC_COLUMN_X_RATIO = 0.3
 #: `hub` is a star: one centre and its leaves on a ring around it.
 #:
 #: An **ellipse** rather than a circle, because the stage is not square: a circle
-#: sized to fit the height overflows into the readout column on the right, and one
-#: sized to fit the width leaves the leaves bunched in a vertical line. The x
-#: radius is smaller than it looks it should be for the same reason — at 0.30 the
-#: rightmost leaf collides with the panel column, which is a `LayoutError` and so
-#: would have failed the scene rather than merely crowding it.
+#: sized to fit the height leaves the leaves bunched in a vertical line, and one
+#: sized to fit the width leaves nothing above or below.
+#:
+#: The x radius is **measured, not kept here** (`_hub_radius_x`). It was 0.22,
+#: with a note saying that 0.30 would collide with the panel column — and
+#: sweeping the constant says otherwise: 0.29 fails on the *left* leaf leaving
+#: the *left edge of the canvas*, and the panels never appear in the failure.
+#: Four leaves sit at 0°/90°/180°/270°, so nothing shares a corner with the
+#: readouts to collide with. The number was set by one constraint and explained
+#: by another.
 HUB_CENTER_X_RATIO = 0.32
 HUB_CENTER_Y_RATIO = 0.5
-HUB_RADIUS_X_RATIO = 0.22
 HUB_RADIUS_Y_RATIO = 0.30
 
 #: `field` is a 2D plot: axes crossing at an origin, one launch slot per
 #: projectile, trajectories arcing up and to the right.
 #:
-#: The origin sits low and left so "+y up" is the direction with room in it —
-#: a parabola drawn from a centred origin has nowhere to arc. The right edge
-#: stops short of the panel column for the same reason `hub`'s x radius is small.
+#: The origin sits low and left so "+y up" is the direction with room in it — a
+#: parabola drawn from a centred origin has nowhere to arc. Where the plot *ends*
+#: on the right is the frame's to say: it used to be 0.60 of the width, which was
+#: chosen to stay clear of the panel column and then paid for that room in every
+#: scene, whether or not the panels were there.
 FIELD_ORIGIN_X_RATIO = 0.15
 FIELD_ORIGIN_Y_RATIO = 0.82
-FIELD_RIGHT_RATIO = 0.60
 FIELD_TOP_RATIO = 0.12
 
 #: Trajectories are drawn from a **fixed launch speed**, with the 45° throw made
@@ -261,19 +337,73 @@ THROW_MIN_DURATION = 1.2
 #: Graduations on an axis when the storyboard did not say how many.
 DEFAULT_AXIS_TICKS = 5
 
+#: How far past an axis's tip its own label sits, in stage units. Mirrored from
+#: `drawAxis` (`primitives.js`), and there is a test holding the two equal.
+#:
+#: It is a number this layer needs even though this layer does not draw the
+#: label: the field has to stop short of the margin by the label's half-width
+#: plus this, or the label is written off the edge of the canvas. Which is what
+#: happened — widening the field to the margin pushed 水平方向 off the right edge,
+#: and nothing caught it, because `_check_fit` compares boxes and an annotation
+#: has none.
+AXIS_LABEL_GAP = 18.0
+
 #: Readouts stack in a right-hand column for **every** preset. One rule, because a
 #: text panel has no relation to the geometry to hang off — it needs a slot that
 #: does not move when the objects do. Colliding with a body is a `LayoutError`
 #: like anything else; a panel is not more important than the picture.
-PANEL_X_RATIO = 0.74
-PANEL_WIDTH_RATIO = 0.24
-PANEL_HEIGHT = 88.0
+#:
+#: The column is **as wide as the widest text in it and no wider**, right-aligned
+#: against the stage margin.
+#:
+#: It used to be a fixed 24% of the stage whatever the panel held, which cost two
+#: things that did not look like each other. A four-character caption was handed
+#: a 230×88 box and drew an empty panel with a word in the corner of it. And
+#: `publisher-code` was handed the same 230px box and drew *past its own right
+#: edge* — that line is 448px wide, the box was collision-checked at 230, and the
+#: text went to 448 because nothing anywhere had looked at it. Nothing failed.
+#:
+#: So there is no fraction here any more. A panel takes what its text needs, up
+#: to the width the stage can actually show, and a line wider than that is a
+#: `LayoutError` rather than a line written off the canvas (`_panel_boxes`).
+PANEL_RIGHT_RATIO = 0.97
+#: Where a comfortable stack starts and ends — `y` centres, not edges. Not a
+#: limit: `_panel_span` widens them when the panels have more to say than this.
 PANEL_TOP_RATIO = 0.14
 PANEL_BOTTOM_RATIO = 0.86
-#: Clearance between two stacked panels, and the smallest one still worth
-#: drawing. Both only bind when a scene has many readouts; see `_panel_height`.
+#: Between two stacked panels.
 MIN_PANEL_GAP = 8.0
-MIN_PANEL_HEIGHT = 24.0
+#: Between a panel and anything placed beside it. Not zero, and not small:
+#: `_check_fit` accepts boxes that merely touch, and a body flush against a
+#: panel's edge reads as part of the panel rather than as something the panel is
+#: talking about.
+PANEL_CLEARANCE = 24.0
+
+#: The canvas keeps its own margin, so nothing is drawn flush against the edge.
+#: It is also what the panel column is measured back from.
+STAGE_MARGIN_RATIO = 0.03
+
+#: Panel text metrics, in stage units.
+#:
+#: These used to live in the drawer: `drawReadout` fits a panel to its text when
+#: `element.width` is falsy. But the layout always set `element.width`, so the
+#: rule never once ran on a laid-out spec — and the layout's fixed column was the
+#: thing it was meant to correct. It lives here now because a box is geometry and
+#: geometry is this layer's job (decision D3), and because `_check_fit` can only
+#: check a box this layer decided.
+PANEL_FONT_SIZE = 14.0
+#: Advance width per character, in ems. Two numbers rather than one average,
+#: because these strings mix scripts — `雷达有效半径2到8米` is half full-width and
+#: half narrow — and any single number is wrong at both ends. `W`/`F` are the
+#: Unicode East Asian Width classes for a full-width glyph; the rest is `Inter`,
+#: where an average Latin advance runs a little over half an em.
+PANEL_WIDE_EM = 1.0
+PANEL_NARROW_EM = 0.55
+PANEL_PADDING = 12.0
+PANEL_LINE_HEIGHT = 20.0
+#: The narrowest panel still worth drawing: a two-character caption needs a box,
+#: not a sliver.
+MIN_PANEL_WIDTH = 120.0
 
 #: role -> (width, height) in stage units, for roles a preset places as a box.
 _BODY_SIZES: dict[str, tuple[float, float]] = {
@@ -477,13 +607,22 @@ def _primitive_of(obj: StoryboardObject) -> str | None:
 # --------------------------------------------------------------------------
 
 
-def _lane_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
+def _lane_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
     """A corridor: bodies on the lane line, obstacles alternating either side.
 
     Obstacles alternate because the fourth beat teaches *comparing* left and
     right clearance. A preset that put every obstacle on the same side would
     make that beat a foregone conclusion — which is what the baseline does, and
     why its car always swerves the same way.
+
+    **The only preset that ignores `frame`, and the only one that should.** Every
+    position here is a fraction of the stage that `templates.py` also uses —
+    `LANE_VEHICLE_X_RATIO` is its car, `LANE_OBSTACLE_FIRST_X_RATIO` its first
+    obstacle — so that a laid-out scene and the translated baseline can be put
+    side by side and be talking about the same picture (M2's acceptance). Moving
+    the obstacles to fill the frame would make the comparison meaningless to buy
+    room this preset is not short of: a corridor with a car, an obstacle and a
+    dashed line through it does not look emptier for being narrower.
     """
     lane_y = stage.height * LANE_Y_RATIO
     obstacles = [obj for obj in scene.objects if obj.role == "obstacle"]
@@ -570,31 +709,134 @@ def _column(
     return boxes
 
 
-def _panel_height(count: int, span: float) -> float:
-    """How tall each panel may be so `count` of them fit down the column.
+def _is_wide(character: str) -> bool:
+    """Is this glyph drawn at full width? The Unicode East Asian Width property."""
+    return unicodedata.east_asian_width(character) in ("W", "F")
 
-    `PANEL_HEIGHT` is a default, not a promise. A scene of seven symbol cards —
-    the projectile document's 关键参数 scene is exactly that — cannot be stacked
-    at 88px inside a 432px column, and the first version of this raised
-    `LayoutError` over an overlap, failing a scene whose only crime was having
-    more to say than most. Shrinking the cards keeps the failure mode where it
-    belongs: the column stays readable and inside the canvas at any count the
-    object cap permits.
+
+def _text_extent(text: str, *, minimum: float = MIN_PANEL_WIDTH) -> tuple[float, float]:
+    """The box `text` needs, as `(width, height)` in stage units.
+
+    An estimate, and only ever asked about one font at one size — `drawReadout`
+    sets `14px Inter, 'Microsoft YaHei'`. Widths come from a Unicode property
+    rather than from a measurement because there is no font here to measure
+    with, and the point is not precision: it is that the number is derived from
+    the text instead of being a constant that never looked at it.
+
+    `minimum` is the panel floor, and an annotation passes 0: `MIN_PANEL_WIDTH`
+    is about the smallest *panel* worth drawing, and a one-character axis label
+    is a one-character label. The padding is the panel's either way, which
+    over-reserves an annotation by a few pixels — the harmless direction, and
+    the estimate is the coarse part regardless.
     """
-    if count <= 1:
-        return PANEL_HEIGHT
-    step = span / (count - 1)
-    return min(PANEL_HEIGHT, max(step - MIN_PANEL_GAP, MIN_PANEL_HEIGHT))
+    lines = text.split("\n")
+    widest = max((_line_width(line) for line in lines), default=0.0)
+    return (
+        max(minimum, widest + PANEL_PADDING * 2),
+        len(lines) * PANEL_LINE_HEIGHT + PANEL_PADDING * 2,
+    )
+
+
+def _line_width(line: str) -> float:
+    return sum(
+        PANEL_FONT_SIZE * (PANEL_WIDE_EM if _is_wide(ch) else PANEL_NARROW_EM) for ch in line
+    )
+
+
+def _panel_texts(obj: StoryboardObject, scene: StoryboardScene) -> list[str]:
+    """Every string this panel can be made to show.
+
+    `text` is a live prop (`LIVE_PROPS.readout` in `registry.py`), so a beat can
+    rewrite it — and beats do. Across the three sample documents **11 of the 16
+    readouts are given a longer string by some beat than the object declares**:
+    `param_panel` declares 四个关键参数 and beat 7 writes
+    雷达有效半径2到8米；控制循环80ms, nearly three times as wide.
+
+    So the box has to hold every value the prop can take, not the one it starts
+    at. Sizing from the declared string drew the beat's longer text out over the
+    panel's own edge, and nothing failed.
+    """
+    candidates: list[PropValue | None] = [obj.props.get("text"), obj.label]
+    for step in scene.steps:
+        state = step.object_states.get(obj.id)
+        if isinstance(state, dict):
+            candidates.append(state.get("text"))
+    return [value for value in candidates if isinstance(value, str) and value]
+
+
+def _panel_extent(texts: Sequence[str]) -> tuple[float, float]:
+    """The box that holds every one of `texts`.
+
+    Component-wise, not per-string. The widest string and the tallest string need
+    not be the same one — a beat can rewrite a caption into two short lines — and
+    a box sized from whichever the loop happened to look at first would fit one
+    of them and not the other.
+    """
+    extents = [_text_extent(text) for text in texts]
+    return (
+        max((width for width, _ in extents), default=0.0),
+        max((height for _, height in extents), default=0.0),
+    )
+
+
+def _panel_span(heights: Sequence[float], stage: RenderStage) -> tuple[float, float]:
+    """Where the first and last panel centres go, given how tall they came out.
+
+    `PANEL_TOP_RATIO`/`PANEL_BOTTOM_RATIO` are where a comfortable stack sits,
+    not a limit, and the span widens before anything fails.
+
+    The first version went the other way round: it shrank every panel to fit that
+    span. That produces boxes the text does not fit in, so the drawer grew them
+    back on its way to the canvas and two panels drew over each other with no
+    gate in between — a `_check_fit` that passes because it was checking a
+    rectangle nobody drew. Sizing from the text and widening the span keeps the
+    failure where it belongs: the panels genuinely have more to say than the
+    stage can show, and `_check_fit` says so by name.
+    """
+    margin = stage.height * STAGE_MARGIN_RATIO
+    low = margin + heights[0] / 2
+    high = stage.height - margin - heights[-1] / 2
+    top = stage.height * PANEL_TOP_RATIO
+    bottom = stage.height * PANEL_BOTTOM_RATIO
+    if len(heights) == 1:
+        return min(top, high), min(top, high)
+    step = max((above + below) / 2 + MIN_PANEL_GAP for above, below in pairwise(heights))
+    needed = step * (len(heights) - 1)
+    if needed <= bottom - top or needed > high - low:
+        return top, bottom
+    middle = (low + high) / 2
+    return middle - needed / 2, middle + needed / 2
 
 
 def _panel_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
-    """The right-hand text column, shared by every preset."""
+    """The right-hand text column, shared by every preset.
+
+    One width for the whole stack rather than one per panel: ragged left edges
+    read as misalignment, and the widest panel is what the column has to clear
+    anyway. Heights are per panel, because a one-line caption and a two-line one
+    are not the same box — rounding both up to a constant is what produced the
+    empty panels.
+    """
     readouts = _with_primitive(scene, "readout")
-    width = stage.width * PANEL_WIDTH_RATIO
-    top = stage.height * PANEL_TOP_RATIO
-    bottom = stage.height * PANEL_BOTTOM_RATIO
-    height = _panel_height(len(readouts), bottom - top)
-    return _column(readouts, stage.width * PANEL_X_RATIO, top, bottom, lambda _obj: (width, height))
+    if not readouts:
+        return {}
+
+    text = {obj.id: _panel_texts(obj, scene) for obj in readouts}
+    extent = {obj_id: _panel_extent(held) for obj_id, held in text.items()}
+    needed = max(width for width, _ in extent.values())
+    room = stage.width * (1 - 2 * STAGE_MARGIN_RATIO)
+    if needed > room:
+        widest = max(extent, key=lambda obj_id: extent[obj_id][0])
+        line = max(text[widest], key=lambda held: _text_extent(held)[0])
+        raise LayoutError(
+            f"场景 `{scene.id}` 里 `{widest}` 的面板文字有 {needed:.0f}px 宽，"
+            f"而画布只留得出 {room:.0f}px；写出去的话会跑到画布外面，"
+            f"拆成两行、或者换一句短一点的：{line[:40]!r}"
+        )
+
+    top, bottom = _panel_span([extent[obj.id][1] for obj in readouts], stage)
+    x = stage.width * PANEL_RIGHT_RATIO - needed / 2
+    return _column(readouts, x, top, bottom, lambda obj: (needed, extent[obj.id][1]))
 
 
 def _link_endpoint_ids(scene: StoryboardScene) -> set[str]:
@@ -608,7 +850,7 @@ def _link_endpoint_ids(scene: StoryboardScene) -> set[str]:
     }
 
 
-def _chain_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
+def _chain_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
     """A left-to-right pipeline: participants on a spine, everything else below it.
 
     **Who counts as a participant is derived, not read off the role.** The first
@@ -626,6 +868,14 @@ def _chain_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
     The link itself is not placed here — it is an *edge*, and its geometry lives
     on the two bodies it joins (`_link_points`). A box would be a position that
     means nothing.
+
+    The spine runs between the frame's two edges, not `CHAIN_LEFT_RATIO` to
+    `CHAIN_RIGHT_RATIO`. The right-hand one was 0.84 to stay clear of the panel
+    column, and the spine sits at 0.42 of the height — below the panels a chain
+    scene actually has, so the reservation was paying for a wall that was not
+    there. Both ends move together rather than only the right: a pipeline with
+    one margin nearly twice the other reads as a mistake, and the frame's left
+    edge is the honest answer for where a chain starts.
     """
     endpoints = _link_endpoint_ids(scene)
     bodies = _with_primitive(scene, "body")
@@ -636,46 +886,120 @@ def _chain_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
             "链路至少要两个节点才连得起来"
         )
 
-    boxes: dict[str, _Box] = {}
-    left = stage.width * CHAIN_LEFT_RATIO
-    right = stage.width * CHAIN_RIGHT_RATIO
     spine_y = stage.height * CHAIN_Y_RATIO
+    # Two different halves, because they answer two different questions: the
+    # height is the band whose panels are in the way, the width is how far a node
+    # reaches sideways once it is placed. Using one for both put the end nodes
+    # *outside* the margin — on canvas, so nothing failed, and off the edge the
+    # frame had just said was the limit.
+    half_w = max(width for width, _ in map(_body_size, on_spine)) / 2
+    half_h = max(height for _, height in map(_body_size, on_spine)) / 2
+    left = frame.left_of(spine_y, half_h) + half_w
+    right = frame.right_of(spine_y, half_h) - half_w
+    if right < left:
+        raise LayoutError(
+            f"场景 `{scene.id}` 选了 `chain`，但脊线所在的高度上左右只剩 "
+            f"{right - left:.0f}px 可用；面板把这一行占满了"
+        )
+
+    boxes: dict[str, _Box] = {}
     step = (right - left) / (len(on_spine) - 1)
     for index, node in enumerate(on_spine):
         width, height = _body_size(node)
         boxes[node.id] = _Box(x=left + step * index, y=spine_y, width=width, height=height)
 
-    cursor = left
+    # The actor row starts at the spine's own left edge rather than at its first
+    # node's centre, so a row of different-sized bodies does not drift left of the
+    # pipeline it belongs to.
+    cursor = left - half_w
     for actor in [obj for obj in bodies if obj not in on_spine]:
         width, height = _body_size(actor)
         boxes[actor.id] = _Box(
-            x=cursor, y=stage.height * CHAIN_ACTOR_Y_RATIO, width=width, height=height
+            x=cursor + width / 2, y=stage.height * CHAIN_ACTOR_Y_RATIO, width=width, height=height
         )
         cursor += width + 24.0
 
-    boxes.update(_panel_boxes(scene, stage))
     return boxes
 
 
-def _generic_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
+def _generic_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
     """A vertical column plus the text column. The last resort, and it looks like it.
 
     Deliberately no slots: `generic` is what a scene falls back to when no preset
     describes it, so pretending to arrange it would mean inventing a structure
     nobody asked for. An ordered list is the honest answer.
+
+    Takes `frame` and does not read it, which is the same statement: a column has
+    no horizontal structure to stretch. Its span down the page is the panel
+    column's own span for the same non-reason — it is where an evenly spaced list
+    looked right, not a measurement of anything.
     """
-    boxes = _column(
+    return _column(
         _bodies_but(scene),
         stage.width * GENERIC_COLUMN_X_RATIO,
         stage.height * PANEL_TOP_RATIO,
         stage.height * PANEL_BOTTOM_RATIO,
         _body_size,
     )
-    boxes.update(_panel_boxes(scene, stage))
-    return boxes
 
 
-def _hub_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
+def _hub_spokes(
+    leaves: list[StoryboardObject],
+) -> list[tuple[StoryboardObject, float]]:
+    """Each leaf with the angle it sits at, from straight up and clockwise.
+
+    Clockwise from the top is the order the narration introduces the parts, so
+    the first leaf lands where the eye starts. Shared by the placer and the
+    radius computation, because a radius worked out for one set of angles and
+    applied to another is a collision nobody would look for.
+    """
+    return [
+        (leaf, -math.pi / 2 + (2 * math.pi * index) / len(leaves))
+        for index, leaf in enumerate(leaves)
+    ]
+
+
+def _hub_radius_x(
+    scene_id: str,
+    centre: RenderPoint,
+    radius_y: float,
+    spokes: list[tuple[StoryboardObject, float]],
+    frame: _Frame,
+) -> float:
+    """The widest the ring may be before a leaf leaves the frame.
+
+    `HUB_RADIUS_X_RATIO` used to do this job, and its comment says it is 0.22
+    because "at 0.30 the rightmost leaf collides with the panel column, which is
+    a `LayoutError` and so would have failed the scene rather than merely
+    crowding it." Sweeping the constant says something else. 0.29 fails — on
+    `target`, the **left** leaf, off the *left edge of the canvas*. The panels do
+    not appear in the failure at all, because a four-leaf hub has no leaf in the
+    top-right corner where the panels are. The constant was sized by the left
+    margin and explained by the panels; the two happen to be close, and nothing
+    checked which one was binding.
+
+    So the room is measured instead of remembered. Each leaf asks about the
+    height it will actually occupy: beside a panel it is the panel's edge, above
+    or below one it is the stage margin. A constant cannot do that, and a hub
+    that shares its corner with a wide code readout needs it to.
+    """
+    room = math.inf
+    for leaf, angle in spokes:
+        width, height = _body_size(leaf)
+        y = centre.y + math.sin(angle) * radius_y
+        across = math.cos(angle)
+        if across > 0:
+            edge = frame.right_of(y, height / 2) - width / 2
+            room = min(room, (edge - centre.x) / across)
+        elif across < 0:
+            edge = frame.left_of(y, height / 2) + width / 2
+            room = min(room, (centre.x - edge) / -across)
+    if room < 0:
+        raise LayoutError(f"场景 `{scene_id}` 选了 `hub`，但中心的左右都被面板占满，环展不开")
+    return room
+
+
+def _hub_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
     """A star: the first `node` at the centre, every other body on a ring.
 
     The centre is chosen by role because that is what `hub`'s `required_roles`
@@ -697,31 +1021,28 @@ def _hub_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
             "星形至少要有一个叶子才画得出来"
         )
 
-    centre = centres[0]
-    centre_x = stage.width * HUB_CENTER_X_RATIO
-    centre_y = stage.height * HUB_CENTER_Y_RATIO
-    width, height = _body_size(centre)
-    boxes = {centre.id: _Box(x=centre_x, y=centre_y, width=width, height=height)}
+    centre = RenderPoint(
+        x=stage.width * HUB_CENTER_X_RATIO,
+        y=stage.height * HUB_CENTER_Y_RATIO,
+    )
+    width, height = _body_size(centres[0])
+    boxes = {centres[0].id: _Box(x=centre.x, y=centre.y, width=width, height=height)}
 
-    radius_x = stage.width * HUB_RADIUS_X_RATIO
     radius_y = stage.height * HUB_RADIUS_Y_RATIO
-    # From straight up, clockwise — which is the order the narration introduces
-    # the parts, so the first leaf lands where the eye starts.
-    for index, leaf in enumerate(leaves):
-        angle = -math.pi / 2 + (2 * math.pi * index) / len(leaves)
+    spokes = _hub_spokes(leaves)
+    radius_x = _hub_radius_x(scene.id, centre, radius_y, spokes, frame)
+    for leaf, angle in spokes:
         width, height = _body_size(leaf)
         boxes[leaf.id] = _Box(
-            x=centre_x + math.cos(angle) * radius_x,
-            y=centre_y + math.sin(angle) * radius_y,
+            x=centre.x + math.cos(angle) * radius_x,
+            y=centre.y + math.sin(angle) * radius_y,
             width=width,
             height=height,
         )
-
-    boxes.update(_panel_boxes(scene, stage))
     return boxes
 
 
-def _field_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
+def _field_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
     """A 2D plot: every body on the ground line, one launch slot each.
 
     Bodies share the field width evenly rather than stacking at the origin. A
@@ -729,6 +1050,9 @@ def _field_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
     side — has three projectiles and no trajectory between them, and three boxes
     at one point is a `LayoutError` about an overlap that the scene never meant.
     Giving each body its own slot also gives each trajectory a width to arc into.
+
+    The right edge is what the frame leaves; see `_field_right` for why it is
+    measured at the ground line.
     """
     bodies = _with_primitive(scene, "body")
     if not bodies:
@@ -736,7 +1060,12 @@ def _field_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
 
     origin_x = stage.width * FIELD_ORIGIN_X_RATIO
     origin_y = stage.height * FIELD_ORIGIN_Y_RATIO
-    field_width = stage.width * FIELD_RIGHT_RATIO - origin_x
+    field_width = _field_right(scene, stage, frame) - origin_x
+    if field_width <= 0:
+        raise LayoutError(
+            f"场景 `{scene.id}` 选了 `field`，但从原点 ({origin_x:.0f}) 往右已经没有地方了；"
+            "面板把这一行占满了"
+        )
     slot = field_width / len(bodies)
 
     boxes: dict[str, _Box] = {}
@@ -744,7 +1073,6 @@ def _field_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
         width, height = _body_size(obj)
         boxes[obj.id] = _Box(x=origin_x + slot * index, y=origin_y, width=width, height=height)
 
-    boxes.update(_panel_boxes(scene, stage))
     return boxes
 
 
@@ -760,7 +1088,11 @@ def _field_origin(stage: RenderStage) -> RenderPoint:
 #: preset name -> placer. A preset with no entry raises rather than falling back
 #: to `generic`: a scene that asked for axes and silently got a vertical list is
 #: a picture that lies about what it is.
-_PLACERS: dict[str, Callable[[StoryboardScene, RenderStage], dict[str, _Box]]] = {
+#:
+#: Every placer takes the frame whether or not it reads it. `lane` and `generic`
+#: both ignore it and both say why; a signature that varied per preset would put
+#: that decision somewhere other than the preset it belongs to.
+_PLACERS: dict[str, Callable[[StoryboardScene, RenderStage, _Frame], dict[str, _Box]]] = {
     "lane": _lane_boxes,
     "chain": _chain_boxes,
     "hub": _hub_boxes,
@@ -769,7 +1101,15 @@ _PLACERS: dict[str, Callable[[StoryboardScene, RenderStage], dict[str, _Box]]] =
 }
 
 
-def _place(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
+def _place(scene: StoryboardScene, stage: RenderStage) -> tuple[dict[str, _Box], _Frame]:
+    """Panels first, then the picture around them.
+
+    The order used to be the other way round in effect: each placer arranged
+    against a constant that *assumed* a panel column, then the panels were laid
+    on top. Deciding the panels first is what makes `_Frame` possible, and it is
+    also the honest order — the panels are the only thing here whose size is not
+    a free choice.
+    """
     placer = _PLACERS.get(scene.scene_type)
     if placer is None:
         raise LayoutError(
@@ -777,9 +1117,12 @@ def _place(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
             f"已实现：{'、'.join(sorted(_PLACERS))}。其余预设属于 M3，"
             "在实现之前宁可失败，也不要摆出一张意思不对的画面"
         )
-    boxes = placer(scene, stage)
+    panels = _panel_boxes(scene, stage)
+    frame = _frame(stage, panels)
+    boxes = placer(scene, stage, frame)
+    boxes.update(panels)
     _check_fit(boxes, stage, scene.id)
-    return boxes
+    return boxes, frame
 
 
 def _check_fit(boxes: dict[str, _Box], stage: RenderStage, scene_id: str) -> None:
@@ -868,10 +1211,11 @@ def _to_body(
     box: _Box,
     scene: StoryboardScene,
     stage: RenderStage,
+    frame: _Frame,
 ) -> BodyElement:
     width, height = _body_size(obj)
     is_obstacle = obj.role == "obstacle"
-    path, duration = _flight(obj, box, scene, stage)
+    path, duration = _flight(obj, box, scene, stage, frame)
     return BodyElement(
         id=obj.id,
         role=obj.role,
@@ -896,6 +1240,7 @@ def _flight(
     box: _Box,
     scene: StoryboardScene,
     stage: RenderStage,
+    frame: _Frame,
 ) -> tuple[list[RenderPoint], float]:
     """The parabola this body travels, and how long one pass takes.
 
@@ -919,7 +1264,7 @@ def _flight(
         return [], 0.0
 
     heading = _number(obj, "heading", 45.0)
-    span = _field_slot(scene, stage)
+    span = _field_slot(scene, stage, frame)
     points = _arc_points(RenderPoint(x=box.x, y=box.y), heading, span, stage)
     if len(points) < 2:
         return [], 0.0
@@ -1144,18 +1489,60 @@ def _to_canvas_angle(degrees: float) -> float:
     return -degrees
 
 
-def _field_slot(scene: StoryboardScene, stage: RenderStage) -> float:
+def _axis_label_room(scene: StoryboardScene) -> float:
+    """Room an `x_axis`'s own label needs past the tip it is drawn at.
+
+    `drawAxis` centres the label `AXIS_LABEL_GAP` beyond the tip, so the field
+    has to stop short by half a label plus that gap. The estimate is the layout's
+    usual one (`_text_extent`) and is deliberately on the generous side: a
+    reservation that is a few pixels too wide costs a few pixels of axis, and one
+    that is too narrow writes text off the canvas with nothing to catch it.
+    """
+    labels = [
+        obj.label
+        for obj in scene.objects
+        if _primitive_of(obj) == "axis" and obj.role == "x_axis" and obj.label
+    ]
+    if not labels:
+        return 0.0
+    return AXIS_LABEL_GAP + max(_text_extent(label, minimum=0.0)[0] for label in labels) / 2
+
+
+def _field_right(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> float:
+    """Where the plot stops on the right.
+
+    One function, so the placer, the curve and the axis cannot disagree about it
+    — the same reason `_field_origin` exists.
+
+    The question is asked at the **ground line**, not over the picture's whole
+    height, and that is not an approximation: a parabola's highest point is the
+    midpoint of its range, so the right edge of the field is only ever reached at
+    ground level. Asking about the full band instead costs the projectile
+    document 200px of axis on every scene — measured — to guard against an apex
+    that is always at half the width.
+
+    The axis's own label is subtracted last, because it is drawn at the end of
+    whatever this returns.
+    """
+    bodies = _with_primitive(scene, "body")
+    half_height = max((h for _, h in map(_body_size, bodies)), default=0.0) / 2
+    right = frame.right_of(stage.height * FIELD_ORIGIN_Y_RATIO, half_height)
+    return right - _axis_label_room(scene)
+
+
+def _field_slot(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> float:
     """The width one body in a `field` scene owns, to arc its trajectory into.
 
     Computed from the same quantities `_field_boxes` places with, so the placer
-    and the curve cannot disagree about how much room there is.
+    and the curve cannot disagree about how much room there is — which is why the
+    frame has to reach this far down. A trajectory drawn into a span its body was
+    not placed at runs out from under that body, and nothing about the picture
+    would say so.
     """
     bodies = _with_primitive(scene, "body")
     if not bodies:
         return 0.0
-    left = stage.width * FIELD_ORIGIN_X_RATIO
-    right = stage.width * FIELD_RIGHT_RATIO
-    return (right - left) / len(bodies)
+    return (_field_right(scene, stage, frame) - stage.width * FIELD_ORIGIN_X_RATIO) / len(bodies)
 
 
 def _trace_span(obj: StoryboardObject) -> float:
@@ -1260,6 +1647,7 @@ def _to_trace(
     scene: StoryboardScene,
     boxes: dict[str, _Box],
     stage: RenderStage,
+    frame: _Frame,
 ) -> TraceElement:
     anchor = _relation(obj, "of")
     box = _anchored_box(obj, anchor, boxes, "trace")
@@ -1267,7 +1655,7 @@ def _to_trace(
     # The trajectory is the *body's* throw, not the trace's own: a trace is the
     # history of something, so it has no direction of its own to draw.
     heading = _number(body, "heading", 45.0) if body is not None else 45.0
-    span = _field_slot(scene, stage) * _trace_span(obj)
+    span = _field_slot(scene, stage, frame) * _trace_span(obj)
     return TraceElement(
         id=obj.id,
         role=obj.role,
@@ -1283,12 +1671,21 @@ def _to_trace(
     )
 
 
-def _to_axis(obj: StoryboardObject, stage: RenderStage) -> AxisElement:
+def _to_axis(
+    obj: StoryboardObject,
+    scene: StoryboardScene,
+    stage: RenderStage,
+    frame: _Frame,
+) -> AxisElement:
     """A graduated axis from the field origin.
 
     Which way it runs follows from the role, not from a prop: `x_axis` and
     `y_axis` are already the two directions, and asking the model for an angle
     as well would give one fact two places to be written.
+
+    The `x_axis` reaches `_field_right`, the same call the bodies and the
+    trajectories use — an axis that stopped somewhere else than the plot does
+    would be measuring a quantity nobody drew.
     """
     origin = _field_origin(stage)
     is_vertical = obj.role == "y_axis"
@@ -1296,7 +1693,7 @@ def _to_axis(obj: StoryboardObject, stage: RenderStage) -> AxisElement:
         length = origin.y - stage.height * FIELD_TOP_RATIO
         heading = -90.0
     else:
-        length = stage.width * FIELD_RIGHT_RATIO - origin.x
+        length = _field_right(scene, stage, frame) - origin.x
         heading = 0.0
     return AxisElement(
         id=obj.id,
@@ -1368,6 +1765,7 @@ def _to_element(
     boxes: dict[str, _Box],
     links: dict[str, tuple[RenderPoint, RenderPoint]],
     stage: RenderStage,
+    frame: _Frame,
 ) -> RenderElement:
     """Dispatch on the primitive, so every preset shares one converter.
 
@@ -1397,7 +1795,7 @@ def _to_element(
             raise LayoutError(f"`{obj.id}`（{primitive}）没有被摆放：预设没有给它位置")
         if primitive == "readout":
             return _to_readout(obj, box)
-        return _to_body(obj, box, scene, stage)
+        return _to_body(obj, box, scene, stage, frame)
     if primitive == "emitter":
         return _to_emitter(obj, boxes)
     if primitive == "zone":
@@ -1409,9 +1807,9 @@ def _to_element(
     if primitive == "vector":
         return _to_vector(obj, scene, boxes)
     if primitive == "trace":
-        return _to_trace(obj, scene, boxes, stage)
+        return _to_trace(obj, scene, boxes, stage, frame)
     if primitive == "axis":
-        return _to_axis(obj, stage)
+        return _to_axis(obj, scene, stage, frame)
     if primitive == "dimension":
         return _to_dimension(obj, scene, boxes)
     if primitive == "angle":
@@ -1457,12 +1855,12 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
     stops matching the teaching order, for no gain.
     """
     stage = stage or RenderStage()
-    boxes = _place(scene, stage)
+    boxes, frame = _place(scene, stage)
     links = _link_points(scene, boxes)
     elements: list[RenderElement] = []
     for obj in scene.objects:
         try:
-            elements.append(_to_element(obj, scene, boxes, links, stage))
+            elements.append(_to_element(obj, scene, boxes, links, stage, frame))
         except ValidationError as exc:
             # The element models are strict and the model's props are not, so a
             # value can be legal in the vocabulary and out of range in the

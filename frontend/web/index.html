@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>智教 · 把文档变成动画</title>
+    <link rel="stylesheet" href="./web.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <p class="kicker">智教 · 文档 → 动画</p>
+        <h1>把一份文档，变成一段会动的讲解</h1>
+        <p class="lede">
+          上传一份文档，它会被读成课程、拆成分镜、布局成一张能播放的画面。
+          支持 pptx / docx / pdf / md / markdown / txt。
+        </p>
+      </header>
+
+      <section class="card">
+        <div class="drop-zone" id="dropZone">
+          <input
+            id="fileInput"
+            type="file"
+            hidden
+            accept=".pptx,.docx,.pdf,.md,.markdown,.txt"
+          />
+          <p class="drop-title">把文档拖到这里</p>
+          <p class="drop-hint">
+            或者点下面的按钮选一个。一次只处理一份，拖进来多个只会用第一个。
+          </p>
+          <button type="button" class="pick" id="pickBtn">选择文件</button>
+        </div>
+
+        <div class="actions">
+          <p class="status" id="fileStatus">还没有选文件。</p>
+          <button type="button" class="go" id="goBtn" disabled>生成动画</button>
+        </div>
+      </section>
+
+      <!--
+        Shown only while a request is in flight. The bar is indeterminate on
+        purpose: the server has one request and no progress channel, so anything
+        that filled it stage by stage would be invented rather than observed.
+      -->
+      <section class="progress" id="progress" hidden>
+        <div class="bar" role="progressbar" aria-label="正在生成，没有进度百分比"></div>
+        <p class="progress-line" id="progressLine">正在生成…</p>
+        <p class="progress-note">
+          正在跑完整链路：读取文档 → 生成课程 → 生成分镜 → 布局成帧。
+          这一步要调用两次模型。实测一份三幕文档约 50 秒；文档更厚，或者模型第一次没过校验、
+          要重来一次的时候，会到几分钟——那时候它没卡住，只是又跑了一整轮。
+          中途没有任何进度回调，结果会一次返回，所以这里只能告诉你等了多久，不能告诉你走到了哪一步。
+        </p>
+      </section>
+
+      <p class="alert" id="alert" role="alert" hidden></p>
+
+      <section class="result" id="result" hidden>
+        <div class="result-head">
+          <div>
+            <p class="result-label">生成的动画</p>
+            <h2 id="resultTitle"></h2>
+            <p class="result-meta" id="resultMeta"></p>
+          </div>
+          <a class="open" id="openLink" target="_blank" rel="noopener">在新标签页打开</a>
+        </div>
+        <!--
+          The player is loaded in a frame rather than imported: `player.js`
+          binds half a dozen DOM nodes at module scope and reads the spec from
+          `window.location.search`, so it needs to own its own document.
+        -->
+        <iframe id="player" title="动画播放器"></iframe>
+      </section>
+
+      <noscript>
+        <p class="alert">
+          这个页面需要 JavaScript：选择文件、上传、播放都靠它。
+        </p>
+      </noscript>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

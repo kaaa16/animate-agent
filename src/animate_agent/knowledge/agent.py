@@ -13,7 +13,7 @@ from animate_agent.knowledge.fidelity import (
 )
 from animate_agent.knowledge.models import LessonIR
 from animate_agent.knowledge.prompts import KNOWLEDGE_SYSTEM_PROMPT, build_knowledge_prompt
-from animate_agent.llm import DEFAULT_MAX_TOKENS, LLMClient
+from animate_agent.llm import DEFAULT_MAX_TOKENS, LLMClient, retry_suffix
 
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_MAX_SCENES = 10
@@ -87,10 +87,16 @@ class KnowledgeAgent:
         ]
         last_error = ""
         for _attempt in range(1, self._max_retries + 1):
-            raw = await self._llm.chat(
-                messages, temperature=self._temperature, max_tokens=DEFAULT_MAX_TOKENS
-            )
             try:
+                # The `chat` call is inside the `try` on purpose: a truncated
+                # response raises from here, and it is the one failure the retry
+                # loop can actually fix. Placing the call above the `try` — as
+                # this was — lets it escape the loop and fail the whole run.
+                # `LLMBudgetExhaustedError` still escapes, because it is a
+                # `RuntimeError` and no retry can make the same budget fit.
+                raw = await self._llm.chat(
+                    messages, temperature=self._temperature, max_tokens=DEFAULT_MAX_TOKENS
+                )
                 data = extract_json_object(raw)
                 lesson = self._validate(document, data)
                 if self._verify_fidelity:
@@ -102,14 +108,11 @@ class KnowledgeAgent:
                 last_error = str(exc)
                 messages = [
                     {"role": "system", "content": KNOWLEDGE_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"{user_prompt}\n\n"
-                            f"上一次输出校验失败：{last_error}\n"
-                            "请重新输出一个符合 schema 的完整 JSON 对象。"
-                        ),
-                    },
+                    # `retry_suffix` picks the wording from *why* the attempt
+                    # failed: a truncated body needs "写短一点", a malformed one
+                    # needs "照 schema 改" — and asking for the wrong one is how
+                    # a retry burns a full call to repeat the same mistake.
+                    {"role": "user", "content": f"{user_prompt}\n\n{retry_suffix(exc)}"},
                 ]
         raise ValueError(f"Knowledge Agent 多次重试仍无法生成有效 LessonIR：{last_error}")
 

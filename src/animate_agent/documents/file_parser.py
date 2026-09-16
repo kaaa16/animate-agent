@@ -198,8 +198,17 @@ def _strip_frontmatter(text: str) -> str:
 
 
 def _read_text(path: Path) -> str:
+    # `utf-8-sig`, not `utf-8`: Windows editors still offer "UTF-8 with BOM", and
+    # a BOM is not whitespace to markdown-it -- `\ufeff# 标题` is a paragraph, not
+    # a heading. What makes that worth a comment is how quietly it fails: the
+    # leading heading is demoted to body text, `_promote_leading_title` then lifts
+    # that paragraph as the document title, and the title arrives with the BOM and
+    # the literal `#` still in it. It is a valid DocumentIR reporting a valid
+    # title, so nothing downstream raises -- only the picture is wrong.
+    # `utf-8-sig` decodes plain UTF-8 byte-for-byte identically, so this costs
+    # nothing on a BOM-less file.
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
         raise ValueError(f"文件不是 UTF-8 文本，无法解析: {path.name}") from exc
 

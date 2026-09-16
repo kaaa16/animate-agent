@@ -28,6 +28,11 @@ from animate_agent.knowledge.service import generate_lesson
 from animate_agent.llm import LLMBudgetExhaustedError, load_llm_config
 from animate_agent.rendering.layout import LayoutError, layout_storyboard
 from animate_agent.rendering.legacy import FROZEN_TEMPLATES, scene_to_render_spec
+from animate_agent.rendering.service import (
+    render_spec_path,
+    render_storyboard,
+    write_render_spec,
+)
 from animate_agent.storyboard.models import StoryboardIR
 from animate_agent.storyboard.service import DEFAULT_GENERATED_DIR, generate_storyboard
 
@@ -174,24 +179,24 @@ async def _run(args: argparse.Namespace) -> int:
         _print_json(storyboard.model_dump(mode="json"))
         return EXIT_OK
 
+    output_dir = args.output_dir or DEFAULT_GENERATED_DIR
     try:
-        spec = layout_storyboard(storyboard)
+        spec = render_storyboard(storyboard, output_dir=output_dir)
     except LayoutError as exc:
         # The storyboard is already on disk and is the only way to find out why
-        # the layout refused. Say so rather than leaving a bare traceback.
+        # the layout refused. Say so rather than leaving a bare traceback — and
+        # name the directory actually in use, which is not the default whenever
+        # `--output-dir` was passed. Pointing at the wrong one sends a person
+        # looking for a file that was never written there.
         print(f"布局失败: {exc}", file=sys.stderr)
         print(
-            f"StoryboardIR 已经落盘（{DEFAULT_GENERATED_DIR}/"
-            f"{storyboard.storyboard_id}.json）——布局失败的唯一线索，别丢掉它。",
+            f"StoryboardIR 已经落盘（{output_dir}/{storyboard.storyboard_id}.json）"
+            "——布局失败的唯一线索，别丢掉它。",
             file=sys.stderr,
         )
         return EXIT_GENERATION_FAILED
 
-    output_dir = args.output_dir or DEFAULT_GENERATED_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-    destination = output_dir / f"render-{storyboard.storyboard_id}.json"
-    destination.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
-
+    destination = render_spec_path(storyboard.storyboard_id, output_dir=output_dir)
     print(f"已写入 {destination}", file=sys.stderr)
     _print_json(spec.model_dump(mode="json"))
     return EXIT_OK
@@ -205,9 +210,8 @@ def _render_template(args: argparse.Namespace) -> int:
     """
     spec = scene_to_render_spec(FROZEN_TEMPLATES[args.render_template]())
     output_dir = args.output_dir or DEFAULT_GENERATED_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-    destination = output_dir / f"render-{args.render_template}.json"
-    destination.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
+    destination = render_spec_path(args.render_template, output_dir=output_dir)
+    write_render_spec(spec, destination)
 
     print(f"已写入 {destination}", file=sys.stderr)
     _print_json(spec.model_dump(mode="json"))
@@ -233,17 +237,28 @@ def _render_sample(args: argparse.Namespace) -> int:
         )
         return EXIT_INGEST_FAILED
 
-    storyboard = StoryboardIR.model_validate_json(source.read_text(encoding="utf-8"))
+    # `utf-8-sig`: these samples are hand-written, and a BOM read as plain `utf-8`
+    # surfaces as "Invalid JSON: expected value at line 1 column 1", which names
+    # everything except the actual cause.
+    storyboard = StoryboardIR.model_validate_json(source.read_text(encoding="utf-8-sig"))
     try:
+        # `layout_storyboard`, not `render_storyboard`: the latter also writes the
+        # spec under `render_spec_path`, and this command's file is named
+        # differently (see below). Calling it here would write the picture twice
+        # and leave behind a `render-<storyboard_id>.json` nobody asked for.
         spec = layout_storyboard(storyboard)
     except LayoutError as exc:
         print(f"布局失败: {exc}", file=sys.stderr)
         return EXIT_GENERATION_FAILED
 
     output_dir = args.output_dir or DEFAULT_GENERATED_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # `render-sample-`, deliberately not `render_spec_path`: `--render-sample` and
+    # `--render-template` can be given the same key, and both are checkpoint P2's
+    # acceptance fixtures. One shared filename would let either silently
+    # overwrite the other's picture, which is the one thing a baseline used for
+    # comparison must never do.
     destination = output_dir / f"render-sample-{args.render_sample}.json"
-    destination.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
+    write_render_spec(spec, destination)
 
     print(f"已写入 {destination}", file=sys.stderr)
     _print_json(spec.model_dump(mode="json"))
@@ -256,7 +271,10 @@ def _load_lesson(path: Path) -> LessonIR:
     Reusing one keeps the course outline fixed across storyboard-prompt
     iterations, so a change in the output is attributable to the prompt.
     """
-    return LessonIR.model_validate_json(path.read_text(encoding="utf-8"))
+    # Tolerates a BOM for the same reason as `--render-sample`: this file is
+    # written by the CLI, but it is also the one a person edits by hand between
+    # prompt iterations, which is the whole point of the flag.
+    return LessonIR.model_validate_json(path.read_text(encoding="utf-8-sig"))
 
 
 async def _generate_lesson(document: DocumentIR, output_dir: Path | None) -> LessonIR:
