@@ -40,8 +40,6 @@ docs/*-preview.png
 docs/*.drawio.png
 docs/interaction-flow.png
 LOCAL_CHANGE_SUMMARY_*.md
-
-# 改造前旧结构（backend/ + frontend/）的遗留物，留在本地作参考，不纳入版本库
-/devlog/
-/源代码文件/
-/源代码文件.zip
+tests/
+data/
+docs/storyboard-acceptance/
