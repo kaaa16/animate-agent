@@ -1,0 +1,25 @@
+{
+  "domain": "robotics",
+  "ink_box": [
+    2.0,
+    2.0,
+    20.0,
+    20.0
+  ],
+  "name": "crane",
+  "parts": {
+    "outline": {
+      "d": "M6 21h6 M9 21v-18l-6 6h18 M9 3l10 6 M17 9v4a2 2 0 1 1 -2 2",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:crane@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

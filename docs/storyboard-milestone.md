@@ -1529,15 +1529,111 @@ decision_readout  声明「比较最近障碍物距离与安全距离」
   （`a3-after-ros.png` 里能看到）。这是 `chain` 上跑 `linear_motion` 的问题，
   和面板无关，**记在这里，这一轮不动它**。
 
+## 一拍有多久：时间、单位、语气，以及那条记了两轮的未修项（2026-09-17）
+
+这一轮改的全是**链路**：没有一条是为某一份样例改的，两份手写样例
+（`robot_obstacle_avoidance.json` / `ros_pub_sub.json`）**逐字节未动**，它们在这里的角色是
+差分基准。起因是问「LessonIR / StoryboardIR 不就是导演设置镜头吗」——是，但
+**时间这一维，这个项目是故意不给模型的**（`storyboard/prompts.py:156` 把时长与坐标、颜色并列
+禁掉了，理由是 D3）。真正缺的不是「导演那一层」，是**布局层只算了一种时长**。
+
+### 一、一拍根本没有时长，所以第 2 拍以后没人看得到
+
+`RenderStep` 只有 id / title / narration / highlights / states，**没有 duration**。布局层早就
+把时长烘到**抛体**身上了（`_flight` → `BodyElement.duration`，注释写着「抛体的飞行时长是弧线的
+属性，不是模型能设的属性」），但**一拍本身没有**。播放器于是只能无限循环、停在当前拍——
+**不点鼠标，一份产物永远只看得到第 1 拍**，而每一层都报成功。
+
+修法照抄 `_flight` 的立场：**从模型确实写过的东西里推**。拍里唯一带「观众自己的单位」的量是
+旁白字数，所以
+
+```
+每拍时长 = clamp(2.5 + len(description) / 6.0, 2.5, 12.0)
+```
+
+`RenderStep.duration` 默认 `0.0`，含义是**「没声明过时长」**——旧 spec 因此保持它被写出来时的
+行为（停在那一拍），而不是被凭空塞一个没人选过的节奏。`player.js` 新增 `advanceBeat()`，
+**最后一拍停住、不绕回第 1 拍**（一个悄悄重播的场景，是「只看得到第 1 拍」换了个方向）。
+
+**要如实说的代价**：节奏成了旁白长度的函数，不是「导演觉得这里该停一下」。同样字数的两拍拿到
+同样的时间，哪怕一拍是重点、一拍是过渡。这是 D3 的固有代价；要买回编辑判断，只能让模型写时长，
+也就是推翻 `prompts.py:156`——那是立场改动，不在本轮。
+
+`legacy.py` 走的是另一条路进播放器（冻结基线的 `Scene` → spec），也接了同一个
+`beat_duration`，否则 `--render-template` 那条路上基线仍会永远停在第一拍。
+
+### 二、`speed` 的单位：和 `radius: 8` 是同一个毛病，换了个属性
+
+三份录制产物都写 `speed: 60` / `25`，滑杆写 `0~120 cm/s`——**文档说 0.6 米每秒，模型就抄了
+60**。而播放器 `linear_motion` 读的是 `this.t * speed * PIXELS_PER_SPEED`，`PIXELS_PER_SPEED = 90`
+的注释是「stage pixels travelled per second at `speed === 1`」。60 是 5400 px/s：960 像素的车道，
+连走带绕回不到五分之一秒。**又是「模型写文档的物理量、渲染器读自己的单位」**，而这一次是唯一
+真的走进真链路的那个。
+
+单位不由我定，**基线自己写着**：`RobotCar.speed: float = 1.0`、`templates.py` 的车速滑杆
+`0.4~2.2`、手写 ROS 样例的消息速度 `0.2~1.5`。`STAGE_RANGES` 因此从 `(low, high)` 升级成
+`StageRange(low, high, unit, why)`——`speed` 的单位是**倍速**，不是舞台像素，沿用旧的提示语会是
+这个表本来要修的那类错误换个方向再犯一次。两条新区间就是基线那两个滑杆的数字，并由测试从
+`templates.py` 与 ROS 样例里读回来比对。
+
+**三条校验路径，今天才补齐：**
+
+| 路径 | 之前 |
+|---|---|
+| 对象自身的 `props` | 早就有 |
+| **节拍里的 `object_states`** | **没有**——而降低速度恰恰是一拍，三份产物里每一处速度都写在这里 |
+| **滑杆的 `min`/`max`/`default`** | **没有**——而它是唯一一个把单位写在明面上的地方（`unit: "cm/s"`） |
+
+**计划里这句话是错的，记在这里**：原计划写「布局层夹取自动生效，不改布局代码」。不成立——
+`_to_body` 当时传的是 `dict(obj.props)`，不是 `_props_for`，**body 根本不会经过夹取**
+（emitter / zone 会）。已改，并且节拍里的状态值也一起夹。
+
+### 三、`tone`：一个从来没人印出来的五词表
+
+`Tone` 是五值枚举，`readout.tone` 是 live prop（一拍可以改），但：**词表从没印过这五个名字**、
+`storyboard/` 一个字不提 tone、`toneColor` 的 `default:` 分支**静默返回默认色**。写 `warning`
+画出来是普通色，看起来完全像是故意的，而模型永远不知道那个词是 `danger`。
+
+与 `STAGE_RANGES` 完全同一个句式，只是值不是数字。修法：词表在 `readout` 那一行内联印出
+`normal 默认、accent 强调、danger 危险、success 通过、muted 次要`，校验台新增 `unknown_tone`。
+**这条与「高饱和色块做强调」直接相关**——它是今天就能用、不用写新绘制代码的那根杠杆。
+
+三份副本（`models.Tone` 字面量、`TONE_GLOSSES`、`primitives.js` 的 `switch`）现在由两条测试
+两两对齐：从前它们从来没被比对过，而这就是整个缺陷的全部代价。
+
+### 四、`chain` 上的节点被开走——记了两轮的那条，本轮修掉
+
+上面「待办与已知风险」里那条「可能的修法是让 `linear_motion` 只在 lane 类预设里生效」，本轮
+落成 `SPEED_PRESETS = {"lane"}`（`registry.py`，`registry.js` 手抄镜像、由测试断言相等）。
+`behaviors.js` 现在**先问预设**再决定要不要开动一个 body；`traveler` 不受影响——令牌靠 `along`
+移动，每个预设都读它的 `speed`。
+
+**值得单独记的是：修法把校验台要说的话换掉了。** 播放器一改，症状从「飘走」变成「什么都不动」，
+而 `step_state_inert` **抓不到后者**——`speed` 确实是 `body` 的 live prop，是*预设*让它失去意义。
+所以新增 `speed_outside_a_lane`，理由与措辞都是照着改完之后的实际行为写的，不是照改之前。
+
+### 验证（离线，无 key，没动任何既有产物）
+
+对 3 份录制产物 + 2 份手写样例跑 `validate_storyboard` 与 `layout_storyboard`：
+
+- 新门禁**真的会响**，且与预期一致：`prop_out_of_range` 命中 `props.speed` 与
+  `object_states.*.speed`；`speed_outside_a_lane` 命中 `chain`/`hub` 里带 speed 的 body；
+  `control_range_out_of_stage` 命中那条 `0~120 cm/s` 的滑杆。
+- **两份手写样例不新增任何 issue**，`speed` 原样保留（车 1.0、消息 0.5）。
+- **每一拍都有时长**：实测 5.5~10.0 秒。
+- 三份产物的 `scene-parts`（`chain`）里 `car_body` 的 speed 被夹到 2.2，不再是一道糊光。
+
+静态检查：`ruff check` 与 `mypy src` 全绿。`ruff format --check` 下，改动涉及的源文件里
+`registry.py` / `layout.py` / `models.py` / `legacy.py` 全部通过；仍红的 3 个测试文件，
+`ruff format --diff` 打出来的差异**逐条看过，落在既有代码上**（`validate_storyboard(...)` 的折行、
+`""" "Zero LLM calls…` 这类），不是这一轮引入的。**这一轮没有把任何一个文件从绿改红。**
+
 ## 待办与已知风险
 
-- **A3 收尾后仍开着的两项**（都属于「发现的，没修」）：
-  - **`chain` 上的节点会被「车速」滑杆开走。** ROS 那一幕，模型把滑杆的
-    `target_property` 写成 `chassis-node.speed`，`linear_motion` 就照着规格把它开走了，
-    链接线的右端于是悬在空中（`a3-after-ros.png`）。规格是对的、播放器是对的，
-    **错的是滑杆的名字与它的目标不是一回事**——`chain` 里的节点不是车道上的车。
-    可能的修法是让 `linear_motion` 只在 lane 类预设里生效，但要先想清楚
-    「链条上真的会动的东西」该由谁表达。
+- **A3 收尾后仍开着的两项**：
+  - ~~**`chain` 上的节点会被「车速」滑杆开走。**~~ **已于 2026-09-17 修掉**，见上一节
+    §四。当时的犹豫是「要先想清楚『链条上真的会动的东西』该由谁表达」——答案是不必回答：
+    令牌走 `traveler`（每个预设都动），body 只在有通道的预设里动，这两件事本来就是分开的。
   - **高亮对比度**与**避让几何化**（`MAX_DODGE`）：与前几轮相同，未动。
 
 - **（2026-09-16 记录，不修）`ruff format --check` 在 HEAD 上就是红的：16 个文件。**

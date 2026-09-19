@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    2.0,
+    2.0,
+    20.0,
+    19.0
+  ],
+  "name": "scale",
+  "parts": {
+    "outline": {
+      "d": "M7 20l10 0 M6 6l6 -1l6 1 M12 3l0 17 M9 12l-3 -6l-3 6a3 3 0 0 0 6 0 M21 12l-3 -6l-3 6a3 3 0 0 0 6 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:scale@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

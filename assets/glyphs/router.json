@@ -1,0 +1,25 @@
+{
+  "domain": "network",
+  "ink_box": [
+    2.0,
+    2.163689526544406,
+    20.5,
+    19.836310473455594
+  ],
+  "name": "router",
+  "parts": {
+    "outline": {
+      "d": "M3 15a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2l0 -4 M17 17l0 .01 M13 17l0 .01 M15 13l0 -2 M11.75 8.75a4 4 0 0 1 6.5 0 M8.5 6.5a8 8 0 0 1 13 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:router@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

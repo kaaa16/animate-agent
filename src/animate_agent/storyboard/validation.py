@@ -26,7 +26,9 @@ from animate_agent.rendering.registry import (
     PRESET_BY_NAME,
     PRIMITIVE_BY_NAME,
     ROLE_TO_PRIMITIVE,
+    SPEED_PRESETS,
     T2_GLYPH_NAMES,
+    TONE_NAMES,
     stage_range,
 )
 from animate_agent.storyboard.models import StoryboardIR, StoryboardScene
@@ -352,6 +354,77 @@ def _check_prop(
     )
 
 
+def _check_tone(value: object, where: str, issues: list[ValidationIssue]) -> None:
+    """A `tone` the player does not recognise draws as the ordinary colour.
+
+    `toneColor` (`primitives.js`) answers an unknown name from its `default:`
+    branch, and the default is the colour a readout draws in when nothing was
+    asked of it. So `tone: "warning"` produces a panel that looks entirely
+    deliberate, in a palette nobody chose, and the model never finds out that
+    the word was `danger`. Nothing above this line can object: it is a string,
+    `tone` is a real prop of a real primitive, and a beat may legally change it.
+
+    Exactly the shape of `prop_out_of_range` one function down — legal to every
+    layer that could have refused it, wrong only in what gets drawn — and the
+    reason it is worth refusing rather than ignoring is the same: the fix is one
+    word, and it belongs to the layer that is still allowed to retry.
+    """
+    if not isinstance(value, str) or value in TONE_NAMES:
+        return
+    issues.append(
+        ValidationIssue(
+            "unknown_tone",
+            where,
+            f"`{value}` 不是已注册的 tone；合法值：{'、'.join(TONE_NAMES)}。"
+            "写错不会报错——播放器认不出就按默认色画，颜色和语义对不上，"
+            "而画面上看不出这是写错了",
+        )
+    )
+
+
+def _check_speed_preset(
+    preset: str,
+    primitive_name: str | None,
+    prop: str,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """`speed` on a body the preset never moves is a number the player ignores.
+
+    `behaviors.js` used to check only "is this a body with a numeric speed?" and
+    carry it along +x at 90 pixels per speed-unit. The recorded avoidance
+    document gives its 底盘 `speed: 60` in a `chain` scene, so the first thing
+    the lesson showed was a link diagram with the chassis sliding off the right
+    edge and wrapping — while the narration underneath said 四个组成部分依次亮相.
+    That half is fixed at the source: the player asks the preset now
+    (`SPEED_PRESETS`, mirrored in `registry.js`).
+
+    What is left for this check is the other half, and it is a *different*
+    complaint from the one the player was making. With the motion gone, a beat
+    that sets `speed` on a `chain` node moves nothing at all — and
+    `step_state_inert` cannot catch it, because `speed` really is a live prop of
+    `body`. A model that writes it expecting a car to pull away gets a still
+    frame and no explanation, so the explanation is owed here, one retry before
+    the picture is drawn.
+
+    Only bodies are checked. A `traveler` moves along its link in every preset,
+    so its speed is read wherever it is written; the preset is what decides
+    whether a *body* can move at all.
+    """
+    if prop != "speed" or primitive_name != "body" or preset in SPEED_PRESETS:
+        return
+    issues.append(
+        ValidationIssue(
+            "speed_outside_a_lane",
+            where,
+            f"预设 `{preset}` 里的 body 不靠 `speed` 移动，只有 "
+            f"{'、'.join(sorted(SPEED_PRESETS))} 会——播放器不会因为这个数字"
+            f"让对象动起来，写在这一拍里观众看不到任何变化。"
+            f"要表达状态变化请改别的属性，或者把这一幕换成有通道的预设",
+        )
+    )
+
+
 def _check_stage_range(
     prop: str,
     value: object,
@@ -359,15 +432,18 @@ def _check_stage_range(
     where: str,
     issues: list[ValidationIssue],
 ) -> None:
-    """A distance prop must be a distance *on the stage*, not in the document's units.
+    """A rendered prop must be in the *renderer's* unit, not the document's.
 
     The failure this catches has no symptom at either layer that could catch it.
     `lidar_emitter.radius: 8` is eight metres, which is what the document says,
     and it is a legal positive float, so pydantic takes it, the validator takes
     it, and layout draws a fan eight pixels across — smaller than a full stop, on
-    a 960-pixel stage. `radius: 0.8` is the same story at 0.8 pixels. Nothing
+    a 960-pixel stage. `radius: 0.8` is the same story at 0.8 pixels. `speed: 60`
+    is the same story again in the other direction: 0.6 米每秒 read as a
+    multiplier makes a car that crosses the lane five times a second. Nothing
     errors; the picture is just empty where the lesson says the interesting thing
-    is, and the only way anyone finds out is by looking.
+    is, or a blur where it says the car, and the only way anyone finds out is by
+    looking.
 
     Rejecting rather than silently rescaling, because the two meanings need
     different fixes: a model told "40~420 舞台像素" writes a legible number, while
@@ -382,16 +458,16 @@ def _check_stage_range(
     bounds = stage_range(primitive_name, prop)
     if bounds is None:
         return
-    low, high = bounds
-    if low <= value <= high:
+    if bounds.low <= value <= bounds.high:
         return
     issues.append(
         ValidationIssue(
             "prop_out_of_range",
             where,
-            f"`{prop}` 的单位是**舞台像素**（画布 960×600），不是文档里的物理量；"
-            f"{value:g} 会被原样画成 {value:g} 个像素。"
-            f"`{primitive_name}.{prop}` 要落在 {low:g}~{high:g} 之间",
+            f"`{prop}` 的单位是**渲染器的**（{bounds.unit}），不是文档里的物理量；"
+            f"{value:g} 会照 {value:g} 画出来。"
+            f"`{primitive_name}.{prop}` 要落在 {bounds.low:g}~{bounds.high:g} 之间"
+            f"（{bounds.why}）",
         )
     )
 
@@ -434,6 +510,18 @@ def _check_roles_and_props(
         for prop in obj.props:
             _check_prop(prop, f"{obj_where}.props.{prop}", obj.role, issues)
             _check_stage_range(prop, obj.props[prop], obj.role, f"{obj_where}.props.{prop}", issues)
+            _check_speed_preset(
+                scene.scene_type,
+                ROLE_TO_PRIMITIVE.get(obj.role),
+                prop,
+                f"{obj_where}.props.{prop}",
+                issues,
+            )
+
+        # Named, not looped: `_check_tone` refuses anything that is not one of
+        # five words, and `readout.text` is a string too.
+        if "tone" in obj.props:
+            _check_tone(obj.props["tone"], f"{obj_where}.props.tone", issues)
 
         glyph = obj.props.get("glyph")
         if isinstance(glyph, str) and glyph not in T2_GLYPH_NAMES:
@@ -636,6 +724,20 @@ def _check_steps(
                     _check_prop(prop, prop_where, role, issues)
                     continue
 
+                # The scene-level check has run on `obj.props` since the stage
+                # ranges landed; this path was left out, and it is the one a
+                # lesson actually takes. 降低速度 is a *beat* — `object_states:
+                # {car: {speed: 25}}` — so the single most likely place for a
+                # document's own unit to be copied in was the one place nothing
+                # looked. Measured on the three recorded documents: every speed
+                # they set is a beat state, and every one of them was outside
+                # the range.
+                _check_stage_range(prop, states[prop], role, prop_where, issues)
+                _check_speed_preset(scene.scene_type, primitive_name, prop, prop_where, issues)
+
+                if prop == "tone":
+                    _check_tone(states[prop], prop_where, issues)
+
                 # A beat is a visual beat. `StoryboardStep` already refuses a step
                 # with neither a highlight nor a state; this refuses the harder
                 # case — a state on a prop nothing reads. Measured across the three
@@ -730,6 +832,7 @@ def _check_controls(
             )
             continue
 
+        primitive_name: str | None = None
         if target != "scene":
             obj = by_id.get(target)
             if obj is None:
@@ -762,6 +865,40 @@ def _check_controls(
                     f"可绑定的属性：{'、'.join(sorted(CONSUMABLE_PROPS))}",
                 )
             )
+
+        # The slider is the second road to the same number, and it is the one
+        # that *looks* right: `car.speed` bound to a track labelled `0~120 cm/s`
+        # is a completely sensible control for a document that talks in cm/s.
+        # Its `unit` is the document's; the prop's is the renderer's; nothing
+        # compared them, and the picture at the top of the track was a car
+        # crossing the lane five times a second.
+        #
+        # Checked against the prop's range rather than the control's, because
+        # the track has to lie inside what can be drawn — an out-of-range end is
+        # a part of the slider where nothing readable is on screen.
+        bounds = stage_range(primitive_name, prop) if primitive_name is not None else None
+        if bounds is not None:
+            outside = [
+                f"{field}={value:g}"
+                for field, value in (
+                    ("min", control.min),
+                    ("max", control.max),
+                    ("default", control.default),
+                )
+                if value is not None and not (bounds.low <= value <= bounds.high)
+            ]
+            if outside:
+                issues.append(
+                    ValidationIssue(
+                        "control_range_out_of_stage",
+                        control_where,
+                        f"`{control.target_property}` 用的是渲染器的单位（{bounds.unit}），"
+                        f"可画范围 {bounds.low:g}~{bounds.high:g}；"
+                        f"这个滑杆的 {'、'.join(outside)} 在范围外——"
+                        f"拖到那一段，画面读不出来。"
+                        f"滑杆的 `unit` 字段是给人看的，改它不影响画面",
+                    )
+                )
 
 
 def _check_orphans(scene: StoryboardScene, where: str, issues: list[ValidationIssue]) -> None:

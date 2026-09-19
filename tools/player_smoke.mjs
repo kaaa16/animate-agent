@@ -27,6 +27,7 @@
 import { readFileSync } from "node:fs";
 
 import { createSimulation } from "../frontend/player/behaviors.js";
+import { EASE_SECONDS, blend, easeOutCubic } from "../frontend/player/easing.js";
 import { drawElement } from "../frontend/player/registry.js";
 import { fitTransform } from "../frontend/player/stage.js";
 
@@ -178,6 +179,12 @@ function viewFor(scene, simulation, stepIndex, theme, overrides = {}, glyphs = {
       if (prop in (scene.params ?? {})) return scene.params[prop];
       return fallback;
     },
+    // Always 1 here. The ramp this feeds is a *player* behaviour — it needs a
+    // beat boundary and a clock counting into it, and this harness draws each
+    // beat as a single instant. What it does need from this view is that the
+    // element is drawn at all, which is what a missing `presence` would break:
+    // `drawElement` calls it unconditionally.
+    presence: () => 1,
   };
 }
 
@@ -318,6 +325,46 @@ const THEME = {
   danger: "#ff5e7a",
 };
 
+/**
+ * A per-frame step larger than this is a wrap, not travel.
+ *
+ * Both things that move in this simulator wrap: a `lane` body round the right
+ * edge (`behaviors.js`: `wrap(base.x + t * speed * PIXELS_PER_SPEED, width)`),
+ * and a traveller's `progress` back to zero. Those frames are discontinuous,
+ * and counting them added a whole stage width each time — 7602px for a car that
+ * actually drove about 1440. Nothing legitimate comes near it: the fastest the
+ * contract allows is 5× at `PIXELS_PER_SPEED = 90`, which is 7.5px in a 1/60s
+ * frame, so this has three orders of magnitude of room.
+ */
+const MAX_STEP_PER_FRAME = 60;
+
+/**
+ * How long the link each traveller rides actually is, in stage units.
+ *
+ * A traveller has no position of its own: `behaviors.js` advances `progress`
+ * and the *drawer* places the token along the link from it, never writing the
+ * node's `x`/`y`. So how far a message token went is `Δprogress × link length`,
+ * and without the link length there is no number at all — which is how this
+ * harness first printed `累计路程=0.0px` for a `chain` scene whose token
+ * crosses the whole frame, the same line it printed for a `hub` scene where
+ * genuinely nothing moves.
+ */
+function linkLengths(scene) {
+  const byId = new Map(scene.elements.map((element) => [element.id, element]));
+  const lengths = new Map();
+  for (const element of scene.elements) {
+    if (element.kind !== "traveler") continue;
+    const link = byId.get(element.props?.along);
+    const from = byId.get(link?.props?.from);
+    const to = byId.get(link?.props?.to);
+    lengths.set(
+      element.id,
+      from && to ? Math.hypot(to.x - from.x, to.y - from.y) : 0,
+    );
+  }
+  return lengths;
+}
+
 function main() {
   const path = process.argv[2];
   if (!path) {
@@ -335,6 +382,7 @@ function main() {
   // The stricter reading, tallied across every scene and printed at the end.
   let transitions = 0;
   let shapeStill = 0;
+  let totalSeconds = 0;
   for (const scene of spec.scenes) {
     const simulation = createSimulation(scene, spec.stage);
     const everDanger = new Set();
@@ -345,6 +393,27 @@ function main() {
     // same reason 0 === 0 is, and the check would prove nothing at all.
     const homeY = new Map(scene.elements.map((element) => [element.id, element.y]));
     let maxLateral = 0;
+    // How far anything went, summed frame to frame over every element — a
+    // different question from `maxLateral`, and the one that answers "is this
+    // scene dead".
+    //
+    // Not end-to-end displacement: a `lane` body wraps round to the left edge,
+    // so `|x - x0|` saws back and forth and measures the wrap rather than the
+    // journey. Not lateral-only either: a `chain` traveller walks along a link,
+    // which a y-only reading cannot see at all. Both of those printed
+    // `最大侧移=0.0px` — the ROS sample because its message token slides
+    // sideways without ever moving in y, the generated `hub` scene because
+    // nothing moves whatsoever — and one number meaning two opposite things is
+    // how a dead scene stayed invisible.
+    //
+    // Read as a liveness signal, not a distance: it is a sum over elements, so
+    // a sensor mounted on a driving car is counted as well as the car. Zero is
+    // the only value with a meaning, and it is unambiguous.
+    let travelled = 0;
+    let previous = new Map();
+    const ridden = linkLengths(scene);
+    const seconds = scene.steps.reduce((sum, step) => sum + Number(step.duration ?? 0), 0);
+    totalSeconds += seconds;
     for (let stepIndex = 0; stepIndex < scene.steps.length; stepIndex += 1) {
       // Advance far enough for the simulation to have moved things, so a drawer
       // that only works at t=0 does not pass by luck. Danger is sampled *during*
@@ -361,11 +430,26 @@ function main() {
           console.error(`\n❌ ${scene.id} / 第 ${frame} 帧：${broken}`);
           return 1;
         }
-        for (const [id, startY] of homeY) {
-          const node = simulation.live.get(id);
-          if (!node) continue;
-          maxLateral = Math.max(maxLateral, Math.abs(node.y - startY));
+        const positions = new Map();
+        for (const [id, node] of simulation.live) {
+          const before = previous.get(id);
+          if (before) {
+            const length = ridden.get(id);
+            // A traveller's distance is its progress along the link; everything
+            // else moves by its own coordinates.
+            const step =
+              length > 0 && typeof node.progress === "number"
+                ? Math.abs(node.progress - before.progress) * length
+                : Math.hypot(node.x - before.x, node.y - before.y);
+            if (step < MAX_STEP_PER_FRAME) travelled += step;
+          }
+          positions.set(id, { x: node.x, y: node.y, progress: node.progress });
+          const startY = homeY.get(id);
+          if (startY !== undefined) {
+            maxLateral = Math.max(maxLateral, Math.abs(node.y - startY));
+          }
         }
+        previous = positions;
       }
       const view = viewFor(scene, simulation, stepIndex, THEME, {}, spec.glyphs ?? {});
       const beat = [];
@@ -464,10 +548,26 @@ function main() {
     }
     console.log(
       `  ${scene.id}（${scene.preset}）: ${scene.elements.length} 个元素 × ` +
-        `${scene.steps.length} 拍全部绘制成功；t=${simulation.t.toFixed(1)}s ` +
+        `${scene.steps.length} 拍全部绘制成功；` +
+        // Absent on a spec written before beats carried one — the same `0` the
+        // player itself reads as "no rhythm was ever chosen for this".
+        (seconds > 0 ? `${seconds.toFixed(1)} 秒；` : "") +
+        `t=${simulation.t.toFixed(1)}s ` +
         `运行中曾进入危险态的对象=${everDanger.size ? [...everDanger].join(",") : "无"}；` +
-        `最大侧移=${maxLateral.toFixed(1)}px`,
+        `累计路程=${travelled.toFixed(1)}px；最大侧移=${maxLateral.toFixed(1)}px`,
     );
+    // Reported, not asserted, on the same grounds as the still-beat count below:
+    // a `hub` or `generic` scene has no role that walks, so a motionless one is
+    // legal output rather than a bug. What it must not be is *invisible* — the
+    // one scene of the avoidance document that nobody could stand to watch was
+    // the one where every number this tool printed looked the same as the
+    // reference sample's.
+    if (travelled === 0) {
+      console.log(
+        "    ⚠️ 这一幕从头到尾没有任何东西移动过——对象只在原地亮灭。" +
+          "契约允许，但分镜连着几幕都这样，观众看到的就是一叠会发光的幻灯片",
+      );
+    }
 
     // Clearance, at the two ends of the safe-distance slider. Reported, not
     // asserted — see `closestApproach`. A vehicle and an obstacle "touch" when
@@ -492,6 +592,12 @@ function main() {
       console.log(line);
     }
   }
+  const easingFailure = checkEasing();
+  if (easingFailure) {
+    console.error(`\n❌ 缓动：${easingFailure}`);
+    return 1;
+  }
+
   const spinFailure = checkSpinningPartsTurn();
   if (spinFailure) {
     console.error(`\n❌ ${spinFailure}`);
@@ -500,7 +606,10 @@ function main() {
 
   console.log(
     `\n✅ 共绘制 ${drawn} 次，无异常。` +
-      `强口径静拍：${shapeStill}/${transitions} 处相邻节拍几何与上一拍完全相同。`,
+      `强口径静拍：${shapeStill}/${transitions} 处相邻节拍几何与上一拍完全相同。` +
+      // The number the one-minute target is measured against, printed where
+      // nobody has to add it up by hand.
+      (totalSeconds > 0 ? `全片时长：${totalSeconds.toFixed(1)} 秒。` : ""),
   );
   return 0;
 }
@@ -525,6 +634,60 @@ function main() {
  * handed, but a harness checking the *asset* is exactly the thing that should
  * open the asset.
  */
+/**
+ * The easing arithmetic, run rather than described.
+ *
+ * `easing.js` is DOM-free precisely so this is possible — `player.js` reaches
+ * for `document` on load and nothing in it can be executed from here. Without
+ * this the rule "a beat boundary is not a step function" would be checkable
+ * only by watching the screen, which is the gap the whole round came out of:
+ * the player's own timing was the one rule in the pipeline nobody could test.
+ *
+ * Returns a failure message, or `null`.
+ */
+function checkEasing() {
+  // Shaped at both ends and monotone between them. A curve that overshoots
+  // would send a radius past its target and back, which reads as a wobble.
+  if (easeOutCubic(0) !== 0) return "easeOutCubic(0) 不是 0：属性会从半路开始";
+  if (easeOutCubic(1) !== 1) return "easeOutCubic(1) 不是 1：属性永远差一点到不了目标值";
+  if (easeOutCubic(0.5) <= 0.5) {
+    return "easeOutCubic 在走到一半时还没过半：这是 ease-in，不是 ease-out";
+  }
+  let previous = -1;
+  for (let i = 0; i <= 10; i += 1) {
+    const value = easeOutCubic(i / 10);
+    if (value < previous) return "easeOutCubic 不是单调的：属性会往回走";
+    previous = value;
+  }
+
+  // A number travels. At the ends it is exact, or a beat that finished easing
+  // would be drawing a hair off the value the spec actually wrote.
+  if (blend("speed", 1.0, 0.5, 0) !== 1.0) return "blend 在起点不是旧值";
+  if (blend("speed", 1.0, 0.5, 1) !== 0.5) return "blend 在终点不是新值";
+  if (Math.abs(blend("speed", 1.0, 0.5, 0.5) - 0.75) > 1e-9) return "blend 在中点不是两端的平均";
+
+  // The two presence gates travel as 1 and 0, and hand back a *number* for the
+  // whole journey — that is what makes a drawer's `=== false` let a half-arrived
+  // element through so `drawElement` can fade it in. Landing on the exact
+  // boolean is the other half: at rest the gate must be a gate, not 0.9999.
+  if (blend("enabled", false, true, 0.5) !== 0.5) return "enabled 的过渡不是 1/0 之间的数";
+  if (blend("visible", true, false, 1) !== false) return "visible 落在终点时不是精确的 false";
+  if (blend("visible", false, true, 0) !== false) return "visible 落在起点时不是精确的 false";
+  if (blend("visible", true, false, 0) !== true) return "visible 落在起点时不是精确的 true";
+
+  // Everything else is a style or a word, and is left exactly as written —
+  // a `danger` of 0.4 is truthy, which would draw a danger state that no beat
+  // asked for.
+  if (blend("danger", false, true, 0.5) !== true) return "布尔样式被过渡了：danger 会半亮";
+  if (blend("text", "直行", "转向", 0.5) !== "转向") return "文本被过渡了";
+  if (blend("state", "待发布", "已发布", 0.5) !== "已发布") return "令牌状态被过渡了";
+
+  if (!(EASE_SECONDS > 0.3 && EASE_SECONDS < 1.0)) {
+    return `EASE_SECONDS = ${EASE_SECONDS}：短于 0.3 秒像抽搐，长于一秒就在花这一拍自己的时间`;
+  }
+  return null;
+}
+
 function checkSpinningPartsTurn() {
   const path = new URL("../assets/glyphs/lidar.json", import.meta.url);
   let glyph;
@@ -571,6 +734,10 @@ function checkSpinningPartsTurn() {
       highlighted: new Set(),
       isDangerous: () => false,
       lookup: (_id, _prop, fallback) => fallback,
+      // `drawElement` calls this unconditionally, so a view without it throws
+      // before a single drawer runs. The ramp itself is the player's, and there
+      // is no player here.
+      presence: () => 1,
     });
     return serializeCalls(ctx.calls);
   };

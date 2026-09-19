@@ -1,0 +1,25 @@
+{
+  "domain": "robotics",
+  "ink_box": [
+    2.0,
+    4.0,
+    20.0,
+    16.0
+  ],
+  "name": "engine",
+  "parts": {
+    "outline": {
+      "d": "M3 10v6 M12 5v3 M10 5h4 M5 13h-2 M6 10h2l2 -2h3.382a1 1 0 0 1 .894 .553l1.448 2.894a1 1 0 0 0 .894 .553h1.382v-2h2a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-2v-2h-3v2a1 1 0 0 1 -1 1h-3.465a1 1 0 0 1 -.832 -.445l-1.703 -2.555h-2v-6",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:engine@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

@@ -146,7 +146,10 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         note="基础形状由角色决定；`glyph` 是可选的实物图标，写了就画成那个图标"
         "（见下面的字形清单），不写就画基础形状。"
         "`object` 是兜底角色，只在确实没有合适角色时才用——留它是为了让每个被抽出的"
-        "对象都有地方去，而不是被硬塞进某个不匹配的域角色",
+        "对象都有地方去，而不是被硬塞进某个不匹配的域角色。"
+        "**`speed` 只在预设 `lane` 里有意义**：其余预设的 body 不靠它移动"
+        "（`chain`/`hub`/`generic` 不动，`field` 是按抛物线飞），写了不会让画面变好，"
+        "只会让这个对象莫名其妙地飘出去",
     ),
     Primitive(
         name="emitter",
@@ -335,8 +338,33 @@ LIVE_PROPS: frozenset[str] = frozenset(
     prop for primitive in T1_PRIMITIVES for prop in primitive.live_props
 )
 
-#: Props whose value is a distance **in stage pixels**, with the range that is
-#: legible on a 960×600 stage.
+
+@dataclass(frozen=True, slots=True)
+class StageRange:
+    """The values a prop has to fall in for the picture to still say something.
+
+    `unit` is what the vocabulary prints next to the bounds, and it is the
+    whole reason this is a record rather than a `(low, high)` pair. The first
+    three entries are distances and their unit is 舞台像素; `speed` is not a
+    distance — it is a multiplier on `PIXELS_PER_SPEED` (`behaviors.js`), and
+    printing 舞台像素 next to it would be the same class of error this table
+    exists to correct, told from the other side.
+
+    `why` records where the bounds came from. A bound a reader cannot trace is
+    a bound that gets "helpfully" widened by the next person.
+    """
+
+    low: float
+    high: float
+    unit: str
+    why: str
+
+    def clamp(self, value: float) -> float:
+        return min(max(value, self.low), self.high)
+
+
+#: Props whose value is **in the renderer's own unit**, with the range that unit
+#: is legible over on a 960×600 stage.
 #:
 #: This is the unit declaration the vocabulary never had, and it is why
 #: `lidar_emitter.radius: 8` drew an 8-pixel fan and `safe_zone.radius: 0.8` an
@@ -346,22 +374,68 @@ LIVE_PROPS: frozenset[str] = frozenset(
 #: unit. The baseline's hand-written sample writes `150` and `76`, which is the
 #: same statement made by someone who had read the renderer.
 #:
-#: `layout.py` clamps into these ranges as a backstop (the same treatment
-#: `_to_angle` already gave its `radius`), and the validator rejects a value
-#: outside them so the model gets to fix it rather than shipping an invisible
-#: circle. Only size-like props are listed: `speed` and `trace.length` are
-#: relative quantities with no pixel meaning, and `vector.magnitude` is
-#: normalised within its own scene.
-STAGE_RANGES: dict[tuple[str, str], tuple[float, float]] = {
-    ("emitter", "radius"): (40.0, 420.0),
-    ("zone", "radius"): (24.0, 260.0),
-    ("angle", "radius"): (20.0, 120.0),
+#: `speed` is the same defect at the same scale, and it is the one that reached
+#: a real run: the three generated documents write `speed: 60`, straight from a
+#: document that says 0.6 米每秒, into a prop the player multiplies by 90. The
+#: frozen baseline says what the number means — `RobotCar.speed: float = 1.0`,
+#: its slider `0.4~2.2`, and `PIXELS_PER_SPEED = 90` documented as "stage pixels
+#: travelled per second at `speed === 1`". So the bounds below are not mine:
+#: they are the baseline's own slider, read off `templates.py` and the ROS
+#: sample. A body at 60 is 5400 px/s — the 960-pixel lane, start to wrap, in
+#: under a fifth of a second.
+#:
+#: `layout.py` clamps into these ranges as a backstop, and the validator rejects
+#: a value outside them so the model gets to fix it rather than shipping an
+#: invisible circle or a car that is a blur. Only props with a unit are listed:
+#: `trace.length` and `vector.magnitude` are normalised within their own scene
+#: and carry no absolute meaning to state a range for.
+STAGE_RANGES: dict[tuple[str, str], StageRange] = {
+    ("emitter", "radius"): StageRange(
+        40.0, 420.0, "舞台像素", "低于 40 画成一个点；高于 420 扇形出画布"
+    ),
+    ("zone", "radius"): StageRange(
+        24.0, 260.0, "舞台像素", "低于 24 圈比车还小；高于 260 圈住整个车道"
+    ),
+    ("angle", "radius"): StageRange(20.0, 120.0, "舞台像素", "弧的半径，太小读不出角度"),
+    ("body", "speed"): StageRange(
+        0.4, 2.2, "倍速", "基线自己的滑杆 0.4~2.2（`templates.py` 车速）；1 倍速 = 90 像素/秒"
+    ),
+    ("traveler", "speed"): StageRange(0.2, 1.5, "倍速", "手写 ROS 样例的滑杆 0.2~1.5（消息速度）"),
 }
 
 
-def stage_range(primitive: str, prop: str) -> tuple[float, float] | None:
-    """The legible pixel range for `prop`, or None when it carries no distance."""
+def stage_range(primitive: str, prop: str) -> StageRange | None:
+    """The legible range for `prop`, or None when it carries no renderer unit."""
     return STAGE_RANGES.get((primitive, prop))
+
+
+#: `tone` -> the short gloss that stands in for it in the prop list.
+#:
+#: A vocabulary in its own right, and until now an unstated one. `readout.tone`
+#: was a registered prop, was a registered *live* prop — a beat could change it
+#: — and its five legal names were printed nowhere the model could read them.
+#: `toneColor` in `primitives.js` answers a name it does not know with its
+#: `default:` branch, so `tone: "warning"` drew the ordinary colour, looked
+#: entirely deliberate, and the model never learned the word was `danger`.
+#:
+#: The same sentence as `STAGE_RANGES`, one paragraph up and about a different
+#: kind of value: a prop the model may set, whose legal values it was never
+#: told. That table cost a picture nobody could see; this one cost an emphasis
+#: nobody could see, which is the cheaper half of the same defect.
+#:
+#: Kept short deliberately — it prints inline on the prop line, and a gloss
+#: that wraps is read as a paragraph rather than as a label. A test holds this
+#: list equal to the `Tone` literal in `models.py`, and another holds it equal
+#: to the `switch` in `toneColor`, so the three cannot drift.
+TONE_GLOSSES: tuple[tuple[str, str], ...] = (
+    ("normal", "默认"),
+    ("accent", "强调"),
+    ("danger", "危险"),
+    ("success", "通过"),
+    ("muted", "次要"),
+)
+
+TONE_NAMES: tuple[str, ...] = tuple(name for name, _ in TONE_GLOSSES)
 
 
 #: The two halves of `drawable`, derived so there is nowhere for a third answer
@@ -479,6 +553,7 @@ class GlyphDeclaration:
 #: to print bare names, and the real chain asked for a glyph zero times across
 #: three documents while eleven written notes sat unread right here.
 T2_GLYPHS: tuple[GlyphDeclaration, ...] = (
+    # -- 机器人 ------------------------------------------------------------
     GlyphDeclaration(
         "car",
         "robotics",
@@ -491,10 +566,172 @@ T2_GLYPHS: tuple[GlyphDeclaration, ...] = (
         "tabler:radar",
         "激光雷达本体；扫描臂会自己转，讲「雷达在扫」的那一拍用它最省事",
     ),
-    GlyphDeclaration("robot", "robotics", "tabler:robot", "移动机器人本体"),
+    GlyphDeclaration(
+        "robot",
+        "robotics",
+        "tabler:robot",
+        "移动机器人本体；画人形或整机平台时用它",
+    ),
     GlyphDeclaration("cpu", "robotics", "tabler:cpu", "控制器、计算节点、ROS 节点"),
+    GlyphDeclaration("camera", "robotics", "tabler:camera", "摄像头、视觉传感器"),
+    GlyphDeclaration("scan", "robotics", "tabler:scan", "扫描线、正在扫描的传感器"),
+    GlyphDeclaration("gauge", "robotics", "tabler:gauge", "仪表、读数盘、被实时测量的量"),
+    GlyphDeclaration("temperature", "robotics", "tabler:temperature", "温度传感器、温度读数"),
+    # -- 载具 --------------------------------------------------------------
+    GlyphDeclaration("drone", "robotics", "tabler:drone", "无人机、飞行平台"),
+    GlyphDeclaration("truck", "robotics", "tabler:truck", "卡车、地面运输车"),
+    GlyphDeclaration("plane", "robotics", "tabler:plane", "飞机、飞行器"),
+    GlyphDeclaration("ship", "robotics", "tabler:ship", "船、水上载具"),
+    # -- 网络与通信 --------------------------------------------------------
+    GlyphDeclaration("antenna", "network", "tabler:antenna", "天线、无线收发端"),
+    GlyphDeclaration("wifi", "network", "tabler:wifi", "WiFi 链路、一段无线连接"),
+    GlyphDeclaration(
+        "broadcast",
+        "network",
+        "tabler:broadcast",
+        "广播、一对多发送；ROS 的 topic 广播用它",
+    ),
+    GlyphDeclaration("router", "network", "tabler:router", "路由器、网关"),
+    GlyphDeclaration("network", "network", "tabler:network", "网络拓扑整体；单个节点用 cpu/server"),
+    GlyphDeclaration("cloud", "cloud", "tabler:cloud", "云端服务、远端的算力"),
     GlyphDeclaration("server", "cloud", "tabler:server", "服务端、云端服务"),
+    GlyphDeclaration("database", "cloud", "tabler:database", "数据库、存储"),
     GlyphDeclaration("package", "cloud", "tabler:package", "消息载荷、传输中的数据包"),
+    GlyphDeclaration("brain", "cloud", "tabler:brain", "大脑、模型、智能体；讲 AI 或推理时用它"),
+    GlyphDeclaration("chart", "cloud", "tabler:chart-line", "折线图、走势、数据在变化"),
+    GlyphDeclaration("sitemap", "cloud", "tabler:sitemap", "层级结构图；讲「谁属于谁」时用它"),
+    # -- 电与物理 ----------------------------------------------------------
+    GlyphDeclaration("battery", "physics", "tabler:battery", "电池、储能单元"),
+    GlyphDeclaration("bolt", "physics", "tabler:bolt", "闪电、放电；讲电能或能量释放"),
+    GlyphDeclaration("magnet", "physics", "tabler:magnet", "磁铁、磁场源"),
+    GlyphDeclaration("sine-wave", "physics", "tabler:wave-sine", "正弦波；讲波动、交流、简谐运动"),
+    GlyphDeclaration("square-wave", "physics", "tabler:wave-square", "方波、数字信号、高低电平"),
+    GlyphDeclaration("activity", "physics", "tabler:activity", "波形曲线、跳动中的量、生命体征"),
+    GlyphDeclaration("propeller", "physics", "tabler:propeller", "螺旋桨、旋翼、推力"),
+    GlyphDeclaration("wind", "physics", "tabler:wind", "风、气流"),
+    # -- 科学与航天 --------------------------------------------------------
+    GlyphDeclaration("atom", "science", "tabler:atom", "原子、分子结构"),
+    GlyphDeclaration("rocket", "science", "tabler:rocket", "火箭、推进器"),
+    GlyphDeclaration("satellite", "science", "tabler:satellite", "卫星、中继"),
+    GlyphDeclaration("planet", "science", "tabler:planet", "星球、天体"),
+    GlyphDeclaration("microscope", "science", "tabler:microscope", "显微镜、微观观测"),
+    GlyphDeclaration("flask", "science", "tabler:flask", "烧瓶、实验器皿"),
+    GlyphDeclaration("telescope", "science", "tabler:telescope", "望远镜、天文观测"),
+    # -- 机械 --------------------------------------------------------------
+    GlyphDeclaration("gear", "robotics", "tabler:settings", "齿轮、传动；讲动力怎么传下去"),
+    GlyphDeclaration("wrench", "robotics", "tabler:tool", "工具、扳手；讲装配或维修"),
+    # -- 状态与指示 --------------------------------------------------------
+    GlyphDeclaration(
+        "warning", "general", "tabler:alert-triangle", "警告标志、危险源、要避开的障碍"
+    ),
+    GlyphDeclaration("lock", "general", "tabler:lock", "锁、加密、权限、被保护"),
+    GlyphDeclaration("clock", "general", "tabler:clock", "时钟；讲时序、周期、延迟"),
+    GlyphDeclaration("shield", "general", "tabler:shield", "防护、安全边界、容错"),
+    # -- 工业制造 ----------------------------------------------------------
+    # The round this set was short of. A real document about a sorting line named
+    # six things and only two of them had a picture — and the model, told to draw
+    # 六轴机械臂 with no arm to draw, reached for `robot` and put a humanoid on
+    # the stage. `note` is the whole offer, so each of these says what the icon
+    # *is* and when a lesson would reach for it, the same as the eleven above it
+    # that went unread until they were written this way.
+    GlyphDeclaration(
+        "robot-arm",
+        "robotics",
+        "lucide:robot-arm",
+        "六轴机械臂本体：底座加一节节的手臂；讲机械臂、关节、抓取时用它。"
+        "**不是人形机器人**——那是 `robot`",
+    ),
+    GlyphDeclaration(
+        "photo-sensor",
+        "robotics",
+        "tabler:photo-sensor",
+        "光电传感器；讲到位检测、遮光触发、有无料",
+    ),
+    GlyphDeclaration(
+        "assembly", "robotics", "tabler:assembly", "装配好的整机、成品件；讲组装与成品"
+    ),
+    GlyphDeclaration(
+        "building-factory", "robotics", "tabler:building-factory", "厂房、生产车间、产线所在的建筑"
+    ),
+    GlyphDeclaration(
+        "building-warehouse", "robotics", "tabler:building-warehouse", "仓库、立体库、存放区"
+    ),
+    GlyphDeclaration("forklift", "robotics", "tabler:forklift", "叉车、厂内搬运车；讲物流与搬运"),
+    GlyphDeclaration("crane", "robotics", "tabler:crane", "起重机、吊装设备；讲吊运重物"),
+    GlyphDeclaration(
+        "container", "robotics", "tabler:container", "料箱、周转箱、集装箱；装工件或货物的容器"
+    ),
+    GlyphDeclaration(
+        "circuit-motor", "robotics", "tabler:circuit-motor", "电机、马达；讲驱动与转动"
+    ),
+    GlyphDeclaration("engine", "robotics", "tabler:engine", "发动机、动力机；讲动力从哪里来"),
+    GlyphDeclaration("drill", "robotics", "lucide:drill", "钻头、打孔加工；讲钻孔与切削"),
+    GlyphDeclaration("hard-hat", "robotics", "lucide:hard-hat", "安全帽；讲作业防护与安全规范"),
+    GlyphDeclaration(
+        "cuboid", "robotics", "lucide:cuboid", "立方体、方块工件；讲一个具体的三维方料"
+    ),
+    GlyphDeclaration(
+        "cylinder", "robotics", "lucide:cylinder", "圆柱体、圆柱形工件；讲轴、卷材、柱状件"
+    ),
+    # -- 通用教学 ----------------------------------------------------------
+    GlyphDeclaration("hierarchy", "general", "tabler:hierarchy", "层级结构；讲上下级与隶属关系"),
+    GlyphDeclaration("list-check", "general", "tabler:list-check", "带勾的清单；讲核对、逐条确认"),
+    GlyphDeclaration("report", "general", "tabler:report", "报告、书面记录；讲汇报与结论"),
+    GlyphDeclaration("license", "general", "tabler:license", "许可证、资质证书；讲准入与认证"),
+    GlyphDeclaration("target", "general", "tabler:target", "靶心、目标；讲瞄准与达标"),
+    GlyphDeclaration("route", "general", "tabler:route", "路线、路径规划；讲途经顺序"),
+    GlyphDeclaration("scale", "general", "tabler:scale", "天平、秤；讲权衡、配比、称量"),
+    GlyphDeclaration("compass", "general", "tabler:compass", "指南针；讲方向与定位"),
+    GlyphDeclaration("milestone", "general", "lucide:milestone", "里程碑；讲阶段节点与进度"),
+    GlyphDeclaration(
+        "waypoints", "general", "lucide:waypoints", "途经点、节点序列；讲多步流程里的一个个停靠点"
+    ),
+    GlyphDeclaration(
+        "clipboard-list", "general", "lucide:clipboard-list", "核对板、操作单；讲按单执行的步骤"
+    ),
+    GlyphDeclaration(
+        "pencil-ruler", "general", "lucide:pencil-ruler", "尺规制图；讲设计、画图、量取尺寸"
+    ),
+    # -- 电子电路 ----------------------------------------------------------
+    GlyphDeclaration("circuit-resistor", "physics", "tabler:circuit-resistor", "电阻元件"),
+    GlyphDeclaration("circuit-capacitor", "physics", "tabler:circuit-capacitor", "电容元件"),
+    GlyphDeclaration(
+        "circuit-diode", "physics", "tabler:circuit-diode", "二极管；讲单向导通与整流"
+    ),
+    GlyphDeclaration("circuit-inductor", "physics", "tabler:circuit-inductor", "电感、线圈"),
+    GlyphDeclaration("circuit-ammeter", "physics", "tabler:circuit-ammeter", "电流表；讲测量电流"),
+    GlyphDeclaration(
+        "circuit-voltmeter", "physics", "tabler:circuit-voltmeter", "电压表；讲测量电压"
+    ),
+    GlyphDeclaration(
+        "circuit-switch-closed",
+        "physics",
+        "tabler:circuit-switch-closed",
+        "闭合的开关；讲通断与控制回路",
+    ),
+    GlyphDeclaration(
+        "circuit-ground", "physics", "tabler:circuit-ground", "接地；讲零电位与参考点"
+    ),
+    GlyphDeclaration("circuit-bulb", "physics", "tabler:circuit-bulb", "灯泡、用电器；讲负载"),
+    GlyphDeclaration("plug", "physics", "tabler:plug", "插头、取电口；讲供电接入"),
+    GlyphDeclaration(
+        "circuit-board", "physics", "lucide:circuit-board", "电路板；讲整块板子与元器件集成"
+    ),
+    GlyphDeclaration("cable", "physics", "lucide:cable", "线缆、走线；讲连线与布线"),
+    # -- 化工与能源 --------------------------------------------------------
+    GlyphDeclaration("pipeline", "physics", "tabler:pipeline", "管道；讲输送与管路走向"),
+    GlyphDeclaration("tank", "physics", "tabler:tank", "储罐、罐体；讲存放液体或气体"),
+    GlyphDeclaration("barrel", "physics", "tabler:barrel", "油桶、桶装物料"),
+    GlyphDeclaration(
+        "building-wind-turbine", "physics", "tabler:building-wind-turbine", "风力发电机；讲风能发电"
+    ),
+    GlyphDeclaration("solar-panel", "physics", "tabler:solar-panel", "光伏板、太阳能电池板"),
+    GlyphDeclaration("droplet", "physics", "tabler:droplet", "液滴、液体本身；讲流量与滴加"),
+    GlyphDeclaration("flame", "physics", "tabler:flame", "火焰；讲燃烧、加热、高温"),
+    GlyphDeclaration("recycle", "physics", "tabler:recycle", "循环、回收；讲闭环与再利用"),
+    GlyphDeclaration("leaf", "general", "tabler:leaf", "叶子；讲环保、生态、自然"),
+    GlyphDeclaration("beaker", "science", "lucide:beaker", "烧杯；讲化学实验、溶液、反应"),
+    GlyphDeclaration("dna", "science", "lucide:dna", "DNA 双螺旋；讲分子、遗传、微观结构"),
 )
 
 T2_GLYPH_NAMES: frozenset[str] = frozenset(g.name for g in T2_GLYPHS)
@@ -589,23 +826,52 @@ PRESETS: tuple[Preset, ...] = (
 
 PRESET_BY_NAME: dict[str, Preset] = {p.name: p for p in PRESETS}
 
+#: The presets whose bodies travel by `speed` — one of the five.
+#:
+#: `_flight` already says this in its own words: "`lane` carries a car along a
+#: corridor, `chain` and `hub` hold their bodies still". `field` moves its
+#: bodies too, but along a parabola this module baked, and it never reads
+#: `speed` — a projectile's flight time is the arc's property, which is the
+#: decision that put `duration` on the body in the first place. So there is
+#: exactly one preset where the number means "how fast it goes", and the player
+#: has to ask which one it is before it carries anything.
+#:
+#: It did not ask. `behaviors.js` checked only "is this a body with a numeric
+#: speed?", and the recorded avoidance document gives its 底盘 `speed: 60` in a
+#: `chain` scene — so the first thing on screen in that lesson was a link
+#: diagram with the chassis sliding off the right edge and wrapping, forever.
+#: Nothing errored; `speed` is a real prop of a real primitive, and the beat
+#: that set it was reported as a working beat.
+#:
+#: Mirrored by hand in `registry.js` and held equal by a test, the same trade
+#: `LIVE_PROPS` and `PENDING_KINDS` make.
+SPEED_PRESETS: frozenset[str] = frozenset({"lane"})
+
 
 # --------------------------------------------------------------------------
 # Vocabulary rendering — the prompt is generated, never hand-copied
 # --------------------------------------------------------------------------
 
 
-def _range_hint(primitive: str, prop: str) -> str:
-    """`（舞台像素 40~420）` for a distance prop, empty otherwise.
+def _prop_hint(primitive: str, prop: str) -> str:
+    """The parenthetical after a prop name: its unit, or its legal values.
 
     Inline rather than in a footnote because the model reads the prop list when
-    it writes the prop. A unit stated anywhere else is a unit said once.
+    it writes the prop. A unit stated anywhere else is a unit said once, and the
+    same goes for the five words `tone` accepts: this is the only place the
+    vocabulary names them, and the only place the model is standing when it has
+    to choose one.
+
+    Keyed on the prop name rather than on `(primitive, prop)` because `tone`
+    belongs to exactly one primitive, and if a second one ever declares it the
+    gloss is still the right gloss.
     """
     bounds = stage_range(primitive, prop)
-    if bounds is None:
-        return ""
-    low, high = bounds
-    return f"（舞台像素 {low:g}~{high:g}）"
+    if bounds is not None:
+        return f"（{bounds.unit} {bounds.low:g}~{bounds.high:g}）"
+    if prop == "tone":
+        return "（" + "、".join(f"{name} {gloss}" for name, gloss in TONE_GLOSSES) + "）"
+    return ""
 
 
 def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
@@ -687,7 +953,7 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
         static = tuple(prop for prop in primitive.props if prop not in live)
         parts = []
         if live:
-            live_text = "、".join(f"`{prop}`{_range_hint(primitive.name, prop)}" for prop in live)
+            live_text = "、".join(f"`{prop}`{_prop_hint(primitive.name, prop)}" for prop in live)
             parts.append(f"可被节拍改变：{live_text}")
         if static:
             parts.append("只能整体设置一次：" + "、".join(f"`{prop}`" for prop in static))
@@ -708,17 +974,20 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
         lines.append(f"- `{primitive.name}`：{'；'.join(parts) if parts else '（无）'}")
 
     lines.append("")
-    lines.append("## 距离类属性的单位，以及为什么它必须是像素")
+    lines.append("## 这些属性用的是渲染器的单位，不是文档里的物理单位")
     lines.append(
         "画布的坐标系是固定的：宽 960、高 600，单位是**舞台像素**，不是米、"
         "厘米、牛顿或秒。所以 `radius` 要写「这条射线在图上有多长」，"
         "不是「这颗激光雷达实际能测多远」。"
-        "**文档里的物理量（8 米、0.8 米）不能直接抄进 `radius`**——"
-        "写 8 会被画成 8 个像素，比一个标点还小，屏幕上什么都看不见。"
-        "按文档的实际含义换算成一个占画布合理比例的像素值再写。"
+        "**文档里的物理量（8 米、0.8 米、0.6 米每秒）不能直接抄进来**——"
+        "写 8 会被画成 8 个像素，比一个标点还小，屏幕上什么都看不见；"
+        "`speed` 写 60 会让小车一秒跑完五个屏，糊成一道光。"
+        "按文档的实际含义换算成一个占画布合理比例的值再写。"
     )
-    for (primitive_name, prop), (low, high) in sorted(STAGE_RANGES.items()):
-        lines.append(f"- `{primitive_name}.{prop}`：{low:g}~{high:g} 舞台像素")
+    for (primitive_name, prop), entry in sorted(STAGE_RANGES.items()):
+        lines.append(
+            f"- `{primitive_name}.{prop}`：{entry.low:g}~{entry.high:g} {entry.unit}（{entry.why}）"
+        )
 
     lines.append("")
     lines.append("## 可用领域字形 glyph（只能用在 `body` 的 `glyph` 属性上）")

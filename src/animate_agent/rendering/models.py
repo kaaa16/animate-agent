@@ -293,6 +293,21 @@ class RenderStep(_Model):
     id: str = Field(min_length=1)
     title: str = ""
     narration: str = ""
+    #: How long this beat holds before the player moves on, in seconds.
+    #:
+    #: `0.0` means **"no timing was declared"**, and it is the default because
+    #: every spec written before this field existed has to keep loading. The
+    #: player reads it as "sit on this beat and never move by yourself", which
+    #: is exactly what it did before — so an old file behaves like an old file
+    #: rather than silently acquiring a rhythm nobody chose for it.
+    #:
+    #: The layout layer fills it in (`layout.beat_duration`) from the
+    #: narration. Not from the model: `storyboard/prompts.py` forbids the
+    #: storyboard layer from writing 时长 in as many words, alongside 坐标 and
+    #: 颜色. A throw's flight time is derived down here for the same reason, and
+    #: a beat's length has the same shape of answer — the narration is what the
+    #: beat is *for*, so how long it takes to read is how long it needs.
+    duration: float = Field(default=0.0, ge=0)
     highlights: list[str] = Field(default_factory=list)
     states: dict[str, dict[str, PropValue]] = Field(default_factory=dict)
 

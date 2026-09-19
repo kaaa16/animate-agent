@@ -9,7 +9,13 @@
   <body>
     <header class="bar">
       <div>
-        <p class="eyebrow" id="eyebrow"></p>
+        <p class="eyebrow">
+          <!-- Which scene of how many. Its own element, not part of the
+               eyebrow: `player.js` writes both with `textContent`, so sharing
+               one node would have each overwrite the other. -->
+          <span id="scene-count"></span>
+          <span id="eyebrow"></span>
+        </p>
         <h1 id="title">载入中…</h1>
         <p class="goal" id="goal"></p>
       </div>

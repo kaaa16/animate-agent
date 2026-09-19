@@ -334,6 +334,44 @@ ANGLE_RADIUS_MAX = 120.0
 THROW_PIXELS_PER_SECOND = 260.0
 THROW_MIN_DURATION = 1.2
 
+#: How long one beat lasts, derived from the narration it carries.
+#:
+#: Same reasoning as `THROW_MIN_DURATION` one paragraph up, applied to the beat
+#: rather than to the body: the storyboard layer is told in as many words not to
+#: write 时长 (`storyboard/prompts.py`, alongside 坐标 and 颜色), so the number
+#: comes from here out of the one thing the model did write.
+#:
+#: Until this existed nothing computed a beat's length at all, and the player
+#: made up the difference by never moving: it loops on whatever beat is loaded,
+#: so **beats 2..N were only ever visible if a person clicked through them**.
+#: An entire scene could be written, validated, rendered and reviewed without
+#: anybody noticing that no viewer would ever see past its first frame.
+#:
+#: The rate is **not** a reading speed, and the first version calling it one was
+#: the mistake. Nothing reads the narration at the beat's pace — it is printed
+#: in the list beside the picture, and what the beat has to give the eye is time
+#: to watch whatever changed. A rate of 6 characters per second was a reading
+#: clock doing a job that has no reading in it, and it made the length of the
+#: *sentence* decide the length of the *shot*: the same document cut into the
+#: same beats ran 99 seconds where the hand-written baseline ran 22, purely
+#: because its descriptions were written one clause longer.
+#:
+#: So the rate is now a nudge and nothing more — one extra second per 18
+#: characters — and `BEAT_BASE_SECONDS` sets the pace. Across the whole legal
+#: range of `description` that is a band of roughly 4.5 to 7 seconds, which is
+#: where the baseline sits and, on the evidence of the one scene anybody could
+#: stand to watch, where a beat wants to be.
+#:
+#: What is still true is the trade underneath: two beats of equal length hold
+#: for equal time, one of them the point of the scene and the other a
+#: transition. Buying editorial rhythm back means letting the model write a
+#: duration, which means reversing the rule in `prompts.py` — a change of
+#: position, not a parameter.
+BEAT_BASE_SECONDS = 3.8
+BEAT_CHARS_PER_SECOND = 18.0
+BEAT_MIN_SECONDS = 3.8
+BEAT_MAX_SECONDS = 7.0
+
 #: Graduations on an axis when the storyboard did not say how many.
 DEFAULT_AXIS_TICKS = 5
 
@@ -516,10 +554,21 @@ def _stage_distance(
 def _clamp_stage(primitive: str, prop: str, value: float) -> float:
     """`value` held inside the stage range `prop` is declared with, if it has one."""
     bounds = stage_range(primitive, prop)
-    if bounds is None:
+    return value if bounds is None else bounds.clamp(value)
+
+
+def _clamp_value(primitive: str | None, prop: str, value: PropValue) -> PropValue:
+    """The same hold, for a value that might not be a number at all.
+
+    Beat states go through here. `speed` is not consumed into geometry — nothing
+    in this module reads it, `linear_motion` does, at playback — so a body's
+    `speed: 60` sits in `props` until the player multiplies it by 90 and the car
+    vanishes into a blur. Held here for the same reason the emitter's radius is:
+    a number outside the legible range has no reader that can notice.
+    """
+    if primitive is None or isinstance(value, bool) or not isinstance(value, (int, float)):
         return value
-    low, high = bounds
-    return min(max(value, low), high)
+    return _clamp_stage(primitive, prop, float(value))
 
 
 def _props_for(obj: StoryboardObject, primitive: str) -> dict[str, PropValue]:
@@ -538,13 +587,7 @@ def _props_for(obj: StoryboardObject, primitive: str) -> dict[str, PropValue]:
     """
     props = dict(obj.props)
     for prop in props:
-        if stage_range(primitive, prop) is None:
-            continue
-        value = props[prop]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        low, high = stage_range(primitive, prop) or (value, value)
-        props[prop] = min(max(float(value), low), high)
+        props[prop] = _clamp_value(primitive, prop, props[prop])
     return props
 
 
@@ -1231,7 +1274,12 @@ def _to_body(
         glyph=_glyph_to_draw(obj),
         path=path,
         duration=duration,
-        props=dict(obj.props),
+        # `_props_for`, not the verbatim `dict(obj.props)` this used to carry.
+        # `body.speed` is now a ranged prop, and the range is worth nothing if
+        # the one layer that writes the spec does not apply it — the emitter and
+        # the zone have gone through `_props_for` since the stage ranges landed,
+        # and the body was left out because it had no ranged prop to hold.
+        props=_props_for(obj, "body"),
     )
 
 
@@ -1274,6 +1322,32 @@ def _flight(
         for index in range(1, len(points))
     )
     return points, max(arc / THROW_PIXELS_PER_SECOND, THROW_MIN_DURATION)
+
+
+def beat_duration(narration: str) -> float:
+    """How long one beat holds, in seconds, given what it has to say.
+
+    The one input is the narration, and that is deliberate: it is the only
+    thing a beat carries that has a length at all. A beat's `highlights` count
+    says how much changes at once, its `key_points` how much is being asked of
+    the memory, and neither converts to seconds without a second pile of
+    made-up constants. Characters are countable; the rest would be numbers I
+    chose and then dressed up as derivation.
+
+    The floor is currently inert: the shortest legal `description` is 12
+    characters, which already yields 4.5s. It stays as a guard, so that
+    loosening that bound some day cannot hand the player a beat it flips past
+    inside a frame. The ceiling binds at ~58 characters, which is past the
+    length of an ordinary beat and well short of the 200 the field allows — the
+    long tail gets 7s and no more, because a beat that outlasts the viewer's
+    patience is worse than one that moves on early.
+
+    Public because `legacy.py` needs the same answer for the frozen baseline,
+    which reaches the player by a different road and would otherwise keep the
+    old behaviour of sitting on its first beat forever.
+    """
+    readable = len(narration) / BEAT_CHARS_PER_SECOND
+    return min(max(BEAT_BASE_SECONDS + readable, BEAT_MIN_SECONDS), BEAT_MAX_SECONDS)
 
 
 def _to_emitter(obj: StoryboardObject, boxes: dict[str, _Box]) -> EmitterElement:
@@ -1825,13 +1899,29 @@ def _to_element(
     )
 
 
-def _to_step(step: StoryboardStep) -> RenderStep:
+def _to_step(step: StoryboardStep, primitives: dict[str, str]) -> RenderStep:
+    """One beat, with its state values held to the stage the way props are.
+
+    `primitives` maps object id -> primitive name, built once per scene by
+    `layout_scene`. Without it a beat state would be the one road into the spec
+    that skips the range check — and it is the road a lesson takes when it wants
+    to show a car slowing down, which is exactly the beat where the number is
+    most likely to have been copied out of the document in the document's own
+    unit.
+    """
     return RenderStep(
         id=step.id,
         title=step.title,
         narration=step.description,
+        duration=beat_duration(step.description),
         highlights=list(step.highlights),
-        states={key: dict(value) for key, value in step.object_states.items()},
+        states={
+            target: {
+                prop: _clamp_value(primitives.get(target), prop, value)
+                for prop, value in value_by_prop.items()
+            }
+            for target, value_by_prop in step.object_states.items()
+        },
     )
 
 
@@ -1873,6 +1963,16 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
                 f"场景 `{scene.id}` 的 `{obj.id}`（{obj.role}）超出了渲染契约的取值范围：{exc}"
             ) from exc
 
+    # object id -> primitive name, for the beat states below. An object whose
+    # role is unknown is left out rather than guessed at: its states have already
+    # been reported by the validator, and clamping against the wrong primitive's
+    # range would be a second wrong answer to a question already answered.
+    primitives = {
+        obj.id: ROLE_TO_PRIMITIVE[obj.role]
+        for obj in scene.objects
+        if obj.role in ROLE_TO_PRIMITIVE
+    }
+
     return RenderScene(
         id=scene.id,
         # `StoryboardScene` has no title of its own — the beats carry the words.
@@ -1913,7 +2013,7 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
             and element.anchor is not None
         },
         elements=elements,
-        steps=[_to_step(step) for step in scene.steps],
+        steps=[_to_step(step, primitives) for step in scene.steps],
         controls=[_to_control(control) for control in scene.controls],
         params=dict(scene.params),
     )

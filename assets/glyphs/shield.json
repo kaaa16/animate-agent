@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    2.014146969421583,
+    2.0,
+    19.971706061156837,
+    20.0
+  ],
+  "name": "shield",
+  "parts": {
+    "outline": {
+      "d": "M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:shield@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

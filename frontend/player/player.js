@@ -14,17 +14,46 @@
  */
 
 import { createSimulation } from "./behaviors.js";
-import { drawElement } from "./registry.js";
+import { EASE_SECONDS, blend, easeOutCubic } from "./easing.js";
+import { LIVE_PROPS, drawElement } from "./registry.js";
 import { createStage, readTheme } from "./stage.js";
 
 const FIXED_STEP = 1 / 60;
 /** Beyond this, drop the backlog rather than replaying a long stall frame by frame. */
 const MAX_CATCHUP_STEPS = 5;
+/**
+ * Each half of a scene change: fade to the background, swap, fade back in.
+ *
+ * A *dip*, not a cross-fade. A cross-fade needs both scenes on screen at once,
+ * which means a second canvas or an offscreen buffer, and it reads as a
+ * dissolve — two pictures briefly superimposed. A dip goes through a moment of
+ * empty stage instead, which is honest about what happened (the old picture is
+ * gone, a new one is starting) and needs nothing but one `fillRect` over what
+ * was already drawn.
+ */
+const TRANSITION_SECONDS = 0.45;
+
+/**
+ * Which prop decides whether an element is on screen at all.
+ *
+ * The drawers ask this same question — `drawBody` and `drawTrace` test
+ * `visible`, `drawEmitter` and `drawZone` test `enabled` — so the two have to
+ * name the same prop, or an element would fade against a gate that never
+ * opened. `test_the_presence_table_names_the_props_the_drawers_test` holds them
+ * together.
+ */
+const PRESENCE_PROP = {
+  body: "visible",
+  emitter: "enabled",
+  zone: "enabled",
+  trace: "visible",
+};
 
 const ui = {
   canvas: document.getElementById("stage"),
   title: document.getElementById("title"),
   eyebrow: document.getElementById("eyebrow"),
+  sceneCount: document.getElementById("scene-count"),
   goal: document.getElementById("goal"),
   steps: document.getElementById("steps"),
   controls: document.getElementById("controls"),
@@ -38,6 +67,16 @@ const ui = {
 const state = {
   spec: null,
   scene: null,
+  //: Which scene is loaded. `advanceBeat` needs it to know whether the beat it
+  //: just finished was the last beat of a scene or of the whole storyboard.
+  sceneIndex: 0,
+  //: `{ toScene, toStep, phase, t }` while a scene change is on screen, else
+  //: `null`. Phase is `"out"` (old scene fading) or `"in"` (new scene rising).
+  transition: null,
+  //: `"<element>.<prop>"` -> what it read under the *previous* beat. Emptied
+  //: whenever a beat is loaded rather than handed over from one, so the first
+  //: beat of a scene eases from nothing and simply appears.
+  departing: new Map(),
   sim: null,
   viewport: null,
   theme: null,
@@ -67,7 +106,7 @@ const state = {
  * a scene-level slider, not as a property of the circle drawn for it.
  */
 function makeLookup(scene) {
-  return (elementId, prop, fallback) => {
+  const raw = (elementId, prop, fallback) => {
     const key = `${elementId}.${prop}`;
     if (key in state.overrides) return state.overrides[key];
 
@@ -93,6 +132,61 @@ function makeLookup(scene) {
 
     return fallback;
   };
+
+  // The whole of the easing: everything above still decides *what* a property
+  // is worth this beat, and this decides only how it gets there. Answering from
+  // `raw` and blending is what keeps the two questions apart — a beat that sets
+  // nothing leaves `from` undefined and is returned untouched, so a property a
+  // control is driving never passes through here at all.
+  return (elementId, prop, fallback) => {
+    const target = raw(elementId, prop, fallback);
+    const from = state.departing.get(`${elementId}.${prop}`);
+    if (from === undefined) return target;
+    const progress = easeProgress();
+    if (progress >= 1) return target;
+    return blend(prop, from, target, progress);
+  };
+}
+
+/** How far into the ease a beat is, shaped. `easing.js` owns the arithmetic. */
+function easeProgress() {
+  return easeOutCubic(Math.min(1, state.sim.t / EASE_SECONDS));
+}
+
+/**
+ * What every live property reads as right now, taken *before* the beat moves —
+ * `state.lookup` resolves against `state.stepIndex`, so the moment it changes
+ * the old values are unrecoverable.
+ *
+ * Only the properties a beat is allowed to change are captured, because those
+ * are the only ones that can differ between two beats. Read off `LIVE_PROPS`
+ * rather than listed again here: it is the same table the validator and the
+ * prompt are built from, and a second copy would be a second thing to drift.
+ */
+function captureDeparting() {
+  const from = new Map();
+  for (const element of state.scene.elements) {
+    for (const prop of LIVE_PROPS[element.kind] ?? []) {
+      from.set(`${element.id}.${prop}`, state.lookup(element.id, prop, undefined));
+    }
+  }
+  return from;
+}
+
+/**
+ * How strongly an element should be drawn, 0 to 1.
+ *
+ * Asked of the lookup rather than of `state.departing` directly, so that the
+ * number here and the value the drawer's own gate reads are the same number —
+ * one eased to a fraction while it is on its way in, and exactly `false` (or
+ * exactly `true`) once it has landed.
+ */
+function presence(elementId) {
+  const prop = PRESENCE_PROP[state.byId.get(elementId)?.kind];
+  if (prop === undefined) return 1;
+  const value = state.lookup(elementId, prop, true);
+  if (typeof value === "number") return Math.max(0, Math.min(1, value));
+  return value === false ? 0 : 1;
 }
 
 /* -------------------------------------------------------------------- view */
@@ -113,6 +207,11 @@ function buildView() {
     glyphs: state.spec.glyphs ?? {},
     highlighted: new Set(step?.highlights ?? []),
     isDangerous: (id) => state.sim.isDangerous(id),
+    // Handed to `drawElement` rather than to the drawers: it is the one place
+    // every element is drawn through, so the alpha is applied once instead of
+    // in each drawer — five chances to forget it, and no way to tell from the
+    // code which of the five dropped it.
+    presence,
   };
 }
 
@@ -147,6 +246,19 @@ function drawChrome(ctx, scene, theme, width, height) {
   ctx.restore();
 }
 
+/**
+ * How much of the picture is covered by the scene change, 0 (none) to 1 (all).
+ *
+ * Read every frame rather than stored, because it is a pure function of the
+ * transition clock: one clock, one answer, no chance of the two disagreeing.
+ */
+function fadeAmount() {
+  const transition = state.transition;
+  if (transition === null) return 0;
+  const progress = Math.min(1, transition.t / TRANSITION_SECONDS);
+  return transition.phase === "out" ? progress : 1 - progress;
+}
+
 function render() {
   const stage = state.spec.stage;
   const ctx = state.viewport.ctx;
@@ -163,6 +275,17 @@ function render() {
       fail(error instanceof Error ? error.message : String(error));
       return;
     }
+  }
+
+  // Last, so it covers the chrome and the elements alike: a scene change is
+  // about the whole stage, not about the pictures inside it.
+  const fade = fadeAmount();
+  if (fade > 0) {
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = state.theme.background;
+    ctx.fillRect(0, 0, stage.width, stage.height);
+    ctx.restore();
   }
 }
 
@@ -186,23 +309,148 @@ function tick(now) {
     state.accumulator += elapsed;
     let steps = 0;
     while (state.accumulator >= FIXED_STEP && steps < MAX_CATCHUP_STEPS) {
-      state.sim.update(FIXED_STEP, state.lookup);
+      stepOnce();
       state.accumulator -= FIXED_STEP;
       steps += 1;
     }
     if (steps === MAX_CATCHUP_STEPS) state.accumulator = 0;
+    // The beat's clock and its animation are the same clock: `update` advances
+    // `sim.t` and `setStep` puts it back to zero, so pausing pauses both, and a
+    // beat that is on screen is a beat that is running.
+    //
+    // At most one beat advances here. The loop above moves `sim.t` by at most
+    // `MAX_CATCHUP_STEPS` fixed steps, and the shortest beat a layout can write
+    // is several seconds, so the two are nowhere near touching.
+    advanceBeat();
   }
 
   render();
 }
 
+/**
+ * One fixed step of everything that moves: the simulation, and the scene change
+ * if one is running.
+ *
+ * The simulation keeps stepping through a fade rather than freezing. A scene
+ * caught mid-stride — a car three quarters of the way down its lane — should
+ * carry on out of the picture, not stop dead and then dissolve; a freeze frame
+ * is what a person reads as a stall.
+ */
+function stepOnce() {
+  state.sim.update(FIXED_STEP, state.lookup);
+
+  const transition = state.transition;
+  if (transition === null) return;
+  transition.t += FIXED_STEP;
+  if (transition.t < TRANSITION_SECONDS) return;
+
+  if (transition.phase === "out") {
+    // The stage is fully covered. Swap underneath it and start uncovering.
+    loadScene(transition.toScene);
+    if (transition.toStep > 0) setStep(transition.toStep);
+    state.transition = {
+      toScene: transition.toScene,
+      toStep: transition.toStep,
+      phase: "in",
+      t: 0,
+    };
+    return;
+  }
+  state.transition = null;
+}
+
 /* --------------------------------------------------------------------- step */
+
+/**
+ * Move on once the current beat has held for as long as it was given.
+ *
+ * Until this existed nothing computed a beat's length at all. The layout pass
+ * bakes a duration onto a *body* (`element.duration`, for a thrown one) but
+ * wrote none onto a beat, so the player had nothing to count against and did
+ * the only thing left: it sat on whatever beat was loaded. Beats 2..N were
+ * reachable only by clicking. A scene could be written, validated, rendered and
+ * reviewed end to end without anyone seeing its second frame.
+ *
+ * Three rules, and the middle one is the change:
+ *
+ * - A `duration` of `0` means the spec predates the field. Then this returns
+ *   immediately and the player behaves exactly as it did when that spec was
+ *   written — an old file keeps its old behaviour instead of silently
+ *   acquiring a rhythm nobody chose for it.
+ * - A scene's last beat hands over to the next **scene**, through the
+ *   transition, rather than stopping there. Stopping was right when a scene was
+ *   the whole story: the player took one scene and the URL said which. But a
+ *   storyboard is a sequence of scenes, the upload page never passed `?scene=`,
+ *   and so every run of the real chain was watched one scene deep — which is
+ *   how a document whose second scene is the good one got judged on its first.
+ *   The beat clock is what knows the storyboard is longer than a scene; this is
+ *   the only place that knows it.
+ * - The end of the **storyboard** is still the end. It does **not** wrap to beat
+ *   1. A scene that quietly restarts is a scene whose last beat is never seen
+ *   to finish, which is the same defect as the one above wearing the opposite
+ *   coat. The last beat simply holds, still animating; ◀ ▶ and the beat list
+ *   still go back.
+ */
+function advanceBeat() {
+  const duration = Number(state.scene.steps[state.stepIndex]?.duration ?? 0);
+  if (!(duration > 0)) return;
+  if (state.sim.t < duration) return;
+  // A scene change already owns the clock. Without this the beat that was
+  // playing when the fade started would hand over a second time underneath it.
+  if (state.transition !== null) return;
+
+  if (state.stepIndex >= state.scene.steps.length - 1) {
+    if (state.sceneIndex >= state.spec.scenes.length - 1) return;
+    beginTransition(state.sceneIndex + 1);
+    return;
+  }
+  setStep(state.stepIndex + 1);
+}
+
+/**
+ * Start a scene change. `toStep` is where the new scene opens — 0 going
+ * forwards, and the previous scene's last beat going back, so that ◀ from the
+ * first beat of a scene lands on the beat a person was just watching.
+ */
+function beginTransition(toScene, toStep = 0) {
+  state.transition = { toScene, toStep, phase: "out", t: 0 };
+}
+
+/**
+ * Move `delta` beats, crossing a scene boundary when that is where `delta`
+ * leads.
+ *
+ * ◀ ▶ used to clamp at the edges of the loaded scene, which made the transport
+ * a control for looking at one scene rather than for looking at the animation.
+ * The upload page hands over the whole storyboard, so this is the button a
+ * person will reach for to check the scene after this one.
+ */
+function stepBy(delta) {
+  // One hand-over at a time. A second press mid-fade would restart the fade-out
+  // from `t = 0`, which snaps the picture back to visible for no reason anyone
+  // asked for.
+  if (state.transition !== null) return;
+  const index = state.stepIndex + delta;
+  if (index >= 0 && index < state.scene.steps.length) {
+    setStep(index);
+    return;
+  }
+  const scene = state.sceneIndex + (delta > 0 ? 1 : -1);
+  if (scene < 0 || scene >= state.spec.scenes.length) return;
+  beginTransition(scene, delta > 0 ? 0 : (state.spec.scenes[scene].steps.length - 1));
+}
 
 function setStep(index) {
   const total = state.scene.steps.length;
-  state.stepIndex = Math.max(0, Math.min(total - 1, index));
+  const clamped = Math.max(0, Math.min(total - 1, index));
+  // Captured while `state.stepIndex` still names the beat being left. Loading
+  // the *same* beat again — 重置, or a `reset_scene` button — is not a hand-over
+  // and eases from nothing, so a reset is a reset rather than a slow slide back.
+  state.departing = clamped === state.stepIndex ? new Map() : captureDeparting();
+  state.stepIndex = clamped;
   // Restart the beat from rest: a step is a moment, and a beat that inherits the
-  // previous one's elapsed time can never be looked at twice.
+  // previous one's elapsed time can never be looked at twice. It is also what
+  // starts the ease above at zero.
   state.sim.reset();
   state.accumulator = 0;
   renderSteps();
@@ -302,23 +550,30 @@ function togglePlay() {
 
 function bind() {
   ui.play.addEventListener("click", togglePlay);
-  ui.reset.addEventListener("click", () => setStep(0));
-  ui.prev.addEventListener("click", () => setStep(state.stepIndex - 1));
-  ui.next.addEventListener("click", () => setStep(state.stepIndex + 1));
+  // 重置 means "put it back where it started", and a scene change in flight is
+  // part of what has to be put back: left running, it would finish the fade and
+  // load the scene you just tried to leave.
+  ui.reset.addEventListener("click", () => {
+    state.transition = null;
+    setStep(0);
+  });
+  ui.prev.addEventListener("click", () => stepBy(-1));
+  ui.next.addEventListener("click", () => stepBy(1));
   window.addEventListener("keydown", (event) => {
     if (event.code === "Space") {
       event.preventDefault();
       togglePlay();
     } else if (event.code === "ArrowRight") {
-      setStep(state.stepIndex + 1);
+      stepBy(1);
     } else if (event.code === "ArrowLeft") {
-      setStep(state.stepIndex - 1);
+      stepBy(-1);
     }
   });
   window.addEventListener("resize", () => state.viewport.resize());
 }
 
 function loadScene(index) {
+  state.sceneIndex = index;
   state.scene = state.spec.scenes[index];
   state.byId = new Map(state.scene.elements.map((element) => [element.id, element]));
   state.obstacleIds = state.scene.elements
@@ -335,8 +590,17 @@ function loadScene(index) {
 
   ui.title.textContent = state.spec.title || state.scene.title || "";
   ui.eyebrow.textContent = state.spec.eyebrow || state.spec.subject || "";
+  // Which scene of how many, in words. The scene's own title and goal change
+  // with it, but neither says "and there are two more after this" — and until
+  // the player could leave a scene at all, nothing needed to.
+  ui.sceneCount.textContent = `第 ${index + 1} / ${state.spec.scenes.length} 幕`;
   ui.goal.textContent = state.scene.teaching_goal || "";
 
+  // A scene opens at rest. `setStep(0)` below would otherwise compare against
+  // the beat index the *previous* scene was sitting on, read this scene's beats
+  // at that index, and slide the first frame in from values nobody wrote.
+  state.stepIndex = 0;
+  state.departing = new Map();
   renderControls();
   setStep(0);
 }
@@ -370,6 +634,10 @@ async function main() {
   // so without this the only frame anyone could look at was the first beat of
   // the first scene — which is exactly how "four identical rounded rectangles"
   // got recorded for one document and never checked in the other two.
+  //
+  // It still earns its place now that the player walks scene to scene on its
+  // own: it is how you *start* somewhere other than the beginning, and how you
+  // hand someone a link to one scene rather than to the whole run.
   //
   // Out of range is clamped rather than rejected, here and in `setStep`: a bad
   // index in a URL should still show you a picture, not a blank page.

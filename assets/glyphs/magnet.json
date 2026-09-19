@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    3.0,
+    2.0,
+    18.0,
+    20.0
+  ],
+  "name": "magnet",
+  "parts": {
+    "outline": {
+      "d": "M4 13v-8a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v8a2 2 0 0 0 6 0v-8a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v8a8 8 0 0 1 -16 0 M4 8l5 0 M15 8l4 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:magnet@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

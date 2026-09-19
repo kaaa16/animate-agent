@@ -1,0 +1,25 @@
+{
+  "domain": "robotics",
+  "ink_box": [
+    1.914986211500044,
+    1.914986211500044,
+    20.2063341320596,
+    20.2063341320596
+  ],
+  "name": "wrench",
+  "parts": {
+    "outline": {
+      "d": "M7 10h3v-3l-3.5 -3.5a6 6 0 0 1 8 8l6 6a2 2 0 0 1 -3 3l-6 -6a6 6 0 0 1 -8 -8l3.5 3.5",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:tool@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

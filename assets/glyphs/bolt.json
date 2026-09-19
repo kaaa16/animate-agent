@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    4.0,
+    2.0,
+    16.0,
+    20.0
+  ],
+  "name": "bolt",
+  "parts": {
+    "outline": {
+      "d": "M13 3l0 7l6 0l-8 11l0 -7l-6 0l8 -11",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:bolt@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    2.0,
+    2.0,
+    20.0,
+    20.0
+  ],
+  "name": "route",
+  "parts": {
+    "outline": {
+      "d": "M3 19a2 2 0 1 0 4 0a2 2 0 0 0 -4 0 M19 7a2 2 0 1 0 0 -4a2 2 0 0 0 0 4 M11 19h5.5a3.5 3.5 0 0 0 0 -7h-8a3.5 3.5 0 0 1 0 -7h4.5",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:route@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

@@ -67,6 +67,7 @@ from animate_agent.interaction.controls import (
     SliderControl,
     ToggleControl,
 )
+from animate_agent.rendering.layout import beat_duration
 from animate_agent.rendering.models import (
     BodyElement,
     EmitterElement,
@@ -371,6 +372,11 @@ def _convert_step(step: TimelineStep) -> RenderStep:
         id=step.id,
         title=step.title,
         narration=step.narration,
+        # Borrowed from the layout pass, and it is the one thing this module takes
+        # from there: how long a beat lasts is a single rule about narration, and
+        # the two roads into the player have to agree on it. "No layout" in the
+        # module docstring still holds — nothing here computes a coordinate.
+        duration=beat_duration(step.narration),
         highlights=list(step.focus_element_ids),
         # `actions` is an untyped `list[dict[str, Any]]` in the frozen baseline and
         # is empty in all three templates. Mapping it would need a typed

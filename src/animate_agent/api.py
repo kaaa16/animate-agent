@@ -12,11 +12,12 @@ still only about the Next app on :3000 and did not have to grow.
 """
 
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict
@@ -32,6 +33,10 @@ from animate_agent.rendering.service import render_spec_path, render_storyboard
 from animate_agent.storyboard.service import generate_storyboard
 
 ALLOWED_EXTENSIONS = SUPPORTED_EXTENSIONS
+
+#: What every JSON route starts with. Used to tell the API apart from the site
+#: below, whose responses want a different cache rule.
+API_PREFIX = "/api"
 
 #: Where the repository is, resolved from this file rather than from the working
 #: directory. Everything below is an absolute path built from it, and that is not
@@ -112,6 +117,38 @@ app.add_middleware(
     allow_methods=["POST"],
     allow_headers=["Content-Type"],
 )
+
+
+@app.middleware("http")
+async def revalidate_the_site(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Tell the browser to revalidate the site's files instead of guessing.
+
+    The site is served straight off disk, and `StaticFiles` sends `ETag` and
+    `Last-Modified` and nothing else. That silence is not neutral: a response with
+    a `Last-Modified` and no explicit freshness is *heuristically* cacheable, and
+    browsers take roughly a tenth of the time since the file changed as its
+    remaining lifetime. Edit `player.js`, reload within that window, and the
+    browser reuses the copy it already has without asking — so the page runs the
+    previous commit's code. Nothing about it looks like caching: the page loads,
+    the console is clean, and the behaviour is just... the old behaviour. Which is
+    indistinguishable from "my change did nothing", and is how a working
+    auto-advance gets reported as still stopping at the first scene.
+
+    `no-cache`, not `no-store`. The copy may stay; it only has to be revalidated,
+    and revalidating against the `ETag` above is a 304 with an empty body — cheap
+    on a loopback server, and the difference between "I reloaded" and "I am
+    looking at what is on disk".
+
+    The JSON routes are exempt. Their responses are not the thing being edited,
+    a browser will not reuse a POST without being told to, and `no-cache` on an
+    API reply is a promise about semantics that nothing here needs to make.
+    """
+    response = await call_next(request)
+    if not request.url.path.startswith(API_PREFIX):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.post("/api/documents/from-url", response_model=DocumentIR)

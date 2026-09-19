@@ -65,10 +65,14 @@ function annotation(ctx, view, text, x, y) {
   ctx.textBaseline = "middle";
   // A dark plate behind the glyphs, or a tick value lands on the shaft it labels.
   const width = ctx.measureText(text).width;
+  // The plate is a fraction of the element's own opacity, never a fixed one:
+  // `drawElement` sets `globalAlpha` for the whole element, so assigning here
+  // would override it and the label would stay solid while its body faded.
+  ctx.save();
   ctx.fillStyle = view.theme.background;
-  ctx.globalAlpha = 0.85;
+  ctx.globalAlpha *= 0.85;
   ctx.fillRect(x - width / 2 - 3, y - 8, width + 6, 16);
-  ctx.globalAlpha = 1;
+  ctx.restore();
   ctx.fillStyle = view.theme.text;
   ctx.fillText(text, x, y);
   ctx.restore();
@@ -250,6 +254,11 @@ export function drawEmitter(ctx, element, view) {
 
   ctx.lineWidth = 1;
   const step = rays > 1 ? fov / (rays - 1) : 0;
+  // The shimmer multiplies the element's opacity and is scoped to the loop:
+  // `drawElement` sets `globalAlpha` for the whole element, so a plain
+  // assignment here would drop it, and leaving the last ray's value behind
+  // would carry it into the hit ray below.
+  ctx.save();
   for (let index = 0; index < rays; index += 1) {
     const angle = heading - fov / 2 + step * index;
     const reach = radius;
@@ -257,13 +266,13 @@ export function drawEmitter(ctx, element, view) {
     // not from a clock, so two frames of the same spec still match.
     const alpha = 0.72 + Math.sin(view.time * 8 + index) * 0.18;
     ctx.strokeStyle = color;
-    ctx.globalAlpha = Math.abs(alpha);
+    ctx.globalAlpha *= Math.abs(alpha);
     ctx.beginPath();
     ctx.moveTo(node.x, node.y);
     ctx.lineTo(node.x + Math.cos(rad(angle)) * reach, node.y + Math.sin(rad(angle)) * reach);
     ctx.stroke();
   }
-  ctx.globalAlpha = 1;
+  ctx.restore();
 
   if (hit) {
     ctx.lineWidth = 2;

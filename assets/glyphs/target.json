@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    2.0,
+    2.0,
+    20.0,
+    20.0
+  ],
+  "name": "target",
+  "parts": {
+    "outline": {
+      "d": "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0 M7 12a5 5 0 1 0 10 0a5 5 0 1 0 -10 0 M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:target@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

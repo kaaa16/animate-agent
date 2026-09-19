@@ -32,6 +32,7 @@
  */
 
 import { pointAlong } from "./primitives.js";
+import { SPEED_PRESETS } from "./registry.js";
 
 /** Stage pixels travelled per second at `speed === 1`. */
 const PIXELS_PER_SPEED = 90;
@@ -126,6 +127,13 @@ export function createSimulation(scene, stage) {
           node.progress = travelled;
           continue;
         }
+
+        // The preset decides whether a body can move at all, and asking only
+        // "does it have a numeric speed?" is what let a `chain` link diagram
+        // carry its 底盘 off the right edge: `speed` is a real prop, the beat
+        // that set it was a working beat, and nothing anywhere objected. See
+        // `SPEED_PRESETS` in `registry.js` for why it is only the one preset.
+        if (!SPEED_PRESETS.includes(scene.preset)) continue;
 
         const speed = lookup(element.id, "speed", null);
         if (typeof speed !== "number") continue;

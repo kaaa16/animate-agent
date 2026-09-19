@@ -1,0 +1,25 @@
+{
+  "domain": "science",
+  "ink_box": [
+    3.5,
+    2.0,
+    17.0,
+    20.0
+  ],
+  "name": "beaker",
+  "parts": {
+    "outline": {
+      "d": "M4.5 3h15 M6 3v16a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V3 M6 14h12",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "lucide:beaker@1.47.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

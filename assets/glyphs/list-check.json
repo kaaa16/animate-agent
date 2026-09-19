@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    2.5,
+    3.5,
+    18.5,
+    16.5
+  ],
+  "name": "list-check",
+  "parts": {
+    "outline": {
+      "d": "M3.5 5.5l1.5 1.5l2.5 -2.5 M3.5 11.5l1.5 1.5l2.5 -2.5 M3.5 17.5l1.5 1.5l2.5 -2.5 M11 6l9 0 M11 12l9 0 M11 18l9 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:list-check@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

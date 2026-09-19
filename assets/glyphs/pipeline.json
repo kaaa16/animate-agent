@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    2.0,
+    3.0,
+    20.0,
+    18.0
+  ],
+  "name": "pipeline",
+  "parts": {
+    "outline": {
+      "d": "M3 4h8 M4 4v5a6 6 0 0 0 6 6h3a1 1 0 0 1 1 1v4 M10 4v4a1 1 0 0 0 1 1h3a6 6 0 0 1 6 6v5 M13 20h8 M12 9v6",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:pipeline@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

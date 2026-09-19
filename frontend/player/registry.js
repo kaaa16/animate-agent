@@ -94,12 +94,46 @@ export const LIVE_PROPS = {
   readout: ["text", "tone"],
 };
 
+/**
+ * The presets whose bodies travel by `speed` — the mirror of `SPEED_PRESETS`
+ * in `rendering/registry.py`, hand-written for the reason `LIVE_PROPS` is.
+ *
+ * `behaviors.js` used to ask only "is this a body with a numeric speed?", which
+ * is true of every body that was ever given one. The recorded avoidance
+ * document writes `car_body.speed: 60` in a `chain` scene, so the first thing
+ * that lesson put on screen was a link diagram with the chassis sliding off the
+ * right edge and wrapping, forever — no error anywhere, because `speed` is a
+ * real prop and the beat that set it was a working beat.
+ *
+ * The preset is what decides whether a body can move at all. Only `lane` has a
+ * corridor; `chain` and `hub` hold their bodies still, and `field` flies them
+ * along a parabola `layout.py` baked, where the flight time is the arc's
+ * property rather than a `speed`.
+ *
+ * `traveler` is not in this table and does not need to be: a token moves along
+ * its link in every preset, so its `speed` is read wherever it is written.
+ */
+export const SPEED_PRESETS = ["lane"];
+
 export const DRAWABLE_KINDS = Object.keys(DRAWERS);
 
 export function drawElement(ctx, element, view) {
   const drawer = DRAWERS[element.kind];
   if (drawer) {
-    drawer(ctx, element, view);
+    // Applied here rather than inside each drawer, and multiplied rather than
+    // assigned so a drawer's own alpha still means what it says. This is the
+    // second half of the presence ramp: a drawer's gate reads the *eased* value
+    // and so lets a half-arrived element through, and the fraction it lets
+    // through is this one.
+    const presence = view.presence(element.id);
+    if (presence <= 0) return;
+    ctx.save();
+    ctx.globalAlpha *= presence;
+    try {
+      drawer(ctx, element, view);
+    } finally {
+      ctx.restore();
+    }
     return;
   }
   if (PENDING_KINDS.includes(element.kind)) {

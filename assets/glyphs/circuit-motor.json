@@ -1,0 +1,25 @@
+{
+  "domain": "robotics",
+  "ink_box": [
+    1.0,
+    4.0,
+    22.0,
+    16.0
+  ],
+  "name": "circuit-motor",
+  "parts": {
+    "outline": {
+      "d": "M5 12a7 7 0 1 0 14 0a7 7 0 1 0 -14 0 M5 12h-3 M19 12h3 M10 14v-4l2 2l2 -2v4",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:circuit-motor@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

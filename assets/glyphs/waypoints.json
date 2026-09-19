@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    1.0,
+    1.0,
+    22.0,
+    22.0
+  ],
+  "name": "waypoints",
+  "parts": {
+    "outline": {
+      "d": "M10.586 5.414l-5.172 5.172 M18.586 13.414l-5.172 5.172 M6 12h12 M10 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0 M10 4a2 2 0 1 0 4 0a2 2 0 1 0 -4 0 M18 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0 M2 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "lucide:waypoints@1.47.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

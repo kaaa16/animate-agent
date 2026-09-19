@@ -61,6 +61,17 @@ body {
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: var(--magenta);
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+/* The scene count drops the eyebrow's tracking and its colour: "第 2 / 3 幕" with
+   0.22em between four Chinese characters is four separate signs rather than one
+   label, and this is a position in a sequence, not a heading. */
+#scene-count {
+  letter-spacing: 0;
+  color: var(--muted);
 }
 
 h1 {
