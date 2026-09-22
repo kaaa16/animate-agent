@@ -38,6 +38,7 @@ import {
   roundRectPath,
   sectorPath,
 } from "./atoms.js";
+import { emphasisAt } from "./emphasis.js";
 import { drawGlyph } from "./glyphs.js";
 
 /** Font for a primitive's own annotations — tick values, measurements, names. */
@@ -137,16 +138,39 @@ export function drawBody(ctx, element, view) {
   const danger = view.isDangerous(element.id) || view.lookup(element.id, "danger", false) === true;
   const color = toneColor(view.theme, danger ? "danger" : element.tone);
   const scale = view.lookup(element.id, "scale", 1);
-  const size = typeof scale === "number" && scale > 0 ? scale : 1;
+  // The accent, read at draw time and never written back. It is added to the
+  // size and to the angle below rather than replacing either, so a beat that
+  // sets `scale` and a beat that sets `emphasis` compose — and because nothing
+  // here touches `view.live`, the simulation (`behaviors.js`, the proximity
+  // gate, the dodge) never sees it. A body that shakes is not a body that
+  // moved; see `emphasis.js` for why that line is the point.
+  const accent = emphasisAt(view.lookup(element.id, "emphasis", "none"), view.time);
+  const size = (typeof scale === "number" && scale > 0 ? scale : 1) * (1 + accent.scale);
 
   ctx.save();
   applyHighlight(ctx, view.theme, view.highlighted.has(element.id));
   // A body points somewhere, and a beat may turn it. Rotating here rather than
   // in the shape builder keeps the atoms free of state, and it is what makes the
   // baseline's `{"car": {"heading": -30}}` beat — 转向绕行 — visible at all.
-  const heading = rad(view.lookup(element.id, "heading", element.heading ?? 0));
-  ctx.translate(node.x, node.y);
+  //
+  // *About what* is `element.pivot`, and the two-step translate is the standard
+  // way to say it: move to the pivot, turn, move back. For the `(0, 0)` every
+  // role but `arm` is given, the two translates cancel exactly and this is the
+  // rotation about the shape's centre it has always been. `arm` gets its bottom
+  // edge instead, so `heading` swings it from the shoulder rather than spinning
+  // it through its own middle.
+  //
+  // Baked by layout from the role, never sent in `props` — a pivot is a fact
+  // about the kind of thing a body is, and letting a model write one would put a
+  // coordinate back in the prompt through a side door.
+  const heading = rad(view.lookup(element.id, "heading", element.heading ?? 0)) + rad(accent.rotate);
+  const pivot = element.pivot ?? [0, 0];
+  // The accent's displacement rides on `node`, which is the live position. It
+  // is added here and nowhere else, so the pen moves and the body does not.
+  ctx.translate(node.x + accent.dx, node.y + accent.dy);
+  ctx.translate(pivot[0], pivot[1]);
   ctx.rotate(heading);
+  ctx.translate(-pivot[0], -pivot[1]);
 
   if (glyph) {
     // The glyph brings its own geometry and its own styling; the parametric

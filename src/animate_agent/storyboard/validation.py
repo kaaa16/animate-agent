@@ -20,6 +20,7 @@ from animate_agent.knowledge.models import LessonIR
 from animate_agent.rendering.registry import (
     BUTTON_ACTIONS,
     CONSUMABLE_PROPS,
+    EMPHASIS_NAMES,
     KNOWN_OBJECT_PROPS,
     PENDING_ALTERNATIVES,
     PENDING_ROLES,
@@ -36,6 +37,11 @@ from animate_agent.storyboard.models import StoryboardIR, StoryboardScene
 #: Whitespace and punctuation are stripped before comparing key points, because
 #: the model is copying prose out of a lesson and cosmetic drift is not a defect.
 _PUNCT = re.compile(r"[\s，。、；：！？,.;:!?\"'“”‘’（）()【】\[\]—\-…·]+")
+
+#: What a lesson point may be cut on and still count as covered — see
+#: `_point_is_covered`. Deliberately not `：` or `。`: a colon introduces the
+#: point's own label and a full stop ends it, so neither separates two facts.
+_CLAUSE_SEPARATORS = re.compile(r"[、，,;；]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +66,42 @@ class ValidationIssue:
 
 def _normalize(text: str) -> str:
     return _PUNCT.sub("", text).casefold()
+
+
+def _point_is_covered(point: str, present: set[str]) -> bool:
+    """Has this lesson key point landed in a beat?
+
+    True when the point appears whole, **or** when every 、/，-separated clause
+    of it appears as a key point in its own right. The second form is the
+    ordinary case rather than a concession, and it is worth saying why, because
+    the rule used to reject it.
+
+    A lesson point is one *string* but sometimes two *facts*: the sample document
+    "什么是 JSON 文件" produced `缺点：语法严格、不适合写注释`, where the 、 is the
+    source's own list punctuation. Splitting that across two beats is a
+    defensible reading of the lesson and not a loss of coverage — measured
+    against three real chain runs, the model split it in **all three**, writing
+    the identical pair `["缺点：语法严格", "不适合写注释"]` on attempts 1 and 3.
+    A rule the model fails the same way every time is not a rule that teaches it
+    anything; it is a rule that spends a retry and then refuses a document whose
+    animation was, in fact, complete.
+
+    Which is affordable here because a step's `key_points` reach no further than
+    this check. They are the ledger of what the lesson taught that the animation
+    covered — `layout.py` does not time a beat by them and the player never reads
+    them, so how a point was partitioned costs the picture nothing.
+
+    The relaxation is bounded on purpose: each clause must be present as a
+    complete key point. That keeps it to "the two halves were both said" and out
+    of "somewhere in the scene are those characters", which is what a substring
+    test over the concatenated text would have allowed.
+    """
+    if _normalize(point) in present:
+        return True
+    clauses = [clause for clause in _CLAUSE_SEPARATORS.split(point) if _normalize(clause)]
+    if len(clauses) < 2:
+        return False
+    return all(_normalize(clause) in present for clause in clauses)
 
 
 def _document_ref_ids(document: DocumentIR) -> frozenset[str]:
@@ -222,7 +264,9 @@ def _check_lesson_coverage(
     # the string it was supposed to copy verbatim.
     points = {_normalize(point): point for s in covered for point in s.key_points}
     present = {_normalize(point) for step in scene.steps for point in step.key_points}
-    missing_points = [original for key, original in points.items() if key not in present]
+    missing_points = [
+        original for original in points.values() if not _point_is_covered(original, present)
+    ]
     if missing_points:
         issues.append(
             ValidationIssue(
@@ -382,6 +426,35 @@ def _check_tone(value: object, where: str, issues: list[ValidationIssue]) -> Non
     )
 
 
+def _check_emphasis(value: object, where: str, issues: list[ValidationIssue]) -> None:
+    """An `emphasis` the player does not recognise simply does not happen.
+
+    Worse than the `tone` case next door rather than better, and worth saying
+    plainly. A misspelled `tone` still *draws* — in the wrong colour, which is
+    at least a picture somebody can look at and doubt. A misspelled `emphasis`
+    draws the body exactly as it would have been drawn with no emphasis at all:
+    the beat still runs, the object is still on screen, the glow is still there
+    from `highlights`, and the whole reason the beat existed is silently absent.
+
+    `emphasisAt` (`emphasis.js`) answers a name it does not know with `none`,
+    for the reason `toneColor` has a `default:` — the player is handed specs it
+    did not write, and refusing to draw is worse than drawing. Which is exactly
+    why the refusal belongs here, upstream, where there is still a model that
+    can be told the word it wanted is `spring`.
+    """
+    if not isinstance(value, str) or value in EMPHASIS_NAMES:
+        return
+    issues.append(
+        ValidationIssue(
+            "unknown_emphasis",
+            where,
+            f"`{value}` 不是已注册的 emphasis；合法值：{'、'.join(EMPHASIS_NAMES)}。"
+            "写错不会报错——播放器认不出就当没写，这一拍看起来什么都没发生，"
+            "而「强调」本来正是这一拍存在的理由",
+        )
+    )
+
+
 def _check_speed_preset(
     preset: str,
     primitive_name: str | None,
@@ -519,9 +592,12 @@ def _check_roles_and_props(
             )
 
         # Named, not looped: `_check_tone` refuses anything that is not one of
-        # five words, and `readout.text` is a string too.
+        # five words, and `readout.text` is a string too. `emphasis` is the
+        # third prop of that kind, and it is named here for the same reason.
         if "tone" in obj.props:
             _check_tone(obj.props["tone"], f"{obj_where}.props.tone", issues)
+        if "emphasis" in obj.props:
+            _check_emphasis(obj.props["emphasis"], f"{obj_where}.props.emphasis", issues)
 
         glyph = obj.props.get("glyph")
         if isinstance(glyph, str) and glyph not in T2_GLYPH_NAMES:
@@ -737,6 +813,8 @@ def _check_steps(
 
                 if prop == "tone":
                     _check_tone(states[prop], prop_where, issues)
+                if prop == "emphasis":
+                    _check_emphasis(states[prop], prop_where, issues)
 
                 # A beat is a visual beat. `StoryboardStep` already refuses a step
                 # with neither a highlight nor a state; this refuses the harder

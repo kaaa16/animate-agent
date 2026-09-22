@@ -27,6 +27,94 @@ export function easeOutCubic(t) {
   return 1 - Math.pow(1 - t, 3);
 }
 
+/**
+ * The rest of the family, and the reason they are here rather than in a library.
+ *
+ * These are Robert Penner's equations in the normalised form `easings.net`
+ * publishes: `[0, 1] -> [0, 1]`, `f(0) === 0`, `f(1) === 1`. Four of them, not
+ * thirty. A curve with no caller is a curve nobody has looked at, and the rule
+ * this file already keeps for `tween.js` — refuse the dependency, keep the
+ * arithmetic — cuts the other way too: keep the arithmetic you can *check*, and
+ * `tools/player_smoke.mjs` checks every one of these at both ends and for
+ * monotonicity where monotonicity is claimed.
+ *
+ * Which one is wanted is never a decision the model gets to make — see
+ * `prompts.py` on 缓动. The name comes from `emphasis.js`'s table, which is
+ * code, exactly as `tone` names come from `registry.py` and land on colours.
+ */
+export function easeOutQuad(t) {
+  return 1 - (1 - t) * (1 - t);
+}
+
+/**
+ * Overshoot, then settle — the "pop".
+ *
+ * The only curve here that is **not** monotone: it rises past 1 around `t≈0.7`
+ * and comes back down. That is the whole effect, and it is why this one is used
+ * as a *decay* rather than as a progress: `1 - easeOutBack(u)` dips below zero
+ * near the end, so a `pop`-ped scale passes through its normal size on the way
+ * out instead of easing into it. Values outside `[0, 1]` are the point.
+ */
+export function easeOutBack(t) {
+  // The endpoints are pinned rather than computed, and the reason is not
+  // tidiness. The three terms below sum to zero at `t = 0` on paper, and to
+  // `2.22e-16` in binary floating point — which the accent envelope turns into
+  // a body that is permanently a fraction of a pixel from where layout put it.
+  // `tools/player_smoke.mjs` caught exactly that on this curve's first run.
+  // `easeOutElastic` pins them for the same reason; `easeOutQuad`/`easeOutCubic`
+  // land exactly and do not need to.
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  const back = 1.70158;
+  const shifted = t - 1;
+  return 1 + (back + 1) * shifted * shifted * shifted + back * shifted * shifted;
+}
+
+/**
+ * A damped spring, written as a curve. Ringing, then rest.
+ *
+ * `c4 = 2π/3` is what puts the oscillation *after* the first rise rather than
+ * on top of it — the standard amplitude/period pair from `easings.net`, kept
+ * because inventing a nicer-looking one here would make this file the only
+ * place the numbers live.
+ */
+export function easeOutElastic(t) {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  const c4 = (2 * Math.PI) / 3;
+  return Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1;
+}
+
+/** Every curve by name, for the tables that name one. */
+export const EASINGS = {
+  easeOutQuad,
+  easeOutCubic,
+  easeOutBack,
+  easeOutElastic,
+};
+
+/**
+ * A curve by name, or a hard failure.
+ *
+ * Throws rather than falling back, and the asymmetry with `emphasis.js` — which
+ * answers an unknown *emphasis* with "no emphasis" — is deliberate. The two
+ * names arrive from different places: an emphasis name is written by a model
+ * into a spec, and a player handed a spec it did not write should still draw
+ * something; a curve name is written by *this* repo, into the table below, and
+ * a typo in it is a broken preset rather than a document that needs a retry.
+ */
+export function curve(name) {
+  const found = EASINGS[name];
+  if (!found) {
+    throw new Error(
+      `未知缓动曲线 \`${name}\`——` +
+        `已注册的是 ${Object.keys(EASINGS).join("、")}。` +
+        "这个名字应当由 emphasis.js 的表提供，不是从 spec 里读来的",
+    );
+  }
+  return found;
+}
+
 /** The two props a drawer tests with `=== false`, and so the two that may ramp. */
 const PRESENCE_PROPS = ["visible", "enabled"];
 

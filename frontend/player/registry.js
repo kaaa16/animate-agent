@@ -77,7 +77,7 @@ export const PENDING_KINDS = ["region", "wave"];
  * validator will say so, with the list of props that would work instead.
  */
 export const LIVE_PROPS = {
-  body: ["speed", "heading", "scale", "visible", "danger"],
+  body: ["speed", "heading", "scale", "visible", "danger", "emphasis"],
   emitter: ["radius", "enabled"],
   zone: ["radius", "enabled"],
   link: ["active"],

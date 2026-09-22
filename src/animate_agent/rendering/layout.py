@@ -452,7 +452,34 @@ _BODY_SIZES: dict[str, tuple[float, float]] = {
     "device": (72.0, 56.0),
     "agent": (56.0, 56.0),
     "projectile": (28.0, 28.0),
+    # Tall and narrow, because an arm is read from its far end: the shape has to
+    # be long enough that a swing moves something, and thin enough that the near
+    # end does not swallow the pivot it turns about.
+    "arm": (34.0, 96.0),
     "object": (64.0, 48.0),
+}
+
+#: role -> the local point a body turns about, as a fraction of its own box.
+#:
+#: `(0.0, 0.0)` is the centre of the shape, which is what every body did before
+#: this table existed and what a car or a wheel still wants: a body that turns
+#: about its own middle pivots in place. An `arm` wants the other thing — a hinge
+#: at the *shoulder*, which for a box is the middle of its bottom edge — because
+#: an arm pinned through its middle swings both ends at once and reads as a
+#: spinning stick rather than as something reaching for a point.
+#:
+#: Keyed by role and not by a prop, which is the same call `_BODY_SIZES` makes
+#: and the same one `_flight` makes for a throw's duration: where a thing hinges
+#: is a fact about the kind of thing it is, not a number a lesson should have to
+#: state. Decision D3 — 语义给模型，呈现给代码 — and it is also what keeps the
+#: pivot out of reach of a model that would otherwise have to be trusted with a
+#: coordinate.
+#:
+#: Fractions of **what the body draws**, not of its box — see `_drawn_size`. For
+#: every role but `arm` there is nothing to say, because `(0, 0)` is the centre
+#: of the shape in both readings.
+_BODY_PIVOTS: dict[str, tuple[float, float]] = {
+    "arm": (0.0, 0.5),
 }
 
 #: Glyph data lives in `assets/glyphs/` as build-time products of
@@ -1213,6 +1240,12 @@ def _body_size(obj: StoryboardObject) -> tuple[float, float]:
     return _BODY_SIZES.get(obj.role, (64.0, 48.0))
 
 
+def _body_pivot(role: str, drawn_width: float, drawn_height: float) -> tuple[float, float]:
+    """Where this body turns about, in its own local frame (`+y` is down)."""
+    fx, fy = _BODY_PIVOTS.get(role, (0.0, 0.0))
+    return (fx * drawn_width, fy * drawn_height)
+
+
 # --------------------------------------------------------------------------
 # Conversion — one dispatcher on primitive, shared by every preset
 # --------------------------------------------------------------------------
@@ -1249,6 +1282,31 @@ def _glyph_to_draw(obj: StoryboardObject) -> str | None:
     return None
 
 
+def _drawn_size(glyph_name: str | None, width: float, height: float) -> tuple[float, float]:
+    """How big a body actually draws, which is not always how big its box is.
+
+    A body with no glyph fills its box exactly. A body with one does not: the
+    player measures the *ink* against the box by the smaller of the two ratios
+    and centres it, so a glyph whose ink is squarer than the box it was given is
+    drawn smaller than that box, with empty space above and below it.
+
+    Anything that has to line up with the *edge* of a body has to ask this
+    rather than `_body_size`, and the robot arm is the case that makes it
+    concrete. Its ink is 18.5x20 units; given the `arm` box of 34x96 it is drawn
+    34x37, centred. A hinge measured against the box would sit 30 units below
+    the arm it is meant to be bolted to, and the picture would be a six-axis arm
+    swinging about a point in empty space — which reads as "the animation is
+    wrong" and points at nothing in this file.
+    """
+    if glyph_name is None:
+        return (width, height)
+    _, _, ink_width, ink_height = _load_glyph(glyph_name).ink_box
+    if not (ink_width > 0 and ink_height > 0):
+        return (width, height)
+    scale = min(width / ink_width, height / ink_height)
+    return (ink_width * scale, ink_height * scale)
+
+
 def _to_body(
     obj: StoryboardObject,
     box: _Box,
@@ -1258,6 +1316,7 @@ def _to_body(
 ) -> BodyElement:
     width, height = _body_size(obj)
     is_obstacle = obj.role == "obstacle"
+    glyph_name = _glyph_to_draw(obj)
     path, duration = _flight(obj, box, scene, stage, frame)
     return BodyElement(
         id=obj.id,
@@ -1271,7 +1330,9 @@ def _to_body(
         sides=OBSTACLE_SIDES if is_obstacle else 6,
         inner_ratio=OBSTACLE_INNER_RATIO if is_obstacle else 1.0,
         heading=_number(obj, "heading", 0.0),
-        glyph=_glyph_to_draw(obj),
+        # Against what the glyph draws, not against the box: see `_drawn_size`.
+        pivot=_body_pivot(obj.role, *_drawn_size(glyph_name, width, height)),
+        glyph=glyph_name,
         path=path,
         duration=duration,
         # `_props_for`, not the verbatim `dict(obj.props)` this used to carry.

@@ -103,6 +103,24 @@ class BodyElement(_Element):
     inner_ratio: float = Field(default=1.0, gt=0, le=1)
     #: Degrees, clockwise from +x. The car and its lidar fan share it.
     heading: float = 0.0
+    #: The point `heading` turns this body about, in the body's own local frame:
+    #: `(0, 0)` is the centre of the shape and `+y` points down.
+    #:
+    #: `(0, 0)` is not a sentinel — it is a real and common answer, and it is what
+    #: every body did before this field existed. A car turns about its middle and
+    #: looks right doing it. An `arm` turns about its shoulder instead, and that
+    #: difference is the whole of what this carries.
+    #:
+    #: Measured against **what the body draws**, not against `width`/`height`.
+    #: Those two differ whenever a glyph is involved — the player fits the glyph's
+    #: ink into the box and centres it, so a box taller than the ink leaves space
+    #: above and below. Layout answers this with `_drawn_size`, and the field
+    #: carries the result rather than the recipe.
+    #:
+    #: Baked by layout from the object's role, never read from `props`: see
+    #: `_BODY_PIVOTS` in `layout.py` for why a hinge is the code's decision rather
+    #: than a coordinate the model gets to write.
+    pivot: tuple[float, float] = (0.0, 0.0)
     glyph: str | None = None
     #: Where this body goes during playback, when the preset gave it a path.
     #:

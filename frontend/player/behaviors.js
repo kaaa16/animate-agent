@@ -29,6 +29,21 @@
  * throw at that angle would follow; this file only interpolates. That is
  * decision D3 applied to motion: the curve is the code's job, and the player's
  * job is to be somewhere along it at time `t`.
+ *
+ * **`heading` does not steer, and that is a decision, not an oversight.** It
+ * steered once: `x` and `y` decomposed through `cos`/`sin`, with a corridor
+ * clamped to `[0.06, 0.94]` of the stage height as a backstop. The arithmetic
+ * worked and the picture was worse. A constant facing is a *straight line
+ * forever*, so the avoidance car's 转向绕行 beat sent it climbing steadily out
+ * of its lane and then sliding along the ceiling — a drift nobody asked for, on
+ * a beat whose point was a detour. The corridor did not cause that; it was the
+ * arithmetic underneath, and clamping it only decided where the drift stopped.
+ *
+ * The cost of reverting is real and worth naming: 转向绕行 now turns the car's
+ * nose and leaves it driving the way it was already going — a crab walk, with
+ * the arrow pointing at nothing. That is the accepted trade. A lane is a lane:
+ * a body holds its line, and turning is a change of appearance, not of route.
+ * Steering a *route* is what `ballistic` and a baked `path` are for.
  */
 
 import { pointAlong } from "./primitives.js";
@@ -137,10 +152,20 @@ export function createSimulation(scene, stage) {
 
         const speed = lookup(element.id, "speed", null);
         if (typeof speed !== "number") continue;
+        // +x only, whatever `heading` says. See the file docstring: steering by
+        // facing was tried, and a constant facing drifts a body straight out of
+        // its lane.
+        //
+        // `heading` is still read through `lookup` by `drawBody`, so the nose
+        // eases around over `EASE_SECONDS` while the lane does not. The two
+        // disagreeing for half a second is the crab walk, and it is the agreed
+        // behaviour rather than a bug to fix here.
+        //
+        // `y` is left to the dodge in pass 3, which *adds* to whatever is here.
         // Wrap horizontally only: a lane is a corridor, and wrapping y would
         // teleport a car out of its lane.
         node.x = wrap(base.x + this.t * speed * PIXELS_PER_SPEED, stage.width);
-        node.y = base.y + (this.dodge.get(element.id) ?? 0);
+        node.y = base.y;
       }
 
       // 2. proximity gate, for sensing bodies only. Two distances matter and
@@ -195,20 +220,32 @@ export function createSimulation(scene, stage) {
       //    fan detached from the car, and the only symptom was a picture that
       //    still moved. An element that is not a body never dodges, so it has
       //    no business in this loop at all.
+      //
+      //    The dodge is **added** to whatever pass 1 left, not written over it.
+      //    `node.y = base.y + next` reads as equivalent — pass 1 has just run,
+      //    and for a body that only dodges the two agree — but it silently
+      //    discarded the y of every other motion, because it rewrote from the
+      //    *authored* position rather than from the current one. A `field`
+      //    projectile travelled the x of its arc with its y pinned to the
+      //    launch height: a straight line where the lesson drew a parabola,
+      //    correct-looking, and nothing anywhere objected. The bug survived the
+      //    forward pass because it is *invisible* in the case the loop was
+      //    written for — a lane body is at `base.y` after pass 1, so the two
+      //    forms agree for cars and disagree only for things that fly.
       for (const element of scene.elements) {
         if (element.kind !== "body") continue;
-        const base = home.get(element.id);
-        if (base === undefined) continue;
+        const node = live.get(element.id);
+        if (!node) continue;
         const current = this.dodge.get(element.id) ?? 0;
         let target = 0;
         if (this.danger.has(element.id)) {
-          const { above, below } = sideClearance(live.get(element.id), obstacles, live, element.id);
+          const { above, below } = sideClearance(node, obstacles, live, element.id);
           target = above > below ? -MAX_DODGE : MAX_DODGE;
         }
         const next = approach(current, target, DODGE_RATE * dt);
         if (next === 0) this.dodge.delete(element.id);
         else this.dodge.set(element.id, next);
-        live.get(element.id).y = base.y + next;
+        node.y += next;
       }
 
       // 4. attachments follow their anchor — last, so a mounted thing lands on

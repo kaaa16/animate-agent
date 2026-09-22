@@ -139,14 +139,26 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
             "device",
             "projectile",
             "object",
+            "arm",
         ),
-        props=("speed", "heading", "scale", "visible", "danger", "glyph"),
+        props=("speed", "heading", "scale", "visible", "danger", "emphasis", "glyph"),
         relations=(),
-        live_props=("speed", "heading", "scale", "visible", "danger"),
+        live_props=("speed", "heading", "scale", "visible", "danger", "emphasis"),
         note="基础形状由角色决定；`glyph` 是可选的实物图标，写了就画成那个图标"
         "（见下面的字形清单），不写就画基础形状。"
         "`object` 是兜底角色，只在确实没有合适角色时才用——留它是为了让每个被抽出的"
         "对象都有地方去，而不是被硬塞进某个不匹配的域角色。"
+        "**`heading` 只转车头，不改路线**：`lane` 预设里 body 永远沿车道直行，"
+        "`heading` 转的是它**看起来**朝哪，不是它往哪开。想让一个东西真的沿某个"
+        "方向走，那是 `field` 预设的抛物线该干的事，不是靠 `heading` 掰。"
+        "**`arm` 是绕支点转的角色**：它不绕自己的中心转，而是绕本体底边的中点转，"
+        "所以 `heading` 在它身上是一根摆动的臂，不是一次自转。"
+        "要不要用 `arm` 看内容里有没有「绕轴摆动」这件事（机械臂、单摆、指针、杠杆）；"
+        "只是一根静止的杆子，用 `object` 就好。"
+        "**`emphasis` 是「这一拍强调它」**：给一个 body 选一个强调动作，它就会在这一拍"
+        "开头自己动一下（涨缩、抖、晃、摆…），一晃就归位，不改变它在画面里的位置，"
+        "也不影响别的对象。适合「注意看这个」「关键就在这里」这一类节拍——"
+        "比只写 `highlights`（只是发一下光）强。"
         "**`speed` 只在预设 `lane` 里有意义**：其余预设的 body 不靠它移动"
         "（`chain`/`hub`/`generic` 不动，`field` 是按抛物线飞），写了不会让画面变好，"
         "只会让这个对象莫名其妙地飘出去",
@@ -436,6 +448,38 @@ TONE_GLOSSES: tuple[tuple[str, str], ...] = (
 )
 
 TONE_NAMES: tuple[str, ...] = tuple(name for name, _ in TONE_GLOSSES)
+
+
+#: `emphasis` -> the gloss that stands in for it in the prop list.
+#:
+#: The same defect as `tone`, one prop over, and found by asking what `tone`
+#: was for. `tone` answers "which colour", `emphasis` answers "which motion" —
+#: and until now the answer to the second was "none", because the player had no
+#: motion vocabulary at all beyond the two that the *spec* carries (`heading`
+#: and `speed`). A beat could say "this object is the thing to look at" and the
+#: player's whole reply was a glow (`applyHighlight` in `primitives.js`).
+#:
+#: These are words, on purpose, and they are the model's to choose. The
+#: alternative — letting the beat write an amplitude — is the side door
+#: `prompts.py` closes: 不要写任何坐标、像素尺寸、颜色、字号、时长、缓动. An
+#: amplitude and a duration *are* the presentation of an accent, so the beat
+#: gets the word and `emphasis.js` owns the curve, the size and the length.
+#:
+#: `none` is listed rather than left implicit so that a later beat can *switch
+#: an emphasis off*, which is the reason `tone` has `normal`. An absent prop and
+#: an explicit `none` mean the same thing to the player; only one of them can be
+#: written down.
+EMPHASIS_GLOSSES: tuple[tuple[str, str], ...] = (
+    ("none", "不强调"),
+    ("pulse", "脉动：原地涨缩一下"),
+    ("shake", "抖动：左右快速晃几下"),
+    ("wobble", "摇晃：原地转着晃几下"),
+    ("swing", "摆动：绕支点荡开再回来"),
+    ("pop", "弹一下：涨大并微转，带回弹"),
+    ("spring", "弹性：阻尼回弹，收尾带余震"),
+)
+
+EMPHASIS_NAMES: tuple[str, ...] = tuple(name for name, _ in EMPHASIS_GLOSSES)
 
 
 #: The two halves of `drawable`, derived so there is nowhere for a third answer
@@ -864,14 +908,22 @@ def _prop_hint(primitive: str, prop: str) -> str:
 
     Keyed on the prop name rather than on `(primitive, prop)` because `tone`
     belongs to exactly one primitive, and if a second one ever declares it the
-    gloss is still the right gloss.
+    gloss is still the right gloss. `emphasis` extends that from two props to
+    three without changing the arrangement.
     """
     bounds = stage_range(primitive, prop)
     if bounds is not None:
         return f"（{bounds.unit} {bounds.low:g}~{bounds.high:g}）"
     if prop == "tone":
-        return "（" + "、".join(f"{name} {gloss}" for name, gloss in TONE_GLOSSES) + "）"
+        return _glossed(TONE_GLOSSES)
+    if prop == "emphasis":
+        return _glossed(EMPHASIS_GLOSSES)
     return ""
+
+
+def _glossed(glosses: tuple[tuple[str, str], ...]) -> str:
+    """A vocabulary rendered the one way, so the two of them cannot diverge."""
+    return "（" + "、".join(f"{name} {gloss}" for name, gloss in glosses) + "）"
 
 
 def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
@@ -996,13 +1048,24 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
     # chain asked for a glyph zero times. The names were never the problem — a
     # model that has never been told what `package` is for has no reason to
     # prefer it to the rectangle it gets for free.
+    # Every name in this paragraph is a **role**, and every one of them is
+    # interpolated from the table rather than typed. It used to name three
+    # *primitives* instead — `zone` / `readout` / `dimension` — in a sentence
+    # whose whole job is to say what to use, and the model did as it was told:
+    # one real run answered with `role: readout` twelve times, every one of them
+    # an `unknown_role` the retry then had to spend a whole call on. The role
+    # list was printed correctly a few lines above; the paragraph contradicted
+    # it. See `test_the_glyph_paragraph_only_names_roles_you_can_write`.
+    body_roles = "、".join(f"`{role}`" for role in PRIMITIVE_BY_NAME["body"].roles)
     lines.append(
         "字形是**一幅固定的实物线稿**：颜色、线宽、部件都改不了，只能按名字挑。"
         "该不该用的判据是「**这个对象在文档里是不是一个具体的实物**」——"
         "小车、雷达、控制器、服务器、数据包是；"
-        "安全距离、空旷程度、判断结论不是，那些该用 `zone` / `readout` / `dimension`。"
+        "安全距离、空旷程度、判断结论不是，那些该用 "
+        "`safe_distance` / `coverage` / `decision` / `range` 这类描述性的角色。"
         "不写不会错，只是画面更抽象；写对了，那一拍一眼就认得出画的是什么。"
-        "只有 `body` 有这个属性，`emitter`／`zone`／`link`／`traveler`／`readout` 都没有。"
+        f"`glyph` 只对实物类角色有效：{body_roles}；"
+        "`sensor`、`threshold`、`hud`、`topic` 这些描述性的角色没有这个属性，写了也不画。"
     )
     for glyph in T2_GLYPHS:
         lines.append(f"- `{glyph.name}`（{glyph.domain}）：{glyph.note}")

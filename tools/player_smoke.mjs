@@ -27,7 +27,8 @@
 import { readFileSync } from "node:fs";
 
 import { createSimulation } from "../frontend/player/behaviors.js";
-import { EASE_SECONDS, blend, easeOutCubic } from "../frontend/player/easing.js";
+import { EASE_SECONDS, EASINGS, blend, curve, easeOutCubic } from "../frontend/player/easing.js";
+import { EMPHASIS_NAMES, EMPHASIS_SECONDS, emphasisAt } from "../frontend/player/emphasis.js";
 import { drawElement } from "../frontend/player/registry.js";
 import { fitTransform } from "../frontend/player/stage.js";
 
@@ -410,7 +411,22 @@ function main() {
     // a sensor mounted on a driving car is counted as well as the car. Zero is
     // the only value with a meaning, and it is unambiguous.
     let travelled = 0;
+    // And how far anything *turned*, which is a different question from how far
+    // it went and was invisible here until now.
+    //
+    // A body's `heading` is read by the drawer through `lookup`, never written
+    // back into `live`, so a scene that only swings reads as perfectly dead to a
+    // translation-only measure — and an `arm` scene is exactly that: the arm is
+    // hinged at its base and the base does not move. Printed separately rather
+    // than folded into `travelled`, because they are different units and adding
+    // them would invent a number with no meaning.
+    let turned = 0;
+    // And how far an accent moved the pen. A third unit, kept apart for the
+    // same reason: it is drawn, not simulated, so it is in neither of the two
+    // above. See the loop below.
+    let accented = 0;
     let previous = new Map();
+    let previousHeading = new Map();
     const ridden = linkLengths(scene);
     const seconds = scene.steps.reduce((sum, step) => sum + Number(step.duration ?? 0), 0);
     totalSeconds += seconds;
@@ -419,8 +435,14 @@ function main() {
       // that only works at t=0 does not pass by luck. Danger is sampled *during*
       // the run rather than read at the end: the car passes its obstacles and is
       // safe again by then, so the final frame alone would report nothing.
+      // Hoisted out of the frame loop: `lookup` reads through the closure and
+      // never reads `view.time`, which is the one field that would go stale.
+      const beatView = viewFor(scene, simulation, stepIndex, THEME);
       for (let frame = 0; frame < 240; frame += 1) {
-        simulation.update(1 / 60, viewFor(scene, simulation, stepIndex, THEME).lookup);
+        simulation.update(1 / 60, beatView.lookup);
+        // Seconds since this beat began, which is what the player's `sim.t` is
+        // and what an accent is defined against. See the counter below.
+        const beatTime = (frame + 1) / 60;
         for (const id of simulation.danger.keys()) everDanger.add(id);
         // Checked every frame, not just at the end: the detachment only exists
         // while the car is actually dodging, and it is back in its lane by the
@@ -448,6 +470,45 @@ function main() {
           if (startY !== undefined) {
             maxLateral = Math.max(maxLateral, Math.abs(node.y - startY));
           }
+          const heading = Number(beatView.lookup(id, "heading", node.heading ?? 0));
+          const was = previousHeading.get(id);
+          // Degrees, and only the size of the change: a body that swings back
+          // and forth has turned twice as far as one that swung once, which is
+          // the honest reading of "how much turning happened".
+          if (Number.isFinite(was) && Number.isFinite(heading)) {
+            turned += Math.abs(heading - was);
+          }
+          previousHeading.set(id, heading);
+
+          // And how far an *accent* moved the pen, which is the third question
+          // and the one that is invisible to both of the above.
+          //
+          // An accent is deliberately never written back into `live` — that is
+          // the whole of `emphasis.js` — so a scene whose only motion is
+          // `emphasis: "shake"` reads as a still frame to a position-and-heading
+          // measure. The first `emphasis` demo printed "没有任何东西移动过"
+          // over six beats of visible movement, which is the same false warning
+          // the rotation counter above was added to stop, one layer further out.
+          // On the *beat's* clock, not the simulation's, because that is the
+          // clock the player uses: `setStep` restarts `sim.t` at zero, so every
+          // beat gets its own accent. This harness runs one continuous clock
+          // across all the beats (it never resets), so reading `simulation.t`
+          // here would fire an accent once at the top of the scene and never
+          // again — which is what the first run of this counter reported, as
+          // `累计强调=0`. The frame count since the beat began is the same
+          // quantity the player would have.
+          const accent = emphasisAt(beatView.lookup(id, "emphasis", "none"), beatTime);
+          // Three units added together — pixels, degrees and a scale fraction
+          // (as a percentage). That is loose on purpose and it is worth saying
+          // so: nothing reads the number, it exists only to answer "did
+          // anything at all happen", and the threshold below is 1. A metric
+          // that mixed units and was then *interpreted* would be worse than no
+          // metric; one that only has to be non-zero is not.
+          accented +=
+            Math.abs(accent.dx) +
+            Math.abs(accent.dy) +
+            Math.abs(accent.rotate) +
+            Math.abs(accent.scale) * 100;
         }
         previous = positions;
       }
@@ -554,7 +615,8 @@ function main() {
         (seconds > 0 ? `${seconds.toFixed(1)} 秒；` : "") +
         `t=${simulation.t.toFixed(1)}s ` +
         `运行中曾进入危险态的对象=${everDanger.size ? [...everDanger].join(",") : "无"}；` +
-        `累计路程=${travelled.toFixed(1)}px；最大侧移=${maxLateral.toFixed(1)}px`,
+        `累计路程=${travelled.toFixed(1)}px；最大侧移=${maxLateral.toFixed(1)}px；` +
+        `累计转角=${turned.toFixed(0)}°；累计强调=${accented.toFixed(0)}`,
     );
     // Reported, not asserted, on the same grounds as the still-beat count below:
     // a `hub` or `generic` scene has no role that walks, so a motionless one is
@@ -562,7 +624,13 @@ function main() {
     // one scene of the avoidance document that nobody could stand to watch was
     // the one where every number this tool printed looked the same as the
     // reference sample's.
-    if (travelled === 0) {
+    // Turning counts as moving, and so does an accent. An `arm` scene is hinged
+    // at its base and nothing in it ever translates, so a translation-only
+    // reading called it dead while the arm was swinging through 105 degrees;
+    // an `emphasis` scene translates and turns nothing at all, because an
+    // accent is drawn rather than simulated. Both were warnings about scenes
+    // that work, which is worse than no warning.
+    if (travelled === 0 && turned < 1 && accented < 1) {
       console.log(
         "    ⚠️ 这一幕从头到尾没有任何东西移动过——对象只在原地亮灭。" +
           "契约允许，但分镜连着几幕都这样，观众看到的就是一叠会发光的幻灯片",
@@ -601,6 +669,42 @@ function main() {
   const spinFailure = checkSpinningPartsTurn();
   if (spinFailure) {
     console.error(`\n❌ ${spinFailure}`);
+    return 1;
+  }
+
+  const laneFailure = checkALaneBodyHoldsItsLane();
+  if (laneFailure) {
+    console.error(`\n❌ ${laneFailure}`);
+    return 1;
+  }
+
+  const arcFailure = checkAProjectileKeepsItsArc();
+  if (arcFailure) {
+    console.error(`\n❌ ${arcFailure}`);
+    return 1;
+  }
+
+  const pivotFailure = checkABodyTurnsAboutItsPivot();
+  if (pivotFailure) {
+    console.error(`\n❌ ${pivotFailure}`);
+    return 1;
+  }
+
+  const curveFailure = checkEveryEasingCurve();
+  if (curveFailure) {
+    console.error(`\n❌ ${curveFailure}`);
+    return 1;
+  }
+
+  const emphasisFailure = checkEveryEmphasisReturnsToRest();
+  if (emphasisFailure) {
+    console.error(`\n❌ ${emphasisFailure}`);
+    return 1;
+  }
+
+  const accentFailure = checkEmphasisMovesThePenAndNotTheBody();
+  if (accentFailure) {
+    console.error(`\n❌ ${accentFailure}`);
     return 1;
   }
 
@@ -780,6 +884,419 @@ function checkSpinningPartsTurn() {
       `t=4 时 ${doubled.toFixed(3)} rad（随模拟时间线性，可复现）`,
   );
   return null;
+}
+
+/** A body element with the fields `drawBody` and `behaviors.js` reach for. */
+function bodyElement(overrides = {}) {
+  return {
+    id: "car",
+    kind: "body",
+    role: "vehicle",
+    label: "小车",
+    x: 120,
+    y: 310,
+    tone: "normal",
+    props: { speed: 1 },
+    binds: {},
+    shape: "rect",
+    width: 62,
+    height: 40,
+    sides: 6,
+    inner_ratio: 1,
+    heading: 0,
+    glyph: null,
+    path: [],
+    duration: 0,
+    pivot: [0, 0],
+    ...overrides,
+  };
+}
+
+/** A `lane` scene holding one body, with no obstacles and so no danger. */
+function laneScene(element) {
+  return {
+    preset: "lane",
+    attachment: {},
+    thresholds: {},
+    params: {},
+    elements: [element],
+  };
+}
+
+/** A lookup that answers from the element's own authored props. */
+function authoredLookup(element) {
+  return (_id, prop, fallback) => element.props?.[prop] ?? fallback;
+}
+
+/**
+ * Where a body ends up after `seconds` of a lane preset, starting from rest.
+ */
+function travel(element, seconds) {
+  const simulation = createSimulation(laneScene(element), STAGE);
+  simulation.reset();
+  simulation.update(seconds, authoredLookup(element));
+  return simulation.live.get(element.id);
+}
+
+const STAGE = { width: 960, height: 600 };
+
+/** Stage pixels per second at `speed === 1`. Mirrors `behaviors.js`. */
+const PIXELS_PER_SPEED = 90;
+
+/**
+ * A lane body holds its lane, whatever way its nose points.
+ *
+ * This is the inverse of the check that used to sit here, and the inversion is
+ * the whole content of it. `heading` was made to steer — `x`/`y` decomposed
+ * through `cos`/`sin`, with a corridor clamp as a backstop — and the arithmetic
+ * was right while the playback was worse: a constant facing is a straight line
+ * *forever*, so 转向绕行 walked the car up out of its lane and along the ceiling.
+ * Reverted by decision. See the `behaviors.js` docstring for why.
+ *
+ * So what is asserted is the property the revert restores: the travelled
+ * direction is +x and the lane line survives, **for every facing**. A future
+ * change that reintroduces steering fails here by name, instead of being caught
+ * by somebody noticing a drift three beats into a render.
+ *
+ * A remembered-coordinate assertion would not do that. `(587.7, 40.0)` tells you
+ * that *some* arithmetic ran; "y never left the lane, at any angle" tells you
+ * which arithmetic, and it keeps holding if the stage, the speed constant or the
+ * start position ever move.
+ */
+function checkALaneBodyHoldsItsLane() {
+  // 90 is in the list on purpose. It is the crab walk in its purest form — a
+  // car pointing straight down the screen, still driving right — and writing it
+  // down as an *expected* result is how the trade stays visible.
+  for (const heading of [0, -30, 30, 75, -80, 90]) {
+    const element = bodyElement({ heading });
+    const node = travel(element, 3);
+    // 3s at speed 1 is 270 units on a 960-wide stage, so nothing here is near
+    // the horizontal wrap and a failure cannot be blamed on it.
+    const expected = element.x + 3 * PIXELS_PER_SPEED;
+    if (Math.abs(node.x - expected) > 1e-9) {
+      return (
+        `朝向 ${heading}° 时 x 不是沿车道匀速走的：x = ${node.x.toFixed(1)}，` +
+        `应为 ${expected.toFixed(1)}`
+      );
+    }
+    if (node.y !== element.y) {
+      return (
+        `朝向 ${heading}° 时小车离开了车道线：y = ${node.y.toFixed(1)}，` +
+        `作者写的是 ${element.y}` +
+        (heading === 0 ? "（朝向 0 也偏，说明不是朝向的问题）" : "——朝向又驱动位移了")
+      );
+    }
+  }
+
+  console.log(
+    "  ✓ 车道线不受朝向影响：0/-30/30/75/-80/90 度走 3 秒，x 都是 +270、y 都停在 310" +
+      "（转向只转车头、不改路线——这是撤掉的甲，不是漏掉的）",
+  );
+  return null;
+}
+
+/**
+ * A baked arc has to actually be flown, not only travelled along in x.
+ *
+ * This is a defect that was already in the player and not introduced with
+ * `heading`: the clearance pass wrote `node.y = base.y + dodge` for *every*
+ * body, reading from the element's authored position rather than from where
+ * motion had just put it. A `field` projectile therefore crossed the frame at
+ * its launch height, tracing a straight line while `layout.py` had sampled a
+ * parabola for it and the `trace` element drew the parabola underneath.
+ *
+ * Checked by flying one and asking whether y ever left the launch height. A
+ * flat line is the failure, and it is the failure that reports success.
+ */
+function checkAProjectileKeepsItsArc() {
+  const element = bodyElement({
+    id: "ball",
+    role: "projectile",
+    props: {},
+    path: [
+      { x: 100, y: 500 },
+      { x: 300, y: 200 },
+      { x: 500, y: 500 },
+    ],
+    duration: 2,
+    x: 100,
+    y: 500,
+  });
+  const scene = { preset: "field", attachment: {}, thresholds: {}, params: {}, elements: [element] };
+  const simulation = createSimulation(scene, STAGE);
+  simulation.reset();
+
+  let peak = Number.POSITIVE_INFINITY;
+  for (let frame = 0; frame < 60 * 2; frame += 1) {
+    simulation.update(1 / 60, authoredLookup(element));
+    peak = Math.min(peak, simulation.live.get("ball").y);
+  }
+
+  if (!(peak < element.y - 1)) {
+    return (
+      `抛体全程没有离开出手高度：最低 y = ${peak.toFixed(1)}，出手在 y = ${element.y}。` +
+      "它画出来的是一条直线，而 layout 已经为它采样过抛物线了"
+    );
+  }
+  console.log(`  ✓ 抛体真的飞了弧线：出手 y=${element.y}，最高点 y=${peak.toFixed(1)}`);
+  return null;
+}
+
+/**
+ * A body marked as hinged has to turn about the hinge, not about its middle.
+ *
+ * `glyphs.js` has had the standard pivot rotation — translate, rotate,
+ * translate back — since the lidar's sweep arm, but it was reachable only from
+ * a glyph *part*. A body turned about its own centre, which is right for a car
+ * and wrong for an arm: pivot a stick through its middle and it spins, pivot it
+ * at one end and it swings.
+ *
+ * Checked on the recorded calls, because that is where the difference lives.
+ * The two translates bracketing the rotation *are* the pivot, and the pivot is
+ * by definition the point the rotation leaves where it was — for `(0, 0)` the
+ * pair cancels and nothing is said, which is why the vehicle is checked for
+ * exactly that and the arm for exactly not that.
+ */
+function checkABodyTurnsAboutItsPivot() {
+  const drawWith = (element, time) => {
+    const ctx = fakeContext();
+    drawElement(ctx, element, {
+      live: new Map([[element.id, { x: element.x, y: element.y, heading: element.heading }]]),
+      time,
+      theme: THEME,
+      elementById: new Map([[element.id, element]]),
+      obstacleIds: [],
+      obstacleRadius: new Map(),
+      glyphs: {},
+      highlighted: new Set(),
+      isDangerous: () => false,
+      lookup: (_id, prop, fallback) => (prop === "heading" ? element.heading : fallback),
+      presence: () => 1,
+    });
+    return ctx.calls;
+  };
+
+  /** The `translate` immediately before `rotate`, and the one immediately after. */
+  function pivotPair(calls) {
+    const index = calls.findIndex(({ name }) => name === "rotate");
+    if (index <= 0 || index + 1 >= calls.length) return null;
+    const before = calls[index - 1];
+    const after = calls[index + 1];
+    if (before.name !== "translate" || after.name !== "translate") return null;
+    return { before: before.args, after: after.args };
+  }
+
+  const car = bodyElement({ heading: 45, pivot: [0, 0] });
+  const carPair = pivotPair(drawWith(car, 0));
+  if (!carPair) return "车身旋转前后不是一对 translate：支点写法变了";
+  if (carPair.before[0] !== 0 || carPair.before[1] !== 0) {
+    return `车身的支点不是中心，而是 (${carPair.before.join(", ")})——车会绕着车身外面的一点转`;
+  }
+
+  // The arm's pivot is baked by layout as `(0, height / 2)`: the middle of its
+  // bottom edge. Any non-zero point would prove the offset exists; this one
+  // proves it is the shoulder.
+  const arm = bodyElement({ role: "arm", heading: 45, width: 34, height: 96, pivot: [0, 48] });
+  const armPair = pivotPair(drawWith(arm, 0));
+  if (!armPair) return "机械臂旋转前后不是一对 translate：支点写法变了";
+  if (armPair.before[0] !== 0 || armPair.before[1] !== 48) {
+    return `机械臂绕着 (${armPair.before.join(", ")}) 转，而 layout 烘的是 (0, 48)`;
+  }
+  if (armPair.after[0] !== 0 || armPair.after[1] !== -48) {
+    return `机械臂的第二段 translate 是 (${armPair.after.join(", ")})，不是支点的相反数——它不是绕支点转的`;
+  }
+
+  // And it has to be visible in the picture, not only in the offsets: two
+  // headings must produce two different drawings.
+  const still = serializeCalls(drawWith(arm, 0));
+  const swung = serializeCalls(drawWith({ ...arm, heading: 120 }, 0));
+  if (still === swung) {
+    return "机械臂在 45° 与 120° 画出的调用序列完全相同——支点烘好了，但没转到画面上";
+  }
+
+  console.log(
+    "  ✓ 支点旋转：车身绕中心（0, 0），机械臂绕底边中点 (0, 48)，两者都没有画成自转",
+  );
+  return null;
+}
+
+/**
+ * Every curve has to be a curve: 0 at 0, 1 at 1, and monotone if it says so.
+ *
+ * The endpoints are not a formality. `easing.js` uses these two ways — as a
+ * *progress* for a beat transition, and as an *envelope* (`1 - curve(u)`) for
+ * an accent — and both use the endpoints as their guarantee that nothing is
+ * left over. A curve that started at 0.02 would leave a beat permanently 2%
+ * short of the value the spec wrote; one that ended at 0.98 would leave an
+ * accent permanently 2% short of home, which is the permanent-offset failure
+ * `emphasis.js` was written to be incapable of.
+ *
+ * Monotonicity is listed by name rather than assumed, and **both directions are
+ * checked**: the ones named here must be monotone, and the ones not named must
+ * not be. That second half is what stops a new curve from being added and
+ * silently inheriting a property nobody checked — the failure would otherwise
+ * be a `pop` that does not pop.
+ */
+function checkEveryEasingCurve() {
+  const MONOTONE = ["easeOutQuad", "easeOutCubic"];
+
+  for (const [name, fn] of Object.entries(EASINGS)) {
+    if (fn(0) !== 0) return `${name}(0) = ${fn(0)}，不是 0：它会从半路开始`;
+    if (fn(1) !== 1) return `${name}(1) = ${fn(1)}，不是 1：它永远差一点到不了`;
+
+    let previous = -Infinity;
+    let rose = false;
+    let fell = false;
+    for (let i = 0; i <= 20; i += 1) {
+      const value = fn(i / 20);
+      if (value > previous) rose = true;
+      if (value < previous) fell = true;
+      previous = value;
+    }
+    if (MONOTONE.includes(name) && fell) {
+      return `${name} 被列为单调，实际会往回走——顶点会冲过目标再退回来`;
+    }
+    if (!MONOTONE.includes(name) && !fell) {
+      return (
+        `${name} 会冲出 [0, 1] 正是它存在的理由，但它现在是单调的。` +
+        "要么这个曲线名不副实，要么它该被加进 MONOTONE 里"
+      );
+    }
+    if (!rose) return `${name} 全程没上升过`;
+  }
+
+  // An unknown curve name is a broken *table*, not a bad document, and the two
+  // are answered differently on purpose. See `curve()` in `easing.js`.
+  let threw = false;
+  try {
+    curve("banana");
+  } catch {
+    threw = true;
+  }
+  if (!threw) return "curve() 对没注册的名字没有报错——emphasis.js 里写错曲线会静默变成 NaN";
+
+  console.log(
+    `  ✓ 缓动曲线：${Object.keys(EASINGS).length} 条都在 (0,0)/(1,1) 上，` +
+      `${MONOTONE.join("、")} 单调，其余会过冲（那是它们的作用）；名字写错会报错`,
+  );
+  return null;
+}
+
+/**
+ * Every accent has to end where it started, and has to have been somewhere.
+ *
+ * The "back to zero" half is the correction this whole area earned the hard
+ * way: steering by `heading` was arithmetically correct and visually wrong
+ * because a constant facing moves a body forever. An accent that did not decay
+ * to exactly zero would be the same defect with a smaller amplitude — a car
+ * that never quite returns to its lane — so it is asserted at every end: before
+ * the accent starts, at the instant it ends, and long after.
+ *
+ * The "was somewhere" half is the guard on the guard. `emphasisAt` returning
+ * the resting pose for everything would satisfy every assertion above it, and
+ * would mean a misspelled preset, a wrong axis name or an empty `axes` object
+ * shipped as "the accent is implemented". Six motions that do nothing is
+ * exactly the failure mode of a table like this one.
+ */
+function checkEveryEmphasisReturnsToRest() {
+  for (const name of EMPHASIS_NAMES) {
+    for (const t of [0, -1, EMPHASIS_SECONDS, EMPHASIS_SECONDS + 5]) {
+      if (!isRestPose(emphasisAt(name, t))) {
+        const pose = emphasisAt(name, t);
+        return (
+          `\`${name}\` 在 t=${t} 时没有归位（${JSON.stringify(pose)}）——` +
+          "强调会在画面里留下一处永久的偏移"
+        );
+      }
+    }
+    if (name === "none") continue;
+
+    let moved = false;
+    for (let i = 1; i < 20; i += 1) {
+      if (!isRestPose(emphasisAt(name, (EMPHASIS_SECONDS * i) / 20))) moved = true;
+    }
+    if (!moved) return `\`${name}\` 从头到尾都是静止姿势——这个名字挂在表上，但没有动作`;
+  }
+
+  // A name the player does not know is `none`, not a throw: it came from a
+  // spec, and a body without its accent is still a body.
+  if (!isRestPose(emphasisAt("banana", 0.3))) {
+    return "没注册的 emphasis 名没有被当成 none——播放器会画出一个表里没有的姿势";
+  }
+
+  console.log(
+    `  ✓ 强调动作：${EMPHASIS_NAMES.length - 1} 个都在 t=0 与 t=${EMPHASIS_SECONDS}s 归位、` +
+      "中间确实动过；没注册的名字当成 none",
+  );
+  return null;
+}
+
+/**
+ * An accent moves the pen, not the body — checked, not promised.
+ *
+ * This is the distinction `emphasis.js` exists to keep, and it is one line of
+ * code away from being lost: `drawBody` has `view.live` in hand, and writing
+ * the shake back into `node.x` would make the body *actually* shake — which
+ * would then feed `proximity_gate` and the dodge on the next frame, so a car
+ * being emphasised near an obstacle would set off its own danger flag. Nothing
+ * would throw. The picture would even look right.
+ *
+ * So: snapshot the simulation, draw, snapshot again. Drawing may not change a
+ * single live number.
+ */
+function checkEmphasisMovesThePenAndNotTheBody() {
+  const element = bodyElement({ props: { emphasis: "shake" } });
+  const scene = laneScene(element);
+  scene.steps = [{ id: "beat", states: {} }];
+  const simulation = createSimulation(scene, STAGE);
+  simulation.update(0.2, authoredLookup(element));
+
+  const snapshot = () =>
+    JSON.stringify([...simulation.live].map(([id, node]) => [id, node.x, node.y, node.heading]));
+
+  // The resting pose, for comparison. `t = 0` is inside the accent window, so
+  // this is the accent at the instant `shape` is zero — which is also what a
+  // body with no `emphasis` at all draws, and that equivalence is the point of
+  // decay-to-zero rather than a coincidence.
+  simulation.t = 0;
+  const restCalls = serializeCalls(
+    (() => {
+      const ctx = fakeContext();
+      drawElement(ctx, element, viewFor(scene, simulation, 0, THEME));
+      return ctx.calls;
+    })(),
+  );
+
+  let differing = 0;
+  for (let i = 1; i < 18; i += 1) {
+    const t = (EMPHASIS_SECONDS * i) / 18;
+    simulation.t = t;
+    const before = snapshot();
+    const ctx = fakeContext();
+    drawElement(ctx, element, viewFor(scene, simulation, 0, THEME));
+    const after = snapshot();
+    if (before !== after) {
+      return (
+        `画这一拍（t=${t.toFixed(2)}s）的时候改动了 live 里的坐标——` +
+        "强调必须只动画笔，动了身体就会被避障读到"
+      );
+    }
+    if (serializeCalls(ctx.calls) !== restCalls) differing += 1;
+  }
+
+  if (differing === 0) {
+    return "整段强调画出来的调用序列和静止姿势一模一样——算术在动，画面没动";
+  }
+
+  console.log(
+    `  ✓ 强调只动画笔：17 帧里 ${differing} 帧画得和静止姿势不同，` +
+      "live 里的坐标一个都没变",
+  );
+  return null;
+}
+
+function isRestPose(pose) {
+  return pose.dx === 0 && pose.dy === 0 && pose.rotate === 0 && pose.scale === 0;
 }
 
 process.exit(main());
