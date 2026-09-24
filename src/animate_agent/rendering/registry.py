@@ -10,7 +10,7 @@ of them from drifting apart.
 Layers (see `docs/storyboard-milestone.md`):
 
 - **atoms**   — draw-layer shapes; never appear in the contract.
-- **T1 primitives** — the 13 semantic primitives the model may reference.
+- **T1 primitives** — the 17 semantic primitives the model may reference.
 - **macros**  — T2 glyphs and vector decomposition; they *expand into* T1
   primitives rather than being a new primitive kind.
 """
@@ -36,6 +36,23 @@ ATOMS: tuple[str, ...] = (
     "ring",
     "path",
 )
+
+
+#: How many rows a `tree` or a `code` block may hold.
+#:
+#: Declared here rather than in `layout.py`, where the row heights live, because
+#: the two primitive notes below *print* it and a note is built at import time —
+#: `layout` imports this module, so the number cannot travel the other way. That
+#: is the same reason `StageRange` is a record here and `layout` only clamps with
+#: it: the vocabulary states the limit and the drawing obeys it.
+#:
+#: The number is a fit, not a taste. A block's rows are 24~26 stage pixels apart
+#: and the frame is 486 tall, so 16 rows is 380~416 of it — a block that fills the
+#: stage and still leaves the caption strip alone. `layout._block_boxes` refuses
+#: anything that does not fit the room it actually has; this is the ceiling the
+#: model is *told*, so the refusal is a backstop rather than the first it hears
+#: of it.
+BLOCK_ROWS_MAX = 16
 
 
 # --------------------------------------------------------------------------
@@ -227,8 +244,16 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         relations=("of", "component_of"),
         required_relations=("of",),
         live_props=("magnitude", "direction"),
+        # `direction` and not `magnitude`: a magnitude the model forgot still
+        # draws an arrow of the right *shape* at a scene-relative length, which
+        # is what `_vector_lengths` does with every magnitude anyway. A direction
+        # it forgot draws a specific wrong answer, because the layout has to pick
+        # some angle and 0 means rightwards. There is no harmless default here.
+        required_props=("direction",),
         note="箭头；`of` 是它作用在谁身上（必填），component_of 表达分解"
-        "（v0 → v0cosθ + v0sinθ），只有分解出来的分量才需要",
+        "（v0 → v0cosθ + v0sinθ），只有分解出来的分量才需要。"
+        "**`direction` 必须写**：不写会画成一支朝右的箭头，而重力的箭头朝右，"
+        "是在物理课上给出一个错误答案——不是难看，是错",
     ),
     Primitive(
         name="axis",
@@ -288,7 +313,15 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     ),
     Primitive(
         name="readout",
-        roles=("hud", "decision", "caption", "code", "formula"),
+        # `code` used to be one of these, and it moved to the `code` primitive
+        # below when that one landed. A role must map to exactly one primitive —
+        # `ROLE_TO_PRIMITIVE` is a plain dict, so a duplicate would keep whichever
+        # entry came last and drop the other in silence, which is the `span`
+        # argument two paragraphs down told from the third side. The name was
+        # never used by a sample, so nothing on disk changed meaning: it was
+        # handed a plain 14px panel then and it is handed a tokenised, line-numbered
+        # one now.
+        roles=("hud", "decision", "caption", "formula"),
         props=("text", "align", "tone"),
         relations=(),
         # `align` is not here, for the reason `axis.origin` is not: it is settled
@@ -306,6 +339,119 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         live_props=("text", "tone"),
         note="文本面板；公式在这里是构建期渲好的 path，不是可解析文本",
     ),
+    # The only primitive that is drawn **on** another object rather than at a
+    # place of its own. Everything else here is either a thing (`body`) or an
+    # annotation of a relation between things (`dimension` between two, `angle`
+    # between two, `vector` pushing one). A verdict is a judgement of *one*, and
+    # the judgement is the whole content — a ✓ floating with nothing under it
+    # teaches nobody anything.
+    #
+    # Which is why `of` is required rather than optional. It is not a nicety of
+    # the drawing; it is the only thing that says where the mark goes, so it is
+    # the `required_relations` question asked exactly as that field defines it.
+    # The precedent is `trace.of` and `vector.of`.
+    Primitive(
+        name="verdict",
+        roles=("verdict",),
+        props=("mark", "text"),
+        relations=("of",),
+        required_relations=("of",),
+        required_props=("mark",),
+        live_props=("mark", "text"),
+        note=(
+            "对错标记：把一个 ✓ / ✗ / ! 钉在另一个对象上，"
+            "讲「这样是对的、那样是错的」；`of` 指向被判断的那个对象"
+        ),
+    ),
+    # The picture for 「这几种值有什么不同」: one value set large, its type on a
+    # tag beneath it, several of them in a row.
+    #
+    # A primitive of its own rather than a large `readout`, because the *pair* is
+    # the content. `42` alone says nothing about types and `数字` alone says
+    # nothing about values; the card exists to put the two side by side, and that
+    # comparison is the lesson. Both halves are therefore required, for the same
+    # reason `verdict.mark` is: a card drawing only one of them is a card
+    # answering a question the scene did not ask, and nothing on screen says so.
+    Primitive(
+        name="card",
+        roles=("value",),
+        props=("text", "type"),
+        relations=(),
+        required_props=("text", "type"),
+        live_props=("text", "type"),
+        note="值卡片：大字显示一个具体的值，下面挂一个类型标签；讲「这几种值有什么不同」时用它",
+    ),
+    # 嵌套结构树 —— 「谁在谁里面」的那张图。
+    #
+    # The third picture here whose content is *text*, and the reason it is not a
+    # taller `readout`: an outline's shape **is** its content. Which node is under
+    # which is carried by indentation, so the drawing has to read the text as a
+    # structure rather than as a string — handed the same eight lines, a `readout`
+    # draws eight lines and a `tree` draws a hierarchy.
+    #
+    # **缩进大纲, not a node-link diagram**, and that is a measurement rather than
+    # a taste. A tidy tree's width is proportional to its *leaves*: six of them at
+    # a 160-pixel node is the whole 960-pixel stage, and the failure mode is not
+    # "crowded" but "this scene cannot be rendered at all". An outline's width is
+    # bounded by its longest line, whatever its depth. It also shares every metric
+    # with `code` — same monospace stack, same padding, same `_block_boxes` — so
+    # the two are one piece of work rather than two.
+    Primitive(
+        name="tree",
+        roles=("outline", "structure", "directory"),
+        props=("text", "form", "focus", "tone"),
+        relations=(),
+        required_props=("text",),
+        # `text` is deliberately absent, and it is the one prop on this primitive
+        # a reader would expect to find here. A block's box is cut for the text
+        # that is in it, at layout time; a beat that swapped in a longer tree
+        # would draw it out over its own panel, and `drawReadout`'s grow-to-fit
+        # has no counterpart here because two rows of a tree are not one row of a
+        # caption. Swapping the structure a lesson is about is a second scene.
+        #
+        # `form` is absent for a second reason on top of the same one: the five
+        # forms do not merely draw the same box differently, they *size* it
+        # differently — `branch` puts a whole chain on one row and `boxes` spends
+        # height per level — so a beat that changed the form would be drawing
+        # into a panel cut for a different picture.
+        live_props=("focus", "tone"),
+        note=(
+            "结构树：把「谁在谁里面」画出来。`text` 是一段多行文本，"
+            "**一层缩进 2 个空格**，越靠右就越在里面；"
+            "一行写成 `键: 值` 会分开上色（键一个颜色，值按类型）；"
+            "行首可以写一个 `[图标名]`，这一行前面就带个小图标，可用名字见下。"
+            "讲 JSON、配置文件、目录结构、文章大纲这类「一层套一层」的内容时用它。"
+            "`form` 决定画成哪一种，见下面的合法值——"
+            "**同一个结构换个画法观感差很远，挑最贴合你要讲的那件事的那种**。"
+            f"**最多 {BLOCK_ROWS_MAX} 行**，`text` 和 `form` 都只能整体设置一次"
+        ),
+    ),
+    # 代码块. The other half of the same typography, and the one place in this
+    # vocabulary where the *words themselves* are the subject rather than a label
+    # about something else.
+    #
+    # Why the tokenising happens at layout time and not in the player: the spec
+    # carries only numbers and strings (decision D4), and colours are the theme's
+    # (decision D1). So the layout pass splits each line into spans and names what
+    # each one *is*, and the drawer's whole job is to turn a name into a colour.
+    # That is the same split as `tone` and `mark` — semantics settled above, one
+    # lookup below — and it is the arrangement Shiki calls "zero runtime".
+    Primitive(
+        name="code",
+        roles=("listing", "config", "command"),
+        props=("text", "language", "focus", "tone"),
+        relations=(),
+        required_props=("text",),
+        live_props=("focus", "tone"),
+        note=(
+            "代码块：等宽排版的一段源码，左边带行号，按 `language` 分词上色。"
+            "`text` 是多行文本，**每一行都原样画出来**（不折行、不改写）。"
+            '`focus` 是被强调的行号（`"3"` 强调第 3 行，`"2-4"` 强调第 2~4 行），'
+            "被点到的行会垫一条底色带——讲「看这一行」的那一拍就靠它。"
+            "`language` 只影响上色，见下面的合法值。"
+            f"**最多 {BLOCK_ROWS_MAX} 行**，`text` 只能整体设置一次"
+        ),
+    ),
 )
 
 #: role -> primitive name. Built from T1 so the two can never disagree.
@@ -314,6 +460,18 @@ ROLE_TO_PRIMITIVE: dict[str, str] = {
 }
 
 PRIMITIVE_BY_NAME: dict[str, Primitive] = {p.name: p for p in T1_PRIMITIVES}
+
+#: Roles that exist so an extracted object has somewhere to go, not because the
+#: vocabulary has anything to say about what it looks like. See the note on
+#: `body` for why `object` is one.
+#:
+#: Declared here rather than only described in that note because a diagnostic
+#: outside this module now counts them: `tools/check_storyboard.py` reports what
+#: share of a storyboard's cast is a fallback, which is the closest thing this
+#: project has to a measurement of "the vocabulary had no word for what this
+#: document is about". A tool spelling `"object"` itself would go on reporting
+#: zero the day a second fallback role is added.
+FALLBACK_ROLES: frozenset[str] = frozenset({"object"})
 
 #: Every prop and relation name any T1 primitive declares. Used to tell a
 #: misspelled prop apart from one that is real but belongs to another role.
@@ -480,6 +638,218 @@ EMPHASIS_GLOSSES: tuple[tuple[str, str], ...] = (
 )
 
 EMPHASIS_NAMES: tuple[str, ...] = tuple(name for name, _ in EMPHASIS_GLOSSES)
+
+
+#: The gloss that stands in for `vector.direction` in the prop list.
+#:
+#: The third instance of the same defect, and the one with the worst symptom so
+#: far. A misspelled `tone` still draws, in the wrong colour; a misspelled
+#: `emphasis` draws nothing. A *missing* `direction` draws a wrong answer — and
+#: the answer it draws is always the same one, because `_number(obj, "direction",
+#: 0.0)` turns "the model did not say" into 0, and 0 is rightwards.
+#:
+#: Measured, not supposed. Four earlier runs of `data/samples/projectile_motion.md`
+#: wrote `direction` on every vector — `gravity: -90`, `vx: 0`, `vy: 90`,
+#: `v0: 45` — and the fifth wrote none at all, because nothing in the vocabulary
+#: had ever said the prop was there to write. The picture that came out had a
+#: gravity arrow pointing off the right-hand edge of a physics lesson.
+#:
+#: The two numbers that are worth spelling out are the two the convention makes
+#: non-obvious: `0` is horizontal-right and `90` is straight *up*, which is the
+#: opposite of the canvas's y-down sense (`_to_canvas_angle` exists to reconcile
+#: them), and gravity is `-90`. A gloss prints inline on the prop line, so the
+#: rest of the convention is left to the words.
+DIRECTION_GLOSS = "方向角：0 向右、90 向上、-90 向下（重力写 -90）"
+
+
+#: `mark` -> the gloss that stands in for it in the prop list.
+#:
+#: The same shape again, and the one where the wrong word costs the most. `tone`
+#: misspelled still draws; `emphasis` misspelled draws nothing; a `mark`
+#: misspelled would draw the *opposite* — a ✗ is not an absent ✓, it is a claim
+#: that the thing is wrong, and a lesson that says so is worse than one that says
+#: nothing. So the three names are printed, and `unknown_mark` refuses anything
+#: else while there is still a model to retry.
+#:
+#: `warn` is here rather than left out so that 「说不准」 is sayable. The
+#: alternative is a model forced to pick a side it cannot defend, which is how a
+#: two-valued vocabulary starts lying.
+MARK_GLOSSES: tuple[tuple[str, str], ...] = (
+    ("ok", "对：画一个绿色的勾"),
+    ("bad", "错：画一个红色的叉"),
+    ("warn", "存疑：画一个黄色的感叹号"),
+)
+
+MARK_NAMES: tuple[str, ...] = tuple(name for name, _ in MARK_GLOSSES)
+
+
+#: `type` -> the gloss that stands in for it in the prop list.
+#:
+#: The six kinds of value a lesson about 数据类型 actually compares, and the
+#: list is the whole point of the primitive: `card` exists to put six of these
+#: side by side, and a card whose `type` nobody can read is a `readout` in a
+#: bigger font. Printed for the reason the two above are.
+#:
+#: The names are the words a document about JSON already uses, not the Chinese
+#: gloss — the gloss is what the *tag* draws, the name is what the model writes.
+TYPE_GLOSSES: tuple[tuple[str, str], ...] = (
+    ("string", "字符串"),
+    ("number", "数字"),
+    ("boolean", "布尔"),
+    ("null", "空值"),
+    ("object", "对象"),
+    ("array", "数组"),
+)
+
+TYPE_NAMES: tuple[str, ...] = tuple(name for name, _ in TYPE_GLOSSES)
+
+
+#: `language` -> the gloss that stands in for it in the prop list.
+#:
+#: A closed set of three, and the smallness is the point rather than a limitation
+#: to apologise for. The layout pass tokenises with the standard library's own
+#: `tokenize`, which knows exactly one language; `json` is the same tokeniser with
+#: `true`/`false`/`null` read as literals, because JSON's punctuation happens to
+#: be Python's. Nothing else can be coloured, and a `java` that silently drew as
+#: plain text would be the `tone` defect again — a name the vocabulary offered,
+#: whose effect was never wired up.
+#:
+#: So a lesson about another language writes `text` and gets its code drawn
+#: uncoloured, which is what it would have got anyway, and the refusal says so
+#: while there is still a model to retry.
+CODE_LANGUAGES: tuple[tuple[str, str], ...] = (
+    ("python", "Python 代码：关键字、内置函数、字符串、数字、注释各自上色"),
+    ("json", "JSON 片段：字符串、数字、true/false/null 各自上色"),
+    ("text", "别的语言一律选它：原样画出来，不上色"),
+)
+
+CODE_LANGUAGE_NAMES: tuple[str, ...] = tuple(name for name, _ in CODE_LANGUAGES)
+
+
+#: How a `tree` may be drawn, as a closed set with the reason each one exists.
+#:
+#: Five, and they are not five coats on one drawing. They answer two different
+#: questions about the same rows, and which one a lesson picks is a claim about
+#: what it is teaching:
+#:
+#: - `outline` steps depth along x one notch at a time, so the picture stays a
+#:   *list*: it reads top to bottom, and a chain of eight nodes costs eight rows.
+#: - `branch` puts every node of one depth in the same column and lets depth run
+#:   to the right, so a chain of eight costs **one** row. That is the case the
+#:   outline is worst at, and a real config file is usually exactly that shape.
+#: - `mind` is `branch` in different clothes — rounded nodes and curving branches
+#:   instead of right-angle connectors. Same geometry, so choosing between them
+#:   is a question about how the content reads, not about what fits.
+#: - `brace` keeps the outline's rows and wraps each run of siblings in a curly
+#:   brace. It is the one form that *draws* 「这几个是一伙的」.
+#: - `boxes` frames each level so its contents sit inside it — containment as
+#:   geometry. The most direct picture of the idea, and the one with the tightest
+#:   ceiling: a level costs about 36px of height, so four of them is most of the
+#:   frame before a single row is drawn.
+#:
+#: What they have in common is the constraint that makes them a closed set:
+#: **siblings go on `y` and depth goes on `x`**, so width is a function of how
+#: deep the content goes and never of how much of it there is. An earlier round
+#: rejected the node-link tree outright on the measurement that six leaves at
+#: 160px is the whole 960 stage. That measurement is right for spreading leaves
+#: across the available width and wrong for fixing each depth to a column — and
+#: the stage is 960 wide with a block frame narrower still, so the distinction is
+#: the difference between a form that cannot be drawn and one that can.
+TREE_FORMS: tuple[tuple[str, str], ...] = (
+    ("outline", "缩进大纲：一行一个节点，越深越靠右。最能装，也最像一页清单"),
+    ("branch", "横向树：根在左边，一层往右走一格，节点之间连线。又深又窄的东西用它"),
+    ("mind", "思维导图：和横向树同一个摆法，但节点是圆角块、分支是曲线。讲发散用它"),
+    ("brace", "花括号分组：还是竖排的行，但同一层的兄弟被一个花括号括在一起"),
+    ("boxes", "套盒子：每一层画成一个框，东西真装在框里。层数别多，四层就到顶"),
+)
+
+TREE_FORM_NAMES: tuple[str, ...] = tuple(name for name, _ in TREE_FORMS)
+
+
+#: The icons a `tree` row may wear, as a closed set of **glyph names**.
+#:
+#: Written inside `text`, as a leading `[名字]` on the row:
+#:
+#:     器材
+#:       [flask] 小球
+#:       [clock] 计时器
+#:
+#: The names are the glyph names in `assets/glyphs/`, and that is the point
+#: rather than laziness: a friendlier vocabulary (`folder`, `file`) would be a
+#: second name for the same drawing plus a mapping to keep in step with it. The
+#: set is small on purpose — it goes into the prompt, and most of the other
+#: eighty-odd glyphs draw *things* (a car, a magnet, a wind turbine) rather than
+#: marking a row of a structure.
+#:
+#: Why a token in `text` rather than a prop: `text` is one blob and the icons are
+#: per row, so a prop would have to be a parallel list the model keeps in step
+#: with the text it just wrote. That is a second thing to get wrong, and it gets
+#: wrong in the worst way — every icon after the mistake lands one row off. A
+#: leading token cannot drift, because it *is* the row.
+#:
+#: A row that opens with `[` and a name is read as an icon or refused; anything
+#: else is text. That is what keeps a JSON line like `["a", "b"]` ordinary — the
+#: character after its bracket is a quote, not a name.
+TREE_ICONS: tuple[tuple[str, str], ...] = (
+    ("container", "一个容器／文件夹"),
+    ("package", "一个包"),
+    ("sitemap", "一张结构图"),
+    ("hierarchy", "一层套一层的关系"),
+    ("database", "数据库"),
+    ("report", "一份文档"),
+    ("list-check", "一张清单"),
+    ("clipboard-list", "一份记录"),
+    ("network", "网络"),
+    ("server", "服务器"),
+    ("gear", "一项设置"),
+    ("flask", "一次实验"),
+    ("clock", "和时间有关"),
+    ("warning", "需要注意的"),
+)
+
+TREE_ICON_NAMES: tuple[str, ...] = tuple(name for name, _ in TREE_ICONS)
+
+
+#: The gloss that stands in for `focus` in the prop list.
+#:
+#: A *line range* written as a string, and the one prop in the vocabulary whose
+#: legal values cannot be listed — they depend on how many lines the object's own
+#: `text` has. So the shape is printed here and the bound is checked against the
+#: text in `storyboard/validation.py` (`focus_out_of_range`), which is the same
+#: division of labour as `STAGE_RANGES`: this module says what a legal value looks
+#: like, the validator says whether *this* one is legal.
+#:
+#: Both block primitives carry it — a tree is walked through one node per beat
+#: exactly as a listing is walked through one line — so it is glossed here, once.
+FOCUS_GLOSS = '要强调的行：一个数（`"3"`）或一个区间（`"2-4"`），从 1 开始数'
+
+
+#: The kinds a `CodeSpan` may be given, as a closed set.
+#:
+#: The names are Prism's, because the grouping they imply is the one that keeps a
+#: syntax palette down to five colours: comment, keyword (and `literal`, which is
+#: `true`/`false`/`null` — keywords to any reader), builtin, string, number. The
+#: rest — `name`, `operator`, `text` — are deliberately *not* given colours of
+#: their own: an operator is punctuation and punctuation in a sixth hue is noise,
+#: which is the call VS Code's own defaults make. They exist in the set anyway
+#: because the tokeniser produces them and a spec should say what it holds; the
+#: drawer's `default:` is the ordinary text colour.
+#:
+#: Declared here rather than only in `models.py` so that the vocabulary's own
+#: module can be the one place the set is listed. `CodeSpan.kind` is typed against
+#: it and `codeColor` in `primitives.js` mirrors it by hand, held equal by a test —
+#: the same trade `LIVE_PROPS` and `PENDING_KINDS` make.
+CODE_KINDS: tuple[str, ...] = (
+    "text",
+    "name",
+    "keyword",
+    "builtin",
+    "string",
+    "number",
+    "comment",
+    "operator",
+    "literal",
+)
 
 
 #: The two halves of `drawable`, derived so there is nowhere for a third answer
@@ -668,6 +1038,17 @@ T2_GLYPHS: tuple[GlyphDeclaration, ...] = (
     GlyphDeclaration(
         "warning", "general", "tabler:alert-triangle", "警告标志、危险源、要避开的障碍"
     ),
+    # The two halves of 对错对照, and the pair the `verdict` primitive draws. Both
+    # are bare strokes on the same 24-grid as everything else — no enclosing
+    # circle, because `drawVerdict` draws that itself in the semantic colour, and
+    # a glyph with the circle baked in could not be recoloured.
+    #
+    # They are two glyphs rather than one because the *shape* is half of how a
+    # verdict is read. WCAG 2.2 SC 1.4.1 (A) forbids colour as the only channel,
+    # and a tick and a cross differ in shape before they differ in hue — so a
+    # colour-blind viewer reads the same answer off the same picture.
+    GlyphDeclaration("check", "general", "tabler:check", "表示「对、合法、通过」的对勾"),
+    GlyphDeclaration("x", "general", "tabler:x", "表示「错、非法、不通过」的叉号"),
     GlyphDeclaration("lock", "general", "tabler:lock", "锁、加密、权限、被保护"),
     GlyphDeclaration("clock", "general", "tabler:clock", "时钟；讲时序、周期、延迟"),
     GlyphDeclaration("shield", "general", "tabler:shield", "防护、安全边界、容错"),
@@ -854,12 +1235,48 @@ class Preset:
     max_bodies: int
     note: str
 
+    #: The roles a *body* here may have. Empty means "any".
+    #:
+    #: `required_roles` says what the preset cannot be built without. This says
+    #: what it has nowhere to put — the same question from the other side, and
+    #: the side that produced a real wrong picture. A `field` scene's bodies
+    #: were launched if they were not obstacles, so a 抛出点 and a 最高点 roled
+    #: `object` each flew off along their own parabola, taking the two
+    #: `dimension`s anchored to them with it.
+    #:
+    #: Declared here rather than only refused by `_field_boxes` because layout
+    #: runs after the last model call: a refusal there is terminal, with nothing
+    #: fed back and nothing retried. Here it is one retry and a better scene.
+    body_roles: tuple[str, ...] = ()
+
 
 PRESETS: tuple[Preset, ...] = (
     Preset("lane", ("vehicle", "obstacle"), 6, "一维通道上的避障：车、障碍、安全距离"),
     Preset("chain", ("node",), 8, "有向链路：ROS 节点 / API 调用链"),
     Preset("hub", ("node", "endpoint"), 8, "星形拓扑：一个中心与若干叶子"),
-    Preset("field", ("projectile",), 4, "二维场：坐标轴 + 抛体轨迹 + 矢量分解"),
+    Preset(
+        "field",
+        ("projectile",),
+        4,
+        "二维场：坐标轴 + 抛体轨迹 + 矢量分解。**只有 `projectile` 会被射出**——"
+        "「抛出点」「最高点」这类静止标记它还没有位置可给（要落在轨迹或坐标轴上，"
+        "得从抛物线推出来），写了会被打回",
+        body_roles=("projectile",),
+    ),
+    # The preset `card` exists for, and the one that gives a document about data
+    # types a `scene_type` to pick that is not `generic`. That matters more here
+    # than the layout does: a row of cards is placed by `_card_boxes` under every
+    # preset, so the *picture* was never the thing `generic` was costing. What it
+    # was costing is a name — a scene whose only legal answer was 「竖排对象」,
+    # which is exactly the reading `tools/check_storyboard.py` reports as
+    # 「除了 `generic` 没有别的预设可选」.
+    Preset(
+        "values",
+        ("value",),
+        6,
+        "并列对比：几张值卡片横排，每张是一个值加它的类型；"
+        "讲「这几种值有什么不同」「哪种写法合法」时用它",
+    ),
     # Described as the last resort, not as the safe default. It used to read
     # "永远合法的兜底预设", and the model — optimising for "don't get rejected" —
     # picked it for 3 of 5 scenes that `field` could have served. Nothing was
@@ -909,7 +1326,14 @@ def _prop_hint(primitive: str, prop: str) -> str:
     Keyed on the prop name rather than on `(primitive, prop)` because `tone`
     belongs to exactly one primitive, and if a second one ever declares it the
     gloss is still the right gloss. `emphasis` extends that from two props to
-    three without changing the arrangement.
+    three, `direction` to four, `mark` and `type` to six, and the two block
+    props — `language` and `focus` — to eight, without changing the arrangement.
+    `tone` is the one that proves the keying: it began on `readout` alone and is
+    now on four primitives, and it has needed no edit here to follow them.
+
+    `direction` and `focus` are the two that are not a *set* of words but a value,
+    so they are glossed directly rather than through `_glossed` — same
+    parentheses, same inline position, one entry instead of five.
     """
     bounds = stage_range(primitive, prop)
     if bounds is not None:
@@ -918,6 +1342,18 @@ def _prop_hint(primitive: str, prop: str) -> str:
         return _glossed(TONE_GLOSSES)
     if prop == "emphasis":
         return _glossed(EMPHASIS_GLOSSES)
+    if prop == "direction":
+        return f"（{DIRECTION_GLOSS}）"
+    if prop == "mark":
+        return _glossed(MARK_GLOSSES)
+    if prop == "type":
+        return _glossed(TYPE_GLOSSES)
+    if prop == "language":
+        return _glossed(CODE_LANGUAGES)
+    if prop == "form":
+        return _glossed(TREE_FORMS)
+    if prop == "focus":
+        return f"（{FOCUS_GLOSS}）"
     return ""
 
 
@@ -1008,7 +1444,18 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
             live_text = "、".join(f"`{prop}`{_prop_hint(primitive.name, prop)}" for prop in live)
             parts.append(f"可被节拍改变：{live_text}")
         if static:
-            parts.append("只能整体设置一次：" + "、".join(f"`{prop}`" for prop in static))
+            # Glossed as well as the live group, and that is a fix rather than
+            # symmetry for its own sake. `_prop_hint` was only ever asked about a
+            # prop a beat could move, so a closed set of words on a prop set once
+            # — `code.language`, the only one there has ever been — was printed
+            # as a bare name. The names are the whole of what that prop needs to
+            # say, and this is the one place the model is standing when it has to
+            # choose one: the same argument the function's own docstring makes,
+            # one group up.
+            parts.append(
+                "只能整体设置一次："
+                + "、".join(f"`{prop}`{_prop_hint(primitive.name, prop)}" for prop in static)
+            )
         if primitive.required_props:
             parts.append(
                 "**必须填写**（缺了画面照样画得出来，只是画出来的不是它该有的样子）："

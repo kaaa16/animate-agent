@@ -23,6 +23,8 @@ def build_limits() -> StoryboardLimits:
     return StoryboardLimits(
         min_steps=storyboard_settings.min_storyboard_steps,
         max_steps=storyboard_settings.max_storyboard_steps,
+        target_seconds=storyboard_settings.target_seconds,
+        target_band=storyboard_settings.target_band,
         require_visual_objects=storyboard_settings.require_visual_objects,
         require_interactive_demo=storyboard_settings.require_interactive_demo,
         allowed_renderers=animation_settings.allowed_renderers,

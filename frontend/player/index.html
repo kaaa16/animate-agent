@@ -5,10 +5,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>智教 · 分镜播放器</title>
     <link rel="stylesheet" href="./player.css" />
+    <!--
+      The remembered palette is applied before the first paint, not from
+      `player.js`. A module script runs only after the document is parsed, so
+      the page would render the default dark palette for a frame and then swap
+      to a light one: a black flash on every reload, which reads as a bug in the
+      palette rather than as a timing detail.
+
+      There is no validation here and there does not need to be. An id with no
+      `[data-theme]` block in the stylesheet matches nothing and falls through
+      to `:root` — which holds the same palette `resolveTheme` would settle on.
+      `themes.js` owns the ids, the labels and the key; this only has to spell
+      the key the same way, and `test_the_prepaint_script_reads_the_same_key`
+      compares the two strings.
+    -->
+    <script>
+      try {
+        const asked =
+          new URLSearchParams(location.search).get("theme") ||
+          localStorage.getItem("player-theme");
+        if (asked) document.documentElement.dataset.theme = asked;
+      } catch (error) {
+        // A browser that refuses `localStorage` still gets a working page; it
+        // just gets the default palette, which is the right answer anyway.
+      }
+    </script>
   </head>
   <body>
     <header class="bar">
-      <div>
+      <div class="title-block">
         <p class="eyebrow">
           <!-- Which scene of how many. Its own element, not part of the
                eyebrow: `player.js` writes both with `textContent`, so sharing
@@ -19,6 +44,17 @@
         <h1 id="title">载入中…</h1>
         <p class="goal" id="goal"></p>
       </div>
+      <!--
+        Filled in by `player.js` from `themes.js`. The buttons are built rather
+        than written out here so that a palette cannot be added to the
+        stylesheet and left unreachable — there is one list, and it is the one
+        the picker reads.
+      -->
+      <div class="theme-picker">
+        <span class="theme-picker-label">配色</span>
+        <div class="themes" id="themes"></div>
+      </div>
+
       <div class="transport">
         <button type="button" id="prev" title="上一拍（←）">◀</button>
         <button type="button" id="play" title="播放 / 暂停（空格）">暂停</button>

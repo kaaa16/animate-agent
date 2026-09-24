@@ -67,7 +67,21 @@ export function createStage(canvas, stage) {
   };
 }
 
-/** Read the theme once, from the CSS custom properties the stylesheet owns. */
+/**
+ * Read the theme from the CSS custom properties the stylesheet owns.
+ *
+ * Called once at boot and again on every palette change, which is the whole of
+ * what switching costs: nothing caches a colour. Every drawer takes the theme as
+ * an argument and `render` passes `state.theme`, so the next frame is already
+ * drawn in the new palette.
+ *
+ * The fallbacks are the `neon` values, repeated from `player.css` on purpose —
+ * they are what a page with no stylesheet at all still draws, and they are not
+ * dead code: `tools/player_smoke.mjs` stubs `getComputedStyle` and calls this to
+ * build its own theme, so the harness gets the real slots rather than a second
+ * hand-copied list. `tests/unit/test_player_theme.py` checks the names read here
+ * are declared in `player.css`.
+ */
 export function readTheme(element) {
   const styles = getComputedStyle(element);
   const read = (name, fallback) => styles.getPropertyValue(name).trim() || fallback;
@@ -76,6 +90,11 @@ export function readTheme(element) {
     panel: read("--panel", "rgba(13, 18, 28, 0.86)"),
     line: read("--line", "rgba(83, 246, 255, 0.32)"),
     lineHot: read("--line-hot", "#42f7ff"),
+    // Not the same slot as `lineHot`, though on `neon` it holds the same value.
+    // `lineHot` is what an ordinary object is outlined in; this is what a
+    // highlighted one glows, and what the page chrome is coloured with. A light
+    // palette needs the two apart — see the top of `player.css`.
+    accent: read("--accent", "#42f7ff"),
     magenta: read("--magenta", "#ff2fd6"),
     yellow: read("--yellow", "#f4f06d"),
     green: read("--green", "#5dff9c"),

@@ -6,9 +6,39 @@
  * spec's consumers, never in the spec: a colour in a `RenderSpec` could not
  * follow `body.danger` when it flips during playback (decision D1).
  *
- * Those 12 variables are also the theme `stage.js` reads at boot. If a name
- * changes here and not there, `readTheme` falls back to its own literals and the
- * page quietly loses its palette — so the two lists are kept in the same order.
+ * Those variables are also the theme `stage.js` reads — and re-reads every time
+ * the picker changes one, because the canvas has no colours of its own. If a
+ * name changes here and not there, `readTheme` falls back to its own literals
+ * and the page quietly loses its palette, so the two lists are kept in the same
+ * order and `tests/unit/test_player_theme.py` compares the names.
+ *
+ * ## Six palettes
+ *
+ * `:root` is the default (`neon`) and each `[data-theme="…"]` block beside it is
+ * a complete alternative. Complete on purpose, every slot written out: a theme
+ * that omitted one would inherit it from `:root` and be a *nearly* consistent
+ * palette, which looks like a design choice rather than like a missing line.
+ * `themes.js` holds the ids and the labels the picker draws.
+ *
+ * ## `--line-hot` and `--accent` are two jobs
+ *
+ * `--line-hot` is the canvas's "ordinary object" colour: the outline every
+ * element is drawn in unless a beat says otherwise (`toneColor`'s default arm).
+ * `--accent` is what the page chrome highlights with — headings, the current
+ * beat, a hovered button — and the colour a highlighted element glows.
+ *
+ * On `neon` they are the same cyan, which is why nothing about the default
+ * picture changed when they were split apart. On a light palette they have to
+ * differ: an object on paper wants a dark outline, and a heading wants the
+ * bright one. One variable doing both jobs is how a light theme ends up with
+ * orange outlines on everything or with grey headings.
+ *
+ * ## Why the selector is not `:root[data-theme]`
+ *
+ * The picker's own swatches carry the attribute, so each chip is painted by the
+ * palette it offers rather than by a copy of that palette in JavaScript. A
+ * swatch showing a colour its theme does not have would be a lie about the one
+ * thing it exists to show.
  */
 
 :root {
@@ -18,6 +48,7 @@
   --panel-strong: rgba(19, 27, 41, 0.94);
   --line: rgba(83, 246, 255, 0.32);
   --line-hot: #42f7ff;
+  --accent: #42f7ff;
   --magenta: #ff2fd6;
   --yellow: #f4f06d;
   --green: #5dff9c;
@@ -29,6 +60,116 @@
     "Microsoft YaHei", sans-serif;
 }
 
+/* 霓虹 —— `:root` 的同一套，写出来是给色片用的。
+   色片带 `data-theme`，靠的就是下面这些块；`:root` 那条匹配不到它。
+   两边必须逐字相同，`test_the_default_palette_is_the_neon_theme` 盯着。 */
+[data-theme="neon"] {
+  color-scheme: dark;
+  --bg: #07080d;
+  --panel: rgba(13, 18, 28, 0.86);
+  --panel-strong: rgba(19, 27, 41, 0.94);
+  --line: rgba(83, 246, 255, 0.32);
+  --line-hot: #42f7ff;
+  --accent: #42f7ff;
+  --magenta: #ff2fd6;
+  --yellow: #f4f06d;
+  --green: #5dff9c;
+  --text: #ecfbff;
+  --muted: #91a6b8;
+  --danger: #ff5e7a;
+  --shadow: 0 0 28px rgba(66, 247, 255, 0.16);
+}
+
+/* 暮紫 —— 深底，但把青换成薰衣草紫，强调用粉。比霓虹柔，不刺眼。 */
+[data-theme="dusk"] {
+  color-scheme: dark;
+  --bg: #14101c;
+  --panel: rgba(30, 24, 44, 0.86);
+  --panel-strong: rgba(38, 30, 54, 0.94);
+  --line: rgba(195, 166, 255, 0.3);
+  --line-hot: #c3a6ff;
+  --accent: #ff9ecb;
+  --magenta: #ff6fae;
+  --yellow: #ffc978;
+  --green: #7de0a8;
+  --text: #f2ecff;
+  --muted: #a094b8;
+  --danger: #ff6b7f;
+  --shadow: 0 0 28px rgba(195, 166, 255, 0.18);
+}
+
+/* 蓝图 —— 工程图纸：深藏青底、白线、琥珀色标注。 */
+[data-theme="blueprint"] {
+  color-scheme: dark;
+  --bg: #0a1a2f;
+  --panel: rgba(12, 32, 56, 0.88);
+  --panel-strong: rgba(16, 40, 68, 0.95);
+  --line: rgba(214, 236, 255, 0.3);
+  --line-hot: #dceaff;
+  --accent: #ffd166;
+  --magenta: #ff9ecb;
+  --yellow: #ffd166;
+  --green: #7fe0b0;
+  --text: #e8f2ff;
+  --muted: #8fa8c4;
+  --danger: #ff7a6b;
+  --shadow: 0 0 28px rgba(220, 234, 255, 0.14);
+}
+
+/* 纸白 —— 参考片子的那一套：暖白纸、深灰描边、珊瑚橙强调。 */
+[data-theme="paper"] {
+  color-scheme: light;
+  --bg: #fdfbf4;
+  --panel: rgba(255, 255, 255, 0.9);
+  --panel-strong: #ffffff;
+  --line: rgba(60, 56, 54, 0.22);
+  --line-hot: #3c3836;
+  --accent: #f2711c;
+  --magenta: #e2557f;
+  --yellow: #e0a020;
+  --green: #4c9a4c;
+  --text: #3c3836;
+  --muted: #8a817c;
+  --danger: #d94f4f;
+  --shadow: 0 6px 20px rgba(60, 56, 54, 0.12);
+}
+
+/* 薄荷 —— 冷色浅底，青绿强调。 */
+[data-theme="mint"] {
+  color-scheme: light;
+  --bg: #f2fbf7;
+  --panel: rgba(255, 255, 255, 0.9);
+  --panel-strong: #ffffff;
+  --line: rgba(20, 80, 66, 0.2);
+  --line-hot: #14524a;
+  --accent: #0fa678;
+  --magenta: #d9578a;
+  --yellow: #d99a1f;
+  --green: #1f9d63;
+  --text: #143a34;
+  --muted: #6d8b84;
+  --danger: #d14b4b;
+  --shadow: 0 6px 20px rgba(20, 80, 66, 0.12);
+}
+
+/* 樱粉 —— 暖色浅底，玫红强调。 */
+[data-theme="sakura"] {
+  color-scheme: light;
+  --bg: #fff7f9;
+  --panel: rgba(255, 255, 255, 0.92);
+  --panel-strong: #ffffff;
+  --line: rgba(92, 58, 72, 0.18);
+  --line-hot: #5c3a48;
+  --accent: #e2557f;
+  --magenta: #c94b8b;
+  --yellow: #d99a2e;
+  --green: #4f9d78;
+  --text: #4a2b36;
+  --muted: #9c7c88;
+  --danger: #d2405c;
+  --shadow: 0 6px 20px rgba(92, 58, 72, 0.12);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -36,10 +177,22 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at 12% 8%, rgba(66, 247, 255, 0.09), transparent 42%),
-    radial-gradient(circle at 88% 92%, rgba(255, 47, 214, 0.08), transparent 46%),
-    var(--bg);
+  /* Two declarations, not one, and the order is the fallback: the glows below
+     are the palette's own accents mixed down to a wash, and a browser without
+     `color-mix` drops the whole `background-image` line and keeps this one.
+     Losing a decoration is a fine outcome; losing the page is not. */
+  background: var(--bg);
+  background-image:
+    radial-gradient(
+      circle at 12% 8%,
+      color-mix(in srgb, var(--accent) 10%, transparent),
+      transparent 42%
+    ),
+    radial-gradient(
+      circle at 88% 92%,
+      color-mix(in srgb, var(--magenta) 9%, transparent),
+      transparent 46%
+    );
   color: var(--text);
   display: flex;
   flex-direction: column;
@@ -49,10 +202,18 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
+  /* The picker made this row three things wide. Below that the title gives way
+     rather than the buttons — a wrapped header is legible, a squashed one is not. */
+  flex-wrap: wrap;
+  gap: 16px 24px;
   padding: 18px 26px;
   border-bottom: 1px solid var(--line);
   background: var(--panel-strong);
+}
+
+.title-block {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .eyebrow {
@@ -104,8 +265,70 @@ h1 {
 }
 
 .transport button:hover {
-  border-color: var(--line-hot);
+  border-color: var(--accent);
   box-shadow: var(--shadow);
+}
+
+.theme-picker {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.theme-picker-label {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+}
+
+.themes {
+  display: flex;
+  gap: 6px;
+}
+
+.swatch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px 4px 4px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.swatch:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.swatch.is-active {
+  border-color: var(--accent);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+/*
+ * The chip carries the `data-theme` attribute, so everything below resolves
+ * against the palette it is offering rather than against the current one. It is
+ * the theme, showing itself.
+ */
+.swatch-chip {
+  /* A flex item, so this is belt and braces — but a `<span>` with a width is
+     the shape of a bug, and saying `block` costs nothing. */
+  display: block;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1.5px solid var(--line-hot);
+  background: linear-gradient(120deg, var(--bg) 0 50%, var(--accent) 50% 100%);
 }
 
 .layout {
@@ -150,8 +373,11 @@ h1 {
   padding: 14px 16px;
   border-radius: 10px;
   border: 1px solid var(--danger);
-  background: rgba(28, 8, 14, 0.92);
   color: var(--danger);
+  /* Same fallback shape as `body`: the tinted plate where `color-mix` exists,
+     the plain panel where it does not. */
+  background: var(--panel-strong);
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg));
   font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -170,7 +396,7 @@ h2 {
   font-size: 12px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--line-hot);
+  color: var(--accent);
 }
 
 .controls {
@@ -193,11 +419,11 @@ h2 {
 .control input[type="range"] {
   grid-column: 1 / -1;
   width: 100%;
-  accent-color: var(--line-hot);
+  accent-color: var(--accent);
 }
 
 .control output {
-  color: var(--line-hot);
+  color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 
@@ -207,11 +433,12 @@ h2 {
   border: 1px solid var(--line);
   background: var(--panel-strong);
   color: var(--text);
+  font-family: inherit;
   cursor: pointer;
 }
 
 .control-button:hover {
-  border-color: var(--line-hot);
+  border-color: var(--accent);
 }
 
 .steps {
@@ -232,7 +459,7 @@ h2 {
 }
 
 .step.is-current {
-  border-color: var(--line-hot);
+  border-color: var(--accent);
   box-shadow: var(--shadow);
 }
 
@@ -240,7 +467,7 @@ h2 {
   display: block;
   font-size: 12px;
   letter-spacing: 0.08em;
-  color: var(--line-hot);
+  color: var(--accent);
 }
 
 .step-body {

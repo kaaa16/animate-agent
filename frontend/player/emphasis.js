@@ -40,9 +40,13 @@
  *   still frame grabbed from a render, shows the body where layout put it.
  *   An accent that did not return to zero would bake a permanent offset in,
  *   which is the crab walk wearing a different hat.
- * - The whole accent is over in `EMPHASIS_SECONDS`, well inside
- *   `BEAT_MIN_SECONDS` (3.8s, in `layout.py`), so no accent is ever cut off
- *   mid-motion by the beat moving on.
+ * - The whole accent is over in `EMPHASIS_SECONDS`, inside `BEAT_MIN_SECONDS`
+ *   (1.2s, in `layout.py`), so no accent is ever cut off mid-motion by the beat
+ *   moving on. The margin is thinner than it was — that floor used to be 3.8s
+ *   when a beat was a paragraph, and a beat is now a line, so the accent is
+ *   most of a short beat rather than a gesture at the start of a long one.
+ *   Whether 0.9s still reads as an accent at that length is a judgement for
+ *   somebody watching, not for this comment.
  */
 
 import { curve } from "./easing.js";

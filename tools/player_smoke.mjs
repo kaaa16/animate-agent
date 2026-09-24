@@ -27,10 +27,18 @@
 import { readFileSync } from "node:fs";
 
 import { createSimulation } from "../frontend/player/behaviors.js";
-import { EASE_SECONDS, EASINGS, blend, curve, easeOutCubic } from "../frontend/player/easing.js";
+import { CAPTION_MAX_LINES, wrapCaption } from "../frontend/player/caption.js";
+import {
+  EASE_SECONDS,
+  EASINGS,
+  blend,
+  curve,
+  easeOutCubic,
+  handsOver,
+} from "../frontend/player/easing.js";
 import { EMPHASIS_NAMES, EMPHASIS_SECONDS, emphasisAt } from "../frontend/player/emphasis.js";
 import { drawElement } from "../frontend/player/registry.js";
-import { fitTransform } from "../frontend/player/stage.js";
+import { fitTransform, readTheme } from "../frontend/player/stage.js";
 
 /**
  * The context properties `fakeContext` records — and the ones `serializeCalls`
@@ -107,6 +115,11 @@ function fakeContext() {
     // into them rather than converting every coordinate.
     scale: record("scale"),
     quadraticCurveTo: record("quadraticCurveTo"),
+    // A `branch` or `mind` tree draws each edge as one bump curve, which is
+    // `bezierCurveTo` and nothing else. Same reason `quadraticCurveTo` is here:
+    // a context missing a method the drawer calls reports a real spec as a
+    // broken one, and the failure names the primitive rather than the harness.
+    bezierCurveTo: record("bezierCurveTo"),
     fill: record("fill"),
     stroke: record("stroke"),
     fillText: record("fillText"),
@@ -287,6 +300,113 @@ function serializeCalls(calls, { geometryOnly = false } = {}) {
  * nothing is then the correct answer, and the "invisible element" check below
  * would otherwise call a working beat a defect.
  */
+/**
+ * The first `undefined` or `NaN` in what a drawer asked the context to do.
+ *
+ * Every colour a drawer uses comes from the theme and every coordinate from the
+ * spec, and both arrive by name. A misspelled theme slot or a prop that is not
+ * there is not an exception — the canvas accepts `undefined` for `fillStyle`
+ * and keeps whatever style was set last, accepts `NaN` for a coordinate and
+ * skips the path. The picture comes out subtly wrong and nothing says so.
+ *
+ * `serializeCalls` already renders both as text, so the recording is where they
+ * were always visible; this is what looks. It is here rather than only in the
+ * theme check below because the same hole opens on the *prop* path, which no
+ * list of theme slots can cover.
+ */
+function firstHole(calls) {
+  for (const { name, args } of calls) {
+    for (const arg of args) {
+      if (arg === undefined) return `${name}(undefined)`;
+      if (typeof arg === "number" && Number.isNaN(arg)) return `${name}(NaN)`;
+    }
+  }
+  return null;
+}
+
+/**
+ * `readTheme` must hand back a filled slot for every name, not a hole.
+ *
+ * The failure this is built against is a typo in a *fallback* call — the second
+ * argument of `read`, which nothing else in the project reads. `read("--accent",
+ * "")` would look perfectly reasonable in the source and would put `""` into
+ * every highlight on the page.
+ */
+function checkThemeSlots() {
+  const empty = Object.entries(THEME).filter(
+    ([, value]) => typeof value !== "string" || value === "",
+  );
+  if (empty.length > 0) {
+    return (
+      `readTheme 有 ${empty.length} 个槽位是空的：${empty.map(([key]) => key).join("、")}——` +
+      "画布会照常画完，只是那几个颜色是空的"
+    );
+  }
+  console.log(
+    `  ✓ 主题槽位：readTheme 交出 ${Object.keys(THEME).length} 个非空值（默认调色板）`,
+  );
+  return null;
+}
+
+/**
+ * The caption's line-breaking, against a ruler this test owns.
+ *
+ * `wrapCaption` takes its width measurement as a parameter precisely so that
+ * this can exist: a ruler of "every character is 10 wide" makes the breaks
+ * arithmetic, instead of depending on which fonts the machine happens to have.
+ *
+ * What is checked is the two things the band depends on — no line wider than
+ * the band, and never more lines than `layout.py` reserved room for. The second
+ * is the one that would go unnoticed: a caption that outgrows the strip draws
+ * over the picture, and nothing on screen would say the strip was the wrong
+ * size, so it has to be said here.
+ */
+function checkCaptionWrapping() {
+  const ruler = (text) => text.length * 10;
+  const maxWidth = 400;
+  const texts = [
+    "",
+    "抛体被抛出后只受重力",
+    "十".repeat(40),
+    "十".repeat(41),
+    "十".repeat(200),
+    "mixed 中英文 together in one caption line",
+  ];
+
+  for (const text of texts) {
+    const lines = wrapCaption(text, ruler, maxWidth);
+    if (lines.length > CAPTION_MAX_LINES) {
+      return `「${text.slice(0, 12)}…」折出 ${lines.length} 行，超过字幕条留的 ${CAPTION_MAX_LINES} 行`;
+    }
+    for (const line of lines) {
+      if (ruler(line) > maxWidth) {
+        return `「${line.slice(0, 12)}…」宽 ${ruler(line)}，超过 ${maxWidth}——会画出字幕条`;
+      }
+    }
+  }
+
+  // A caption that fits keeps every character: folding is not supposed to be
+  // lossy except at the very end of something too long for the band.
+  const fits = texts[1];
+  const oneLine = wrapCaption(fits, ruler, maxWidth);
+  if (oneLine.length !== 1 || oneLine[0] !== fits) {
+    return `「${fits}」一行放得下，却被折成 ${JSON.stringify(oneLine)}`;
+  }
+
+  // And the too-long case is cut *visibly*. Silently spilling and silently
+  // dropping look the same to whoever reads the code; only one of them shows up
+  // on the page.
+  const spilled = wrapCaption("十".repeat(200), ruler, maxWidth);
+  if (!spilled[spilled.length - 1].endsWith("…")) {
+    return `200 字折出来末尾没有省略号：${spilled.map((line) => line.length).join("/")}`;
+  }
+
+  console.log(
+    `  ✓ 字幕折行：${texts.length} 个样例都没有超宽，最长的一例折成 ${CAPTION_MAX_LINES} 行并截断`,
+  );
+  return null;
+}
+
 function switchedOff(element, view) {
   if (element.kind === "emitter" || element.kind === "zone") {
     return view.lookup(element.id, "enabled", true) === false;
@@ -313,18 +433,23 @@ function brokenAttachment(scene, simulation) {
   return null;
 }
 
-const THEME = {
-  background: "#07080d",
-  panel: "rgba(13,18,28,0.86)",
-  line: "rgba(83,246,255,0.32)",
-  lineHot: "#42f7ff",
-  magenta: "#ff2fd6",
-  yellow: "#f4f06d",
-  green: "#5dff9c",
-  text: "#ecfbff",
-  muted: "#91a6b8",
-  danger: "#ff5e7a",
-};
+/**
+ * The theme every drawer is handed, built by `readTheme` itself.
+ *
+ * It used to be a literal copied out of `stage.js`, which is a second list to
+ * keep in step, and the failure is silent in exactly the wrong direction: a
+ * colour added to `readTheme` and forgotten here reaches the drawer as
+ * `undefined`, and `serializeCalls` writes `shadowColor(undefined)` — which
+ * compares equal to itself, so the "no two beats differ" check below is
+ * perfectly happy with a highlight that draws nothing.
+ *
+ * `readTheme` touches the DOM exactly once, in `getComputedStyle`, so stubbing
+ * that one global makes it hand back its own fallbacks — the `neon` palette.
+ * No element is needed and `null` is passed to say so. `checkThemeSlots` below
+ * then insists none of them came back empty.
+ */
+globalThis.getComputedStyle = () => ({ getPropertyValue: () => "" });
+const THEME = readTheme(null);
 
 /**
  * A per-frame step larger than this is a wrap, not travel.
@@ -533,6 +658,15 @@ function main() {
           );
           return 1;
         }
+        const hole = firstHole(ctx.calls);
+        if (hole) {
+          console.error(
+            `\n❌ ${scene.id} / ${scene.steps[stepIndex].id} / 元素 \`${element.id}\` ` +
+              `(${element.kind}) 有一个参数是空的：${hole}\n` +
+              "   画布不会为此报错。它照常画完，只是画错——多数是主题槽位或属性名写错了",
+          );
+          return 1;
+        }
         beat.push(`${element.id}: ${serializeCalls(ctx.calls)}`);
         shape.push(`${element.id}: ${serializeCalls(ctx.calls, { geometryOnly: true })}`);
         drawn += 1;
@@ -660,9 +794,21 @@ function main() {
       console.log(line);
     }
   }
+  const themeFailure = checkThemeSlots();
+  if (themeFailure) {
+    console.error(`\n❌ ${themeFailure}`);
+    return 1;
+  }
+
   const easingFailure = checkEasing();
   if (easingFailure) {
     console.error(`\n❌ 缓动：${easingFailure}`);
+    return 1;
+  }
+
+  const formsFailure = checkTreeForms(spec.glyphs ?? {});
+  if (formsFailure) {
+    console.error(`\n❌ ${formsFailure}`);
     return 1;
   }
 
@@ -705,6 +851,12 @@ function main() {
   const accentFailure = checkEmphasisMovesThePenAndNotTheBody();
   if (accentFailure) {
     console.error(`\n❌ ${accentFailure}`);
+    return 1;
+  }
+
+  const captionFailure = checkCaptionWrapping();
+  if (captionFailure) {
+    console.error(`\n❌ ${captionFailure}`);
     return 1;
   }
 
@@ -786,8 +938,97 @@ function checkEasing() {
   if (blend("text", "直行", "转向", 0.5) !== "转向") return "文本被过渡了";
   if (blend("state", "待发布", "已发布", 0.5) !== "已发布") return "令牌状态被过渡了";
 
+  // A beat change hands over only when there is a last beat to hand over
+  // *from* — so only while playing, and only to a different beat. The paused
+  // half is the one that was missing, and it is not a one-frame artefact: the
+  // departing values were recorded and the clock was reset, `blend(…, 0)` hands
+  // back the old value by design, and with the clock stopped nothing ever moved
+  // it on. Every later beat drew the first beat's values, for as long as the
+  // player stayed paused. Reported from the browser as a code block that kept
+  // the previous beat's emphasis band no matter which beat was selected.
+  if (handsOver(false, false)) return "暂停时换拍还想做渐变：新值永远到不了，画面停在第一拍";
+  if (!handsOver(true, false)) return "播放时换拍不渐变了：每一拍之间都硬切";
+  if (handsOver(true, true)) return "重放同一拍还做渐变：重置变成慢慢滑回去";
+  if (handsOver(false, true)) return "暂停时重放同一拍做了渐变";
+
   if (!(EASE_SECONDS > 0.3 && EASE_SECONDS < 1.0)) {
     return `EASE_SECONDS = ${EASE_SECONDS}：短于 0.3 秒像抽搐，长于一秒就在花这一拍自己的时间`;
+  }
+  return null;
+}
+
+/**
+ * The five tree forms draw five *different* pictures.
+ *
+ * Layout already measures each form's geometry and the Python tests hold those
+ * numbers. What nothing else can reach is the *wiring*: the drawer dispatches on
+ * `element.form`, so a form whose branch was deleted falls through to the
+ * outline and draws a perfectly plausible picture that is not the one the
+ * vocabulary offered. That is the `tone` defect — a name the model was given
+ * with nothing behind it — at a much larger blast radius, because a whole scene
+ * silently becomes a different picture rather than a colour going wrong.
+ *
+ * Compared as recorded calls rather than as pixels. The harness has no
+ * rasteriser, and "these five drew differently from one another" is the property
+ * that survives not having one — it is exactly the property a missing branch
+ * destroys, and nothing weaker than a real comparison finds it.
+ */
+function checkTreeForms(glyphs) {
+  const icon = "flask" in glyphs ? "flask" : "";
+  const base = {
+    id: "t",
+    kind: "tree",
+    role: "structure",
+    label: "结构",
+    x: 480,
+    y: 300,
+    width: 420,
+    height: 240,
+    focus: "",
+    tone: "normal",
+    lines: [
+      { depth: 0, prefix: "", text: "实验配置", value_kind: "text", icon: "", x: 0, y: 13 },
+      { depth: 1, prefix: "器材: ", text: '"器材"', value_kind: "string", icon, x: 22, y: 39 },
+      { depth: 2, prefix: "", text: "小球", value_kind: "text", icon: "", x: 44, y: 65 },
+      { depth: 1, prefix: "", text: "参数", value_kind: "text", icon: "", x: 22, y: 91 },
+      { depth: 2, prefix: "角度: ", text: "45", value_kind: "number", icon: "", x: 44, y: 117 },
+    ],
+  };
+  // A view built by hand rather than by `viewFor`: this draws one element at one
+  // instant through no simulation at all, and standing up a scene and a
+  // simulation in order to hand it `presence: () => 1` is ceremony around a
+  // constant.
+  const view = {
+    live: null,
+    time: 0,
+    theme: THEME,
+    elementById: new Map(),
+    obstacleIds: [],
+    obstacleRadius: new Map(),
+    glyphs,
+    highlighted: new Set(),
+    isDangerous: () => false,
+    lookup: (id, prop, fallback) => fallback,
+    presence: () => 1,
+  };
+
+  const drawn = new Map();
+  for (const form of ["outline", "branch", "mind", "brace", "boxes"]) {
+    const ctx = fakeContext();
+    try {
+      drawElement(ctx, { ...base, form }, view);
+    } catch (error) {
+      return `结构树的 \`${form}\` 形态画不出来：${error.message}`;
+    }
+    drawn.set(form, JSON.stringify(serializeCalls(ctx.calls, { geometryOnly: true })));
+  }
+  const forms = [...drawn.keys()];
+  for (let i = 0; i < forms.length; i += 1) {
+    for (let j = i + 1; j < forms.length; j += 1) {
+      if (drawn.get(forms[i]) === drawn.get(forms[j])) {
+        return `结构树的 \`${forms[i]}\` 和 \`${forms[j]}\` 画出来一模一样：其中一个形态根本没接线`;
+      }
+    }
   }
   return null;
 }

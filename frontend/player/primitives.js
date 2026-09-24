@@ -1,5 +1,5 @@
 /**
- * Semantic primitives: the 13 T1 kinds from `rendering/registry.py`, drawn.
+ * Semantic primitives: the T1 kinds from `rendering/registry.py`, drawn.
  *
  * Each drawer takes the same four things — a context, the element, the live view
  * (simulation state) and the theme — and produces only the *shape of the thing*.
@@ -43,6 +43,24 @@ import { drawGlyph } from "./glyphs.js";
 
 /** Font for a primitive's own annotations — tick values, measurements, names. */
 const ANNOTATION_FONT = "13px Inter, 'Microsoft YaHei', sans-serif";
+
+/**
+ * How solid the wash inside a sensor's beam is, as a fraction of the element's
+ * own colour.
+ *
+ * The beam used to be filled with a literal `rgba(66, 247, 255, 0.08)` — the
+ * cyan of `neon`'s tone colour at eight percent — so a scene under a light
+ * palette washed its sensor in a colour the palette did not contain, and a
+ * `danger`-toned emitter glowed cyan anyway. Read as a fraction of the colour
+ * the element is already drawn in, `0.08 × 1` is the same 0.08 it always was on
+ * the default theme, and it is the right answer on the other five.
+ *
+ * Applied with `*=` rather than by assigning: `drawElement` sets `globalAlpha`
+ * for the whole element on the way in, and overwriting it here would stop a beam
+ * from fading in with everything else it belongs to. The shimmer below does the
+ * same thing for the same reason.
+ */
+const BEAM_WASH_ALPHA = 0.08;
 
 /**
  * Draw text centred on a point, in the theme's text colour.
@@ -109,10 +127,18 @@ function toneColor(theme, tone) {
   }
 }
 
-/** Highlighted elements glow and draw brighter; everything else stays quiet. */
+/**
+ * Highlighted elements glow and draw brighter; everything else stays quiet.
+ *
+ * The glow is `accent`, not `lineHot`. On `neon` the two are the same cyan, so
+ * nothing about the default picture moved; on `paper` they are not, and the
+ * difference is the point — a highlight is a *flag*, so it should light up in
+ * the colour the theme reserves for flagging things, not in the colour a
+ * hundred uninvolved outlines are already drawn in.
+ */
 function applyHighlight(ctx, theme, highlighted) {
   if (!highlighted) return;
-  ctx.shadowColor = theme.lineHot;
+  ctx.shadowColor = theme.accent;
   ctx.shadowBlur = 18;
 }
 
@@ -270,8 +296,11 @@ export function drawEmitter(ctx, element, view) {
   applyHighlight(ctx, view.theme, view.highlighted.has(element.id));
 
   sectorPath(ctx, node.x, node.y, radius, fov, heading);
-  ctx.fillStyle = "rgba(66, 247, 255, 0.08)";
+  ctx.save();
+  ctx.globalAlpha *= BEAM_WASH_ALPHA;
+  ctx.fillStyle = color;
   ctx.fill();
+  ctx.restore();
 
   // The nearest obstacle inside range, which is the ray the baseline singles out.
   const hit = nearestObstacle(node, view, radius, fov, heading);
@@ -695,6 +724,769 @@ export function drawAngle(ctx, element, view) {
     node.x + Math.cos(mid) * (radius + 18),
     node.y + Math.sin(mid) * (radius + 18),
   );
+}
+
+/**
+ * 对错标记 and 值卡片, in stage units.
+ *
+ * These are the four numbers this file and `layout.py` both have to know, and
+ * they are mirrored here for the same reason `PLAYER`'s constants are: the box
+ * is the layout's to decide and the type inside it is the drawer's to place, so
+ * the two halves of one card are measured in two languages. A test greps this
+ * block against `layout.CARD_*` and `layout.VERDICT_*`, so the day one of them
+ * moves the mismatch is a red test rather than a card whose padding is a
+ * different number from the one its box was cut for.
+ */
+const VERDICT_LABEL_FONT_SIZE = 16;
+const VERDICT_LABEL_GAP = 8;
+const CARD_PADDING = 16;
+const CARD_VALUE_FONT_SIZE = 34;
+const CARD_VALUE_LINE_HEIGHT = 42;
+const CARD_TAG_HEIGHT = 30;
+
+/**
+ * `mark` -> the theme slot the badge is drawn in.
+ *
+ * Three words, three shapes, three colours, and the shapes are the point: a tick
+ * and a cross are different drawings before they are different colours, which is
+ * what WCAG 2.2 SC 1.4.1 asks for. Colour alone would make 对 and 错 the same
+ * picture to a viewer who cannot separate red from green — and 对错 is a case
+ * where reading it backwards is worse than not reading it at all.
+ *
+ * An unrecognised word falls back to `warn`, never to `ok` or `bad`. `warn` is
+ * the only one of the three that asserts nothing about the object, and this
+ * branch is reached only by a spec written by hand: `validation.py` refuses any
+ * other word upstream, while there is still a model to retry.
+ */
+function markColor(theme, mark) {
+  switch (mark) {
+    case "ok":
+      return theme.green;
+    case "bad":
+      return theme.danger;
+    default:
+      return theme.yellow;
+  }
+}
+
+/**
+ * `type` -> the theme slot the tag is drawn in.
+ *
+ * Six kinds onto six distinct slots, and the bijection is the reason this table
+ * exists rather than a single neutral tag colour: a lesson about 数据类型 is
+ * asking the viewer to tell six things apart, and two of them sharing a colour
+ * would undo the one comparison the picture makes.
+ *
+ * Every slot is one the palettes already define, so a tag reads on all six
+ * themes rather than only on the one it was chosen against. That `array` lands
+ * on `accent` is not a collision with the highlight colour — `applyHighlight`
+ * draws a glow (`shadowBlur`), not a fill, so a highlighted card still reads as
+ * highlighted whatever colour its tag happens to be.
+ */
+function typeColor(theme, valueType) {
+  switch (valueType) {
+    case "string":
+      return theme.green;
+    case "number":
+      return theme.yellow;
+    case "boolean":
+      return theme.magenta;
+    case "null":
+      return theme.muted;
+    case "object":
+      return theme.lineHot;
+    case "array":
+      return theme.accent;
+    default:
+      return theme.muted;
+  }
+}
+
+export function drawVerdict(ctx, element, view) {
+  const node = view.live.get(element.id) ?? element;
+  const mark = view.lookup(element.id, "mark", element.mark);
+  const size = element.size || 38;
+  const colour = markColor(view.theme, mark);
+
+  ctx.save();
+  applyHighlight(ctx, view.theme, view.highlighted.has(element.id));
+
+  // The disc is drawn in the mark's colour and the glyph inside it in the page's,
+  // so the two are always at full contrast with each other whatever the palette.
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, size / 2, 0, Math.PI * 2);
+  ctx.fillStyle = colour;
+  ctx.fill();
+  // A ring in the page colour, so a badge pinned over a busy glyph still reads
+  // as a disc rather than as a blot on whatever it landed on.
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = view.theme.background;
+  ctx.stroke();
+
+  // Resolved from the *live* mark, not from a name baked once: a beat may turn
+  // a 存疑 into a 通过, and the two want different outlines. The table travels
+  // with the element because the player has no way to derive a mark's glyph —
+  // and because the spec embeds only the ones a beat can actually reach.
+  const glyphName = element.glyphs?.[mark];
+  const glyph = glyphName ? view.glyphs?.[glyphName] : null;
+  if (glyph) {
+    ctx.save();
+    ctx.translate(node.x, node.y);
+    // A little over half the disc: the check's ink is 17x12 in the icon set's
+    // 24-square and the cross's is 14x14, so a box this size lands both of them
+    // inside the circle with room to spare, and `drawGlyph` fits by the smaller
+    // ratio so neither is stretched.
+    drawGlyph(ctx, glyph, size * 0.55, size * 0.55, view.theme.background, 0);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  const text = view.lookup(element.id, "text", element.text);
+  if (!text) return;
+
+  // Placed on the side `layout.py` picked, which is a position and therefore the
+  // layout's to choose (decision D3). A faint plate under the words for the same
+  // reason `annotation` draws one: a label about an object usually lands on it.
+  ctx.save();
+  ctx.font = `600 ${VERDICT_LABEL_FONT_SIZE}px Inter, 'Microsoft YaHei', sans-serif`;
+  ctx.textBaseline = "middle";
+  const half = size / 2 + VERDICT_LABEL_GAP;
+  const below = element.label_side === "below";
+  const right = element.label_side !== "left";
+  const labelX = below ? node.x : right ? node.x + half : node.x - half;
+  const labelY = below ? node.y + half + VERDICT_LABEL_FONT_SIZE : node.y;
+  ctx.textAlign = below ? "center" : right ? "left" : "right";
+  const width = element.label_width || ctx.measureText(String(text)).width;
+  ctx.save();
+  ctx.fillStyle = view.theme.background;
+  ctx.globalAlpha *= 0.85;
+  const plateX = below ? labelX - width / 2 : right ? labelX : labelX - width;
+  ctx.fillRect(plateX - 3, labelY - 9, width + 6, 18);
+  ctx.restore();
+  ctx.fillStyle = view.theme.text;
+  ctx.fillText(String(text), labelX, labelY);
+  ctx.restore();
+}
+
+export function drawCard(ctx, element, view) {
+  const width = element.width;
+  const height = element.height;
+  const left = element.x - width / 2;
+  const top = element.y - height / 2;
+  const text = String(view.lookup(element.id, "text", element.text) ?? "");
+  // Both read through `lookup`, because both are live: a beat may rewrite the
+  // value, and may rewrite which kind of value it is. The words and the pill for
+  // that kind travel with the element in `tags` — there is nowhere here to
+  // derive them, and a tag that fell back to the declared type would draw the
+  // previous beat's answer under this beat's value.
+  const valueType = String(view.lookup(element.id, "type", element.value_type) ?? "");
+  const tag = element.tags?.[valueType] ?? null;
+  const colour = typeColor(view.theme, valueType);
+
+  ctx.save();
+  applyHighlight(ctx, view.theme, view.highlighted.has(element.id));
+  roundRectPath(ctx, element.x, element.y, width, height, 12);
+  ctx.fillStyle = view.theme.panel;
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = view.theme.line;
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  ctx.fillStyle = view.theme.text;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Monospace in a stack that ends in the system's own, so the figure columns of
+  // two cards line up. A CJK fallback is in it because a card with no `text`
+  // falls back to its `label`, which is Chinese.
+  ctx.font =
+    `${CARD_VALUE_FONT_SIZE}px ui-monospace, SFMono-Regular, Consolas, ` +
+    `'Liberation Mono', 'Microsoft YaHei', monospace`;
+  // `maxWidth` rather than an overflow: the layout caps a card's width so a long
+  // stand-in value (`"aaa..."`, which the model does write for 「某个字符串」)
+  // cannot turn the row into a banner. Squeezing it keeps it inside the box that
+  // was cut for it, which is the failing-in-the-safe-direction half of that.
+  ctx.fillText(text, element.x, top + CARD_PADDING + CARD_VALUE_LINE_HEIGHT / 2, width - CARD_PADDING * 2);
+  ctx.restore();
+
+  if (!tag) return;
+
+  const tagWidth = Math.min(tag.width, width - CARD_PADDING * 2);
+  const tagY = top + CARD_PADDING + CARD_VALUE_LINE_HEIGHT + CARD_TAG_HEIGHT / 2;
+  ctx.save();
+  applyHighlight(ctx, view.theme, view.highlighted.has(element.id));
+  roundRectPath(ctx, element.x, tagY, tagWidth, CARD_TAG_HEIGHT, CARD_TAG_HEIGHT / 2);
+  // A wash of the type's own colour rather than a new fill, so the tag has six
+  // appearances on six palettes without a seventh colour being invented. `*=`
+  // and not `=`: `drawElement` set `globalAlpha` for the whole element on the
+  // way in, and assigning here would stop the card fading with its scene.
+  ctx.save();
+  ctx.fillStyle = colour;
+  ctx.globalAlpha *= 0.18;
+  ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 1;
+  ctx.save();
+  ctx.strokeStyle = colour;
+  ctx.globalAlpha *= 0.55;
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.fillStyle = colour;
+  ctx.font = `600 ${CARD_TAG_HEIGHT - 12}px Inter, 'Microsoft YaHei', sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(tag.text, element.x, tagY);
+  ctx.restore();
+}
+
+/**
+ * 结构树 and 代码块, in stage units.
+ *
+ * The third block of mirrored numbers in this file, and the same trade as the
+ * two above it: `layout.py` cuts the box, this file puts type inside it, and the
+ * two halves of one panel are written in two languages. A test greps this block
+ * against `layout.BLOCK_*`, `layout.CODE_*` and `layout.TREE_*`, so the day one
+ * of them moves the mismatch is a red test rather than a listing whose rows
+ * slowly walk out of the bottom of their own frame.
+ */
+const BLOCK_PADDING = 14;
+const BLOCK_HEADER_HEIGHT = 26;
+const BLOCK_HEADER_FONT_SIZE = 13;
+const CODE_FONT_SIZE = 15;
+const CODE_LINE_HEIGHT = 24;
+const CODE_GUTTER = 34;
+const TREE_FONT_SIZE = 16;
+const TREE_LINE_HEIGHT = 26;
+const TREE_INDENT = 22;
+const TREE_MARKER = 14;
+const TREE_GUIDE_GAP = 5;
+const TREE_ICON_SLOT = 18;
+const TREE_ICON_SIZE = 15;
+const TREE_BRANCH_LABEL_GAP = 10;
+const TREE_PILL_PAD_X = 10;
+const TREE_BRACE_WIDTH = 11;
+const TREE_BRACE_GAP = 7;
+const TREE_BOX_PAD = 18;
+const TREE_BOX_NUDGE = 4;
+
+/**
+ * The monospace stack both blocks draw in, and what makes the two one piece of
+ * typography rather than two.
+ *
+ * A CJK fallback is in the stack for the reason `drawCard`'s has one: half of
+ * what a lesson puts in a tree is Chinese, and a face that has no glyph for it
+ * would leave the fallback to whatever the system picks.
+ */
+const MONO_FONT =
+  "ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', 'Microsoft YaHei', monospace";
+
+/** One function, so the two rows of a block cannot be set in two faces. */
+function blockFont(size) {
+  return `${size}px ${MONO_FONT}`;
+}
+
+/**
+ * `kind` -> the theme slot a span is drawn in.
+ *
+ * Five colours for nine kinds, and the collapse is the decision rather than a
+ * shortcut. Prism's own grouping — which is what the kinds are named after —
+ * puts comment in one, keyword in another, and everything declarative in a
+ * third; and it deliberately leaves operators and punctuation at the body
+ * colour, because a listing whose commas are a sixth hue is *harder* to read,
+ * not richer. VS Code's defaults make the same call.
+ *
+ * The `default:` is the ordinary text colour and it is load-bearing:
+ * `registry.CODE_KINDS` is a closed set that `CodeSpan.kind` is typed against,
+ * so an unrecognised name here means a spec written by hand or by a future
+ * version — and drawing a word in the colour of prose is what a person expects
+ * of a word with nothing said about it.
+ */
+function codeColor(theme, kind) {
+  switch (kind) {
+    case "comment":
+      return theme.muted;
+    case "keyword":
+    case "literal":
+      return theme.magenta;
+    case "builtin":
+      return theme.accent;
+    case "string":
+      return theme.green;
+    case "number":
+      return theme.yellow;
+    default:
+      return theme.text;
+  }
+}
+
+/**
+ * `focus` -> the rows to emphasise, or null for none.
+ *
+ * Parsed here rather than baked as two numbers because `focus` is **live**: a
+ * beat sets it as a prop and the value that arrives on any given frame is
+ * whatever that beat wrote. Four characters of a fixed grammar is data, not
+ * code — decision D4 forbids the player *executing* what a model wrote, not
+ * reading a number out of it.
+ *
+ * A malformed value highlights nothing instead of throwing, which is the same
+ * fallback `toneColor` and `emphasisAt` make and for the same reason:
+ * `focus_not_a_range` and `focus_out_of_range` in `validation.py` refuse these
+ * while there is still a model to retry, so reaching here means a hand-written
+ * spec — and a listing drawn without its emphasis band beats no listing.
+ */
+function parseFocus(value) {
+  const match = /^(\d+)(?:-(\d+))?$/.exec(String(value ?? "").trim());
+  if (match === null) return null;
+  const first = Number(match[1]);
+  const last = match[2] === undefined ? first : Number(match[2]);
+  if (first < 1 || last < first) return null;
+  return { first, last };
+}
+
+/**
+ * The frame both blocks are drawn in: a panel, the object's name in a strip
+ * across the top, and a rule under it.
+ *
+ * Shared because the two primitives differ only in their row height — and
+ * because a second copy of this would be a second place for the padding to drift
+ * from the number `layout.py` cut the box with. The header is a *reservation*
+ * rather than an overlay, the way the caption's strip is: the rows start below
+ * it, so a title never lands on the first line of the thing it names.
+ */
+function drawBlockPanel(ctx, view, element, left, top, width, height, tone) {
+  const theme = view.theme;
+  ctx.save();
+  applyHighlight(ctx, theme, view.highlighted.has(element.id));
+  roundRectPath(ctx, element.x, element.y, width, height, 10);
+  ctx.fillStyle = theme.panel;
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = toneColor(theme, tone);
+  ctx.stroke();
+  ctx.restore();
+
+  if (!element.label) return;
+
+  ctx.save();
+  ctx.font = `600 ${BLOCK_HEADER_FONT_SIZE}px Inter, 'Microsoft YaHei', sans-serif`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = theme.muted;
+  // `maxWidth` rather than an overflow, for the reason `drawCard` clamps its
+  // value: a label is capped at 24 characters by the schema, which at this size
+  // is wider than a block whose content is a single short word — and a title
+  // that runs past its own panel is the one kind of overflow a reader would
+  // blame on the picture rather than on the text.
+  ctx.fillText(element.label, left + BLOCK_PADDING, top + BLOCK_HEADER_HEIGHT / 2, width - BLOCK_PADDING * 2);
+  ctx.restore();
+
+  ctx.save();
+  ctx.strokeStyle = theme.line;
+  // A fraction of the element's own opacity, never a fixed one: `drawElement`
+  // set `globalAlpha` on the way in, and assigning here would stop the rule
+  // fading with the block it belongs to.
+  ctx.globalAlpha *= 0.7;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(left + 1, top + BLOCK_HEADER_HEIGHT);
+  ctx.lineTo(left + width - 1, top + BLOCK_HEADER_HEIGHT);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * The band behind the rows a beat is pointing at.
+ *
+ * A rectangle in the theme's accent at a fraction of its own strength, drawn
+ * *behind* the text and over the panel — the move Manim's highlighted code line
+ * makes with a `SurroundingRectangle`. It is what makes 「看第 3 行」 a beat
+ * rather than a caption: without it the block is a still, and `focus` would be
+ * one more prop the vocabulary offers and nothing reads.
+ */
+function drawFocusBand(ctx, view, left, width, top, lineHeight, focus, count) {
+  if (focus === null) return;
+  const first = Math.max(1, focus.first);
+  const last = Math.min(count, focus.last);
+  if (last < first) return;
+  ctx.save();
+  ctx.fillStyle = view.theme.accent;
+  ctx.globalAlpha *= 0.14;
+  ctx.fillRect(left + 2, top + (first - 1) * lineHeight, width - 4, (last - first + 1) * lineHeight);
+  ctx.restore();
+}
+
+export function drawCode(ctx, element, view) {
+  const width = element.width;
+  const height = element.height;
+  const left = element.x - width / 2;
+  const top = element.y - height / 2;
+  const focus = parseFocus(view.lookup(element.id, "focus", element.focus));
+  const tone = view.lookup(element.id, "tone", element.tone);
+
+  drawBlockPanel(ctx, view, element, left, top, width, height, tone);
+
+  const firstLine = top + BLOCK_HEADER_HEIGHT + BLOCK_PADDING;
+  const codeLeft = left + BLOCK_PADDING + CODE_GUTTER;
+  drawFocusBand(ctx, view, left, width, firstLine, CODE_LINE_HEIGHT, focus, element.lines.length);
+
+  ctx.save();
+  ctx.font = blockFont(CODE_FONT_SIZE);
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  element.lines.forEach((line, index) => {
+    const y = firstLine + (index + 0.5) * CODE_LINE_HEIGHT;
+
+    // The line number, right-aligned in the gutter and drawn in `muted` rather
+    // than in the text colour: it is how a narration says 看第 3 行, not part of
+    // the code, and a listing whose numbers read as loudly as its identifiers is
+    // harder to skim than one with no numbers at all.
+    ctx.fillStyle = view.theme.muted;
+    ctx.textAlign = "right";
+    ctx.fillText(String(index + 1), codeLeft - 10, y);
+
+    ctx.textAlign = "left";
+    let x = codeLeft;
+    for (const span of line.spans) {
+      ctx.fillStyle = codeColor(view.theme, span.kind);
+      ctx.fillText(span.text, x, y);
+      // Advanced by what the browser measured rather than by a baked column.
+      // A monospace face is monospace only for the glyphs it *has*: a Chinese
+      // comment falls through to a full-width fallback, and counting characters
+      // would put every span after it out of step with the one before.
+      x += ctx.measureText(span.text).width;
+    }
+  });
+  ctx.restore();
+}
+
+/** The down triangle that marks a node with children, in its row's marker slot. */
+function branchMarker(ctx, x, y, colour) {
+  const half = 4;
+  ctx.beginPath();
+  ctx.moveTo(x - half, y - half * 0.75);
+  ctx.lineTo(x + half, y - half * 0.75);
+  ctx.lineTo(x, y + half * 0.75);
+  ctx.closePath();
+  ctx.fillStyle = colour;
+  ctx.fill();
+}
+
+/** The small disc a node-link tree puts where a row's words begin. */
+function nodeDot(ctx, x, y, colour) {
+  ctx.beginPath();
+  ctx.arc(x, y, 3, 0, Math.PI * 2);
+  ctx.fillStyle = colour;
+  ctx.fill();
+}
+
+/* ------------------------------------------------------------------ 结构树 */
+
+/**
+ * Where a panel's rows live: a row index in, stage coordinates out.
+ *
+ * `layout.py` bakes `x`/`y` for every form — see `models.TreeElement` for why —
+ * so the arithmetic here is `line.x ?? ...` and the fallback is not decoration: a
+ * spec written before the field existed carries `null`, and `depth *
+ * TREE_INDENT` / `index * TREE_LINE_HEIGHT` is exactly what that older player
+ * drew. One expression rather than a version check, because a branch on which
+ * player wrote the file is one more thing to get wrong about a file that only
+ * has to keep looking the way it already looked.
+ *
+ * The baked numbers are offsets from the panel's text origin; the two `+`s are
+ * what makes them coordinates. Returned as a closure rather than as arguments on
+ * six call sites: five drawers need the same pair of origins, and threading them
+ * through each of those signatures would be five chances to pass `top` where
+ * `left` was meant.
+ */
+function rowPlacer(left, top) {
+  const origin = left + BLOCK_PADDING;
+  const band = top + BLOCK_HEADER_HEIGHT + BLOCK_PADDING;
+  return (line, index) => ({
+    x: origin + (line.x ?? line.depth * TREE_INDENT),
+    y: band + (line.y ?? (index + 0.5) * TREE_LINE_HEIGHT),
+  });
+}
+
+/**
+ * How far a row's words start past its column: the marker slot, and the icon
+ * slot when *any* row in this tree wears one.
+ *
+ * Asked of the whole row list rather than of the row, and it has to be: a level's
+ * words start at one column whether or not the row above happened to carry a
+ * mark. `layout._placed_tree` reserves the same slot by the same test, and the
+ * two disagreeing would put the words of a marked tree one icon-width out of the
+ * box that was cut for them.
+ */
+function treeLead(lines) {
+  return TREE_MARKER + (lines.some((line) => line.icon) ? TREE_ICON_SLOT : 0);
+}
+
+/**
+ * `spans[i]` is one past the last row of row `i`'s subtree.
+ *
+ * Three of the five forms are drawn per *subtree* rather than per row — a brace
+ * and a frame both wrap a run, and a node-link tree needs to know which rows are
+ * a node's descendants. All three read it off the depths, which is why it is not
+ * in the spec: it is a consequence of `depth`, not a third thing to keep in step
+ * with it. The same scan runs in `layout._tree_spans`, and a test holds the two
+ * implementations to the same answers on every fixture.
+ */
+function subtreeSpans(lines) {
+  const spans = new Array(lines.length).fill(lines.length);
+  const stack = [];
+  lines.forEach((line, index) => {
+    while (stack.length > 0 && lines[stack[stack.length - 1]].depth >= line.depth) {
+      spans[stack.pop()] = index;
+    }
+    stack.push(index);
+  });
+  return spans;
+}
+
+/** One row's words, with its icon and its key/value split. */
+function drawTreeRow(ctx, view, line, x, y, lead, glyphs) {
+  const theme = view.theme;
+  const glyph = line.icon ? glyphs[line.icon] : undefined;
+  if (glyph !== undefined) {
+    ctx.save();
+    // Centred in the icon slot, which starts past the marker slot. `drawGlyph`
+    // draws about the current origin, so the translate *is* the placement.
+    ctx.translate(x + TREE_MARKER + TREE_ICON_SLOT / 2, y);
+    drawGlyph(ctx, glyph, TREE_ICON_SIZE, TREE_ICON_SIZE, theme.muted, view.time);
+    ctx.restore();
+  }
+  let cursor = x + lead;
+  if (line.prefix) {
+    ctx.fillStyle = theme.magenta;
+    ctx.fillText(line.prefix, cursor, y);
+    cursor += ctx.measureText(line.prefix).width;
+  }
+  ctx.fillStyle = codeColor(theme, line.value_kind);
+  ctx.fillText(line.text, cursor, y);
+}
+
+/** Every row's words, drawn last so no guide or frame can land on top of them. */
+function drawTreeRows(ctx, element, view, lead, at) {
+  ctx.save();
+  ctx.font = blockFont(TREE_FONT_SIZE);
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  element.lines.forEach((line, index) => {
+    const { x, y } = at(line, index);
+    drawTreeRow(ctx, view, line, x, y, lead, view.glyphs ?? {});
+  });
+  ctx.restore();
+}
+
+/** `outline`: a rule per ancestor level, and a triangle on rows that have children. */
+function drawOutlineGuides(ctx, element, view, at) {
+  const theme = view.theme;
+  ctx.save();
+  ctx.strokeStyle = theme.line;
+  ctx.globalAlpha *= 0.6;
+  ctx.lineWidth = 1;
+  element.lines.forEach((line, index) => {
+    const { x, y } = at(line, index);
+    const half = TREE_LINE_HEIGHT / 2 + 0.5;
+    for (let level = 0; level < line.depth; level += 1) {
+      const guide = x - level * TREE_INDENT - TREE_GUIDE_GAP;
+      ctx.beginPath();
+      ctx.moveTo(guide, y - half);
+      ctx.lineTo(guide, y + half);
+      ctx.stroke();
+    }
+    // A row has children exactly when the row under it is deeper — the one
+    // structural fact a drawer works out for itself, and only the outline needs
+    // to: every other form says it with a brace, a frame or a connector.
+    const next = element.lines[index + 1];
+    if (next !== undefined && next.depth > line.depth) {
+      branchMarker(ctx, x + TREE_MARKER / 2 - 3, y, theme.muted);
+    }
+  });
+  ctx.restore();
+}
+
+/** `brace`: a curly brace around each run of siblings, in the strip reserved left. */
+function drawBraces(ctx, element, view, at) {
+  const theme = view.theme;
+  const spans = subtreeSpans(element.lines);
+  ctx.save();
+  ctx.strokeStyle = theme.line;
+  ctx.globalAlpha *= 0.75;
+  ctx.lineWidth = 1.4;
+  ctx.lineCap = "round";
+  element.lines.forEach((line, index) => {
+    if (spans[index] === index + 1) return; // no children, nothing to group
+    const top = at(line, index).y;
+    const bottom = at(element.lines[spans[index] - 1], spans[index] - 1).y;
+    brace(ctx, at(line, index).x - TREE_BRACE_GAP, top, bottom);
+  });
+  ctx.restore();
+}
+
+/**
+ * A curly brace spanning `top`..`bottom`, opening leftward from `x`.
+ *
+ * Four quadratics and a straight middle, which is Manim's `Brace` shape drawn as
+ * a stroke instead of a filled path. The middle spike points *left*, at the row
+ * whose children this is: the brace wraps a run and says what owns it, and an
+ * owner that is not on the side the spike points to is a brace saying nothing.
+ */
+function brace(ctx, x, top, bottom) {
+  const hook = Math.min(6, (bottom - top) / 3);
+  const middle = (top + bottom) / 2;
+  ctx.beginPath();
+  ctx.moveTo(x + TREE_BRACE_WIDTH, top);
+  ctx.quadraticCurveTo(x, top, x, top + hook);
+  ctx.lineTo(x, middle - hook);
+  ctx.quadraticCurveTo(x, middle, x - TREE_BRACE_WIDTH / 2, middle);
+  ctx.quadraticCurveTo(x, middle, x, middle + hook);
+  ctx.lineTo(x, bottom - hook);
+  ctx.quadraticCurveTo(x, bottom, x + TREE_BRACE_WIDTH, bottom);
+  ctx.stroke();
+}
+
+/**
+ * `branch` and `mind`: a connector from a node to each of its children.
+ *
+ * The same curve d3 calls `bumpX` — `bezierCurveTo(mid, y0, mid, y1, x1, y1)`,
+ * one call per edge. It leaves a node horizontally, so a fan of children reads
+ * as a fan rather than as a sheaf of straight lines.
+ *
+ * The parent's end is the *far side of its label*, measured here rather than
+ * baked: the words are drawn by this file, so this is the only place that knows
+ * how wide they came out, and a connector stopping short of its own label would
+ * be a line through the middle of a word.
+ */
+function drawBranches(ctx, element, view, lead, form, at) {
+  const theme = view.theme;
+  const spans = subtreeSpans(element.lines);
+  ctx.save();
+  ctx.strokeStyle = theme.line;
+  ctx.globalAlpha *= 0.8;
+  ctx.lineWidth = 1.6;
+  ctx.lineCap = "round";
+  ctx.font = blockFont(TREE_FONT_SIZE);
+  element.lines.forEach((line, index) => {
+    if (spans[index] === index + 1) return;
+    const from = at(line, index);
+    const label = ctx.measureText(line.prefix + line.text).width;
+    const tail = form === "mind" ? TREE_PILL_PAD_X : 0;
+    const startX = from.x + lead + label + tail + TREE_BRANCH_LABEL_GAP;
+    for (let child = index + 1; child < spans[index]; child += 1) {
+      if (element.lines[child].depth !== line.depth + 1) continue;
+      const to = at(element.lines[child], child);
+      const mid = (startX + to.x) / 2;
+      ctx.beginPath();
+      ctx.moveTo(startX, from.y);
+      ctx.bezierCurveTo(mid, from.y, mid, to.y, to.x, to.y);
+      ctx.stroke();
+    }
+  });
+  ctx.restore();
+}
+
+/** `branch`'s node dots and `mind`'s rounded nodes, behind the words. */
+function drawNodes(ctx, element, view, lead, form, at) {
+  const theme = view.theme;
+  ctx.save();
+  element.lines.forEach((line, index) => {
+    const { x, y } = at(line, index);
+    if (form !== "mind") {
+      nodeDot(ctx, x + TREE_MARKER / 2, y, theme.muted);
+      return;
+    }
+    ctx.font = blockFont(TREE_FONT_SIZE);
+    ctx.strokeStyle = theme.line;
+    ctx.lineWidth = 1.4;
+    const width = lead + ctx.measureText(line.prefix + line.text).width + TREE_PILL_PAD_X * 2;
+    // Height from the row, not from the font: a pill that outgrew its row would
+    // cross its neighbours, and the row height is what the box was cut against.
+    // `roundRectPath` places a box by its middle, so the pill's left edge is
+    // `x` and its centre is half a width to the right of that.
+    ctx.beginPath();
+    roundRectPath(ctx, x + width / 2, y, width, TREE_LINE_HEIGHT - 4, 9);
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+/**
+ * `boxes`: a frame around each node's whole subtree.
+ *
+ * Two numbers, and they are why this form has the smallest ceiling of the five.
+ * The frame is `TREE_BOX_PAD` outside the rows it holds, and its bottom edge is
+ * pulled back **up** by `TREE_BOX_NUDGE` for every level of descent still below
+ * the node. Without that pull-in a frame and its last child would share a bottom
+ * edge, and two frames drawn on top of each other read as one frame.
+ *
+ * The right edge is shared by every level and is not pulled in at all. That is a
+ * choice, not an oversight: pulling it in would make the innermost frame
+ * narrower than the words inside it, and a common right margin is what a nested
+ * list looks like on paper anyway. `layout.TREE_BOX_PAD` is the number the
+ * pull-in is bounded by, and it is the same number here.
+ */
+function drawBoxes(ctx, element, view, at) {
+  const theme = view.theme;
+  const spans = subtreeSpans(element.lines);
+  const depths = element.lines.map((line) => line.depth);
+  // The panel's own inner right edge, which every frame shares. Not pulled in
+  // per level: an inset right edge would be narrower than the words it holds at
+  // the deepest column, and a common right margin is what a nested list looks
+  // like on paper anyway.
+  const right = element.x + element.width / 2 - BLOCK_PADDING;
+  ctx.save();
+  ctx.strokeStyle = theme.line;
+  ctx.globalAlpha *= 0.9;
+  ctx.lineWidth = 1.4;
+  element.lines.forEach((line, index) => {
+    const span = spans[index];
+    if (span === index + 1) return; // a leaf has nothing inside it to frame
+    const left = at(line, index).x - TREE_BOX_PAD;
+    const last = at(element.lines[span - 1], span - 1).y;
+    const below = Math.max(...depths.slice(index, span)) - line.depth;
+    const top = at(line, index).y - TREE_LINE_HEIGHT / 2 - TREE_BOX_PAD;
+    const bottom = last + TREE_LINE_HEIGHT / 2 + TREE_BOX_PAD - below * TREE_BOX_NUDGE;
+    ctx.beginPath();
+    roundRectPath(ctx, (left + right) / 2, (top + bottom) / 2, right - left, bottom - top, 8);
+    ctx.stroke();
+  });
+  ctx.restore();
+}
+
+/**
+ * A nested structure, in whichever of the five forms it was laid out for.
+ *
+ * `element.form` is read and defaulted rather than trusted, the way every other
+ * spec field is: a file written before the field existed names no form and was
+ * drawn as an outline, so that is what its absence means.
+ */
+export function drawTree(ctx, element, view) {
+  const width = element.width;
+  const height = element.height;
+  const left = element.x - width / 2;
+  const top = element.y - height / 2;
+  const focus = parseFocus(view.lookup(element.id, "focus", element.focus));
+  const tone = view.lookup(element.id, "tone", element.tone);
+  const form = element.form ?? "outline";
+  const lead = treeLead(element.lines);
+  const at = rowPlacer(left, top);
+
+  drawBlockPanel(ctx, view, element, left, top, width, height, tone);
+
+  const firstLine = top + BLOCK_HEADER_HEIGHT + BLOCK_PADDING;
+  drawFocusBand(ctx, view, left, width, firstLine, TREE_LINE_HEIGHT, focus, element.lines.length);
+
+  if (form === "boxes") drawBoxes(ctx, element, view, at);
+  else if (form === "branch" || form === "mind") {
+    drawBranches(ctx, element, view, lead, form, at);
+    drawNodes(ctx, element, view, lead, form, at);
+  } else if (form === "brace") drawBraces(ctx, element, view, at);
+  else drawOutlineGuides(ctx, element, view, at);
+
+  drawTreeRows(ctx, element, view, lead, at);
 }
 
 /** The point `progress` of the way along a polyline, in stage coordinates. */

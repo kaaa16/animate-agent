@@ -39,13 +39,18 @@ the only reason M1 (`legacy.py`) was built before this module.
 
 from __future__ import annotations
 
+import builtins
+import io
+import keyword
 import math
+import re
+import tokenize
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import ValidationError
 
@@ -53,6 +58,12 @@ from animate_agent.rendering.models import (
     AngleElement,
     AxisElement,
     BodyElement,
+    CardElement,
+    CardTag,
+    CodeElement,
+    CodeKind,
+    CodeLine,
+    CodeSpan,
     DimensionElement,
     EmitterElement,
     LinkElement,
@@ -66,13 +77,24 @@ from animate_agent.rendering.models import (
     RenderStep,
     TraceElement,
     TravelerElement,
+    TreeElement,
+    TreeForm,
+    TreeLine,
+    TreeValueKind,
     VectorElement,
+    VerdictElement,
     ZoneElement,
 )
 from animate_agent.rendering.registry import (
+    BLOCK_ROWS_MAX,
+    CODE_LANGUAGE_NAMES,
+    MARK_NAMES,
     PENDING_ALTERNATIVES,
     PENDING_PRIMITIVES,
     ROLE_TO_PRIMITIVE,
+    TREE_FORM_NAMES,
+    TREE_ICON_NAMES,
+    TYPE_GLOSSES,
     Glyph,
     stage_range,
 )
@@ -163,6 +185,17 @@ class _Frame:
         return max([self.left, *[edge + PANEL_CLEARANCE for edge in edges]])
 
 
+def _caption_height(stage: RenderStage) -> float:
+    """How tall the caption's strip is. One function, so the frame that gives it
+    up and the gate that refuses to draw in it cannot disagree."""
+    return stage.height * CAPTION_BAND_RATIO
+
+
+def _caption_top(stage: RenderStage) -> float:
+    """The highest y the picture may reach — above the caption's strip."""
+    return stage.height - _caption_height(stage)
+
+
 def _frame(stage: RenderStage, panels: dict[str, _Box]) -> _Frame:
     margin_x = stage.width * STAGE_MARGIN_RATIO
     margin_y = stage.height * STAGE_MARGIN_RATIO
@@ -170,7 +203,10 @@ def _frame(stage: RenderStage, panels: dict[str, _Box]) -> _Frame:
         left=margin_x,
         top=margin_y,
         right=stage.width - margin_x,
-        bottom=stage.height - margin_y,
+        # The caption's strip comes off before the margin, and it is not a
+        # margin: a margin is breathing room that a preset may crowd into when it
+        # has to, and this is a piece of the stage the caption is *drawing in*.
+        bottom=_caption_top(stage) - margin_y,
         panels=tuple(panels.values()),
     )
 
@@ -347,30 +383,46 @@ THROW_MIN_DURATION = 1.2
 #: An entire scene could be written, validated, rendered and reviewed without
 #: anybody noticing that no viewer would ever see past its first frame.
 #:
-#: The rate is **not** a reading speed, and the first version calling it one was
-#: the mistake. Nothing reads the narration at the beat's pace — it is printed
-#: in the list beside the picture, and what the beat has to give the eye is time
-#: to watch whatever changed. A rate of 6 characters per second was a reading
-#: clock doing a job that has no reading in it, and it made the length of the
-#: *sentence* decide the length of the *shot*: the same document cut into the
-#: same beats ran 99 seconds where the hand-written baseline ran 22, purely
-#: because its descriptions were written one clause longer.
+#: How many characters of narration one second of screen time buys.
 #:
-#: So the rate is now a nudge and nothing more — one extra second per 18
-#: characters — and `BEAT_BASE_SECONDS` sets the pace. Across the whole legal
-#: range of `description` that is a band of roughly 4.5 to 7 seconds, which is
-#: where the baseline sits and, on the evidence of the one scene anybody could
-#: stand to watch, where a beat wants to be.
+#: The number is **measured, not chosen**. `anything2explainer`'s sample spends
+#: 274.9 seconds on 1490 characters of Chinese — 5.96 characters a second — and
+#: it is the only explainer voice in this project's reach with a duration
+#: attached. Rounded to 6.0 so the arithmetic can be checked by eye: nine
+#: characters is a second and a half, twelve is two.
 #:
-#: What is still true is the trade underneath: two beats of equal length hold
-#: for equal time, one of them the point of the scene and the other a
-#: transition. Buying editorial rhythm back means letting the model write a
-#: duration, which means reversing the rule in `prompts.py` — a change of
-#: position, not a parameter.
-BEAT_BASE_SECONDS = 3.8
-BEAT_CHARS_PER_SECOND = 18.0
-BEAT_MIN_SECONDS = 3.8
-BEAT_MAX_SECONDS = 7.0
+#: The paragraph above used to continue by calling that a *reading* speed and
+#: rejecting it, and the rejection is worth recording because it is what the
+#: replacement got wrong. Nothing reads the narration aloud was true then. What
+#: followed was a 3.8-second floor plus one second per 18 characters, and a floor
+#: that big **cannot be edited down**: 39 beats of it is 148 seconds before a
+#: single character is counted, so the 60-second target was unreachable no matter
+#: what anyone wrote. That is the opposite failure from the one being avoided —
+#: a rate with a floor you can actually hit is the only model in which the length
+#: of the script decides the length of the video.
+#:
+#: What is still true is the trade underneath: two beats of equal length hold for
+#: equal time, one of them the point of the scene and the other a transition.
+#: Buying editorial rhythm back means letting the model write a duration, which
+#: means reversing the rule in `prompts.py` — a change of position, not a
+#: parameter.
+SPEECH_CHARS_PER_SECOND = 6.0
+
+#: The shortest a beat may be, whatever it has to say.
+#:
+#: A guard, not a shaper: the schema's own floor on `description` is 8
+#: characters, which is 1.33 seconds, so this binds only for a storyboard written
+#: by hand. It is here so that loosening that floor some day cannot hand the
+#: player a beat it flips past inside a frame.
+BEAT_MIN_SECONDS = 1.2
+
+#: Each half of a scene change: fade to the background, swap, fade back in.
+#:
+#: The player is what spends this — `frontend/player/player.js`, same name — and
+#: `_check_total_duration` adds it back into the running time, so the two have to
+#: be the same number. A test reads the JS constant and compares, the same way
+#: the tone and emphasis tables are held together.
+TRANSITION_SECONDS = 0.45
 
 #: Graduations on an axis when the storyboard did not say how many.
 DEFAULT_AXIS_TICKS = 5
@@ -421,6 +473,24 @@ PANEL_CLEARANCE = 24.0
 #: It is also what the panel column is measured back from.
 STAGE_MARGIN_RATIO = 0.03
 
+#: The strip at the bottom that the caption owns, as a fraction of the height.
+#:
+#: `player.js` paints the current beat's narration in it (`caption.js` holds the
+#: same number, and `test_the_caption_band_is_the_one_the_player_draws_in`
+#: compares the two — the caption *is* a box this layer decided, so it has to be
+#: one number rather than two kept in step by hand).
+#:
+#: A reservation, not an overlay. Drawing the words on top of the picture costs
+#: less code and puts a subtitle over whatever the lesson is pointing at, which
+#: is the one thing a subtitle must never do.
+#:
+#: 0.13 of 600 is 78: two 26-pixel lines with 13 of room above and below them.
+#: The schema caps a beat's `description` at 200 characters; the real corpus runs
+#: 18~57, median 34, and 80% are within 40. Two lines is a measurement, not a
+#: hope — but a storyboard written by hand is not bound by the corpus, which is
+#: why `caption.js` ellipsises instead of trusting it.
+CAPTION_BAND_RATIO = 0.13
+
 #: Panel text metrics, in stage units.
 #:
 #: These used to live in the drawer: `drawReadout` fits a panel to its text when
@@ -442,6 +512,169 @@ PANEL_LINE_HEIGHT = 20.0
 #: The narrowest panel still worth drawing: a two-character caption needs a box,
 #: not a sliver.
 MIN_PANEL_WIDTH = 120.0
+
+#: 对错标记, in stage units. The badge is drawn as a disc with the glyph inside it;
+#: `VERDICT_SIZE` is the disc's diameter, so the glyph lands at about half of it,
+#: which is the ratio Tabler's own `circle-check` uses (an r=9 ring on the 24-grid
+#: with a 6-wide tick inside).
+#:
+#: 38 is a judgement, and the number it is judged against is the one the research
+#: turned up for presentation text: audience-facing type wants roughly 32px on a
+#: 960-wide stage before anything gets small. A mark that is the size of the body
+#: it judges is not a mark, so this sits just above that floor rather than at the
+#: 96px a "hero" mark would want.
+VERDICT_SIZE = 38.0
+VERDICT_LABEL_FONT_SIZE = 16.0
+#: Between the badge's edge and the label, whichever side the label lands on.
+VERDICT_LABEL_GAP = 8.0
+
+#: mark -> the glyph drawn inside the badge.
+#:
+#: Two shapes and one symbol, which is the point rather than a limitation. WCAG
+#: 2.2 SC 1.4.1 refuses colour as the only channel, and a tick and a cross differ
+#: in *shape* before they differ in hue — so the picture answers the same
+#: question for a viewer who cannot tell the two colours apart. The colours come
+#: from the theme at draw time; this table only decides the outline.
+VERDICT_GLYPH: dict[str, str] = {
+    "ok": "check",
+    "bad": "x",
+    "warn": "warning",
+}
+
+#: 值卡片, in stage units.
+#:
+#: `CARD_VALUE_FONT_SIZE` is the one of these that came from outside: presentation
+#: guidance puts audience-facing body text at 32px or more on a stage this wide,
+#: and a value is the thing the card exists to show — so it is the *largest* type
+#: on the stage and everything else here is sized down from it.
+CARD_VALUE_FONT_SIZE = 34.0
+CARD_VALUE_LINE_HEIGHT = 42.0
+CARD_TAG_FONT_SIZE = 15.0
+CARD_TAG_HEIGHT = 30.0
+CARD_TAG_PADDING = 12.0
+CARD_PADDING = 16.0
+CARD_GAP = 20.0
+#: A card holds a value, not a paragraph. The ceiling is what keeps `"aaa..."` —
+#: which the model does write, to mean "some string" — from becoming a banner
+#: that pushes the row onto a second line for no reason.
+CARD_MIN_WIDTH = 150.0
+CARD_MAX_WIDTH = 260.0
+#: Past three rows the cards are too small to read from a distance, and the
+#: layout says so rather than shrinking them further.
+CARD_ROWS_MAX = 3
+
+#: 结构树 and 代码块, in stage units.
+#:
+#: One set of metrics for both, because they are one piece of typography: the
+#: same monospace stack, the same padding, the same panel. What differs is the
+#: row height — a tree's rows are labels and want air, a listing's are lines of
+#: code and want to read as a block — and that difference is the only entry in
+#: `_BLOCK_LINE_HEIGHT`.
+BLOCK_PADDING = 14.0
+#: Between two stacked blocks. The same call `_card_boxes` makes: a block starts
+#: below whatever else the scene put down, and it needs to not touch it.
+BLOCK_GAP = 20.0
+#: The narrowest block still worth drawing a panel behind.
+BLOCK_MIN_WIDTH = 180.0
+#: The strip at the top of the panel that holds the object's `label`.
+#:
+#: Baked into the height rather than drawn over the first row, and drawn by the
+#: drawer rather than being a second element: a block is one object, and a title
+#: that floats above its own frame is the `background='window'` Manim draws for
+#: the same reason — it says what the code below is.
+BLOCK_HEADER_HEIGHT = 26.0
+BLOCK_HEADER_FONT_SIZE = 13.0
+#: 代码块. The font is sized so that 80-odd monospace characters still fit inside
+#: the frame beside a panel column, which is the width a real listing needs; the
+#: stage is 960 wide and the narrowest frame this can be placed in is about 600.
+CODE_FONT_SIZE = 15.0
+CODE_LINE_HEIGHT = 24.0
+#: The line-number gutter, and how far the code starts past the panel's left edge.
+#: Wide enough for two digits at `CODE_FONT_SIZE` plus a gap.
+CODE_GUTTER = 34.0
+#: 结构树. A row per node, and a step of indentation per level.
+TREE_FONT_SIZE = 16.0
+TREE_LINE_HEIGHT = 26.0
+TREE_INDENT = 22.0
+#: The slot at the front of every row that a branch marker is drawn in. Reserved
+#: on leaves too, so a level's text starts at one column whether or not the row
+#: above it had children.
+TREE_MARKER = 14.0
+#: How far left of the level it marks the guide line is drawn. Not zero: a guide
+#: flush against the text it delimits reads as underlining rather than as a rule.
+TREE_GUIDE_GAP = 5.0
+#: How deep an outline may nest before the indentation has eaten the width. Each
+#: level costs `TREE_INDENT`, so eight of them is 176 of the ~600 a block can
+#: have — and that is the *deepest legal* case rather than the ordinary one.
+TREE_DEPTH_MAX = 8
+#: The indent an outline is told to use, and the fallback for a `text` with no
+#: indentation at all. The layout does not trust it: `_outline_of` infers the
+#: unit from the smallest indent the text actually uses, so a writer who used
+#: four spaces gets the hierarchy they meant rather than one twice as deep.
+TREE_INDENT_SPACES = 2
+
+#: The slot a row's `[icon]` mark draws in, and how large the glyph draws inside
+#: it. Reserved on *every* row of a tree that has any icon at all, for the same
+#: reason `TREE_MARKER` is reserved on leaves: a level's words have to start at
+#: one column whether or not the row above it happened to carry a mark.
+TREE_ICON_SLOT = 18.0
+TREE_ICON_SIZE = 15.0
+
+#: 横向树 and 思维导图. Depth runs along x here, so these three are what lay a
+#: row out sideways: a node's words start this far past its column, and the next
+#: column starts this far past the widest words in this one. A column is
+#: therefore as wide as its own widest label rather than a constant — which is
+#: the whole reason `initial_speed: 20` does not cost what `器材` costs.
+TREE_BRANCH_LABEL_GAP = 10.0
+TREE_BRANCH_GAP = 26.0
+#: 思维导图's rounded node. The one difference from `branch` that changes
+#: geometry: a pill is wider than the words it holds, so the column has to be too.
+#: Its *height* is the row's business and stays in the drawer — a pill that
+#: outgrew its row would be a pill the box was not cut for.
+TREE_PILL_PAD_X = 10.0
+
+#: 花括号. One brace per run of siblings, drawn in a strip reserved down the left
+#: of the whole block. `TREE_BRACE_ROOM` is that strip; the two parts of it are
+#: kept apart because the drawer needs the width and the gap separately.
+TREE_BRACE_WIDTH = 11.0
+TREE_BRACE_GAP = 7.0
+TREE_BRACE_ROOM = TREE_BRACE_WIDTH + TREE_BRACE_GAP
+
+#: 套盒子. Three numbers, and the arithmetic that ties them together is the one
+#: thing about this form worth reading before changing any of them.
+#:
+#: A frame is drawn `TREE_BOX_PAD` outside the rows it holds, and its bottom edge
+#: is pulled back up by `TREE_BOX_NUDGE` for every level of descent the subtree
+#: still has below it. That pull-in is what stops a frame and its last-born
+#: descendant from sharing a bottom edge — and it is bounded by the pad on the
+#: other side: with a subtree four levels deep the pull-in is 16 against a pad of
+#: 18, so the innermost frame still clears its own last row. Five levels would
+#: put the frame's edge *above* the row it is supposed to hold, which is why
+#: `TREE_BOX_DEPTH_MAX` is a separate and much smaller ceiling than
+#: `TREE_DEPTH_MAX`.
+TREE_BOX_STEP = 20.0
+TREE_BOX_PAD = 18.0
+TREE_BOX_NUDGE = 4.0
+TREE_BOX_DEPTH_MAX = 4
+
+#: Advance width per character in the monospace stack, in ems.
+#:
+#: `_text_width`'s `PANEL_NARROW_EM` is an *average* for `Inter`, where `i` and
+#: `W` are nothing like each other. In a monospace face every narrow glyph is the
+#: same width by definition — 0.6 is what SF Mono, Consolas, Menlo and DejaVu Sans
+#: Mono all use — so one number is exact here and an average there. A CJK glyph
+#: falls back to a full-width face and is 1.0, which is `PANEL_WIDE_EM` and the
+#: one thing the two estimators share.
+MONO_NARROW_EM = 0.6
+
+#: The font each block primitive draws at, and with it the set of primitives that
+#: *are* blocks. Row heights used to live here too; they moved into the shape
+#: functions when a tree grew five forms, because a row's height stopped being a
+#: constant a caller could multiply by a row count.
+_BLOCK_FONTS: dict[str, float] = {
+    "code": CODE_FONT_SIZE,
+    "tree": TREE_FONT_SIZE,
+}
 
 #: role -> (width, height) in stage units, for roles a preset places as a box.
 _BODY_SIZES: dict[str, tuple[float, float]] = {
@@ -481,6 +714,65 @@ _BODY_SIZES: dict[str, tuple[float, float]] = {
 _BODY_PIVOTS: dict[str, tuple[float, float]] = {
     "arm": (0.0, 0.5),
 }
+
+#: How long a 主角's longest side has to be, as a fraction of the stage's height.
+#:
+#: A scene needs something the eye lands on first, and `_BODY_SIZES` cannot
+#: supply it: those numbers are keyed by role, so a car in a corridor and a car
+#: parked in a corner came out the same size, and the largest body in the whole
+#: corpus was a 96x48 card — 16% of the stage — while the biggest thing on
+#: screen was a translucent emitter fan that is *background*. The picture had
+#: nothing in it that was both solid and large, which is what "看不出什么" was.
+#:
+#: **The longest side, not the height**, and that distinction cost an afternoon.
+#: The first version of this grew the body until its *height* reached the floor,
+#: which is fine for a 96x48 card and ruinous for a 62x40 car: scaling a car to
+#: 132 tall makes it 205 wide, and the 安全距离 circle the lane preset draws
+#: around it — radius 76 — ends up entirely *inside* the car it is measuring a
+#: distance from. A wide, short object's visual weight is its width; a floor on
+#: the longest side asks the question that was actually meant ("is this thing
+#: big?") and scales uniformly, so nothing distorts and nothing swallows its own
+#: annotations.
+#:
+#: The number is a judgement, not a derivation, and it is worth saying where it
+#: came from: `anything2explainer` (see the memory note) requires a protagonist
+#: of at least 170px in a 720-high frame — 23.6% — and 22% of 600 is 132. It is
+#: the same kind of constant as `SPEECH_CHARS_PER_SECOND`, chosen by looking at a
+#: reference and expected to move once there is something to look at.
+LEAD_EXTENT_RATIO = 0.22
+
+#: The presets whose picture has **one subject**, and therefore a 主角.
+#:
+#: Not a list of presets that "support" the idea — the split is a fact about the
+#: two structures, and a test walks `_PLACERS` to require every preset to be in
+#: exactly one of these two sets, so the next preset has to make the choice
+#: rather than inherit one.
+#:
+#: The two that are *not* here are group structures, and saying why is the point
+#: of the list:
+#:
+#: - `chain` — the subject is the row. Growing each node to the floor
+#:   makes it 132 long, and the real corpus writes chains of five and seven: 660
+#:   and 924 against the five-hundred-odd the frame has left beside the panels. The
+#:   row does not become a protagonist by enlarging its members; it becomes one by
+#:   having fewer, larger members, and that is a decision about
+#:  编排 that this constant cannot make.
+#: - `field` — the subject is the plot. Every body here is a throw, and the
+#:   thing the scene is *about* is the family of arcs between them — so the
+#:   question "which one is the protagonist" has the same shape as it does for
+#:   `chain`, and the answer is the same. Measured rather than assumed: a real
+#:   run of `data/samples/projectile_motion.md` produced eight `field` scenes,
+#:   and growing the projectile to the floor gave a 132x132 ball **centred on
+#:   the ground line** — half of it below the x-axis it is drawn on, and large
+#:   enough to swallow the trajectory, which is the thing actually being taught.
+#:   A projectile is a *marker on a plot*, not a character. (That the marker's
+#:   own role size, 28, is small for a 960-wide plot is a separate question —
+#:   and a real one, now written down rather than fixed by accident.)
+#: - `generic` — its own docstring says "the last resort, and it looks like it".
+#:   A vertical list of equally-sized items has no first among equals, and a real
+#:   generated document used it for a scene of four readouts and no body at all.
+#:   Whether that should fail outright is the next question, not this one.
+_PRESETS_WITH_A_LEAD: frozenset[str] = frozenset({"lane", "hub"})
 
 #: Glyph data lives in `assets/glyphs/` as build-time products of
 #: `tools/build_glyphs.py`. Layout reads the directory rather than the
@@ -677,8 +969,14 @@ def _primitive_of(obj: StoryboardObject) -> str | None:
 # --------------------------------------------------------------------------
 
 
-def _lane_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
+def _lane_boxes(
+    scene: StoryboardScene, stage: RenderStage, frame: _Frame
+) -> tuple[dict[str, _Box], frozenset[str]]:
     """A corridor: bodies on the lane line, obstacles alternating either side.
+
+    Returns the boxes **and the ids of this scene's 主角** — the movers. Every
+    placer returns that pair; see `_PRESETS_WITH_A_LEAD` for why two of them
+    return an empty set.
 
     Obstacles alternate because the fourth beat teaches *comparing* left and
     right clearance. A preset that put every obstacle on the same side would
@@ -728,14 +1026,36 @@ def _lane_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> di
 
     # Movers queue up from the left. More than one is rare, but stacking them
     # along x beats overlapping them at a single point.
+    #
+    # They are this preset's 主角, and are sized as one. `_bodies_but` — "the
+    # bodies that are not obstacles" — is a choice this function has made since
+    # it was written; what changed is that the choice is now allowed to *mean*
+    # something. The car the corridor is about was drawn at 62x40, under 7% of
+    # the stage's height, beside a 64x64 obstacle: in its own picture the subject
+    # was the smaller object.
+    #
+    # Packed by the gap between *edges*, not by a running centre plus a width.
+    # `cursor += width + 24` spaces two bodies by `w1 + 24` when they need
+    # `(w1 + w2) / 2 + 24` — correct while every mover was a 62-wide car, and
+    # wrong the moment two movers are different sizes, which growing them to the
+    # floor makes them. A two-mover test scene went from clear to a 79px overlap,
+    # and `_check_fit` reported that as two objects on top of each other with
+    # nothing to say the arithmetic was why.
+    #
+    # The first mover keeps its *centre* at `LANE_VEHICLE_X_RATIO`: that is the
+    # number `templates.py` puts the baseline's car at, and M2's acceptance is
+    # these two pictures being about the same thing.
     cursor = stage.width * LANE_VEHICLE_X_RATIO
-    for obj in movers:
-        width, height = _body_size(obj)
+    previous_half = 0.0
+    for index, obj in enumerate(movers):
+        width, height = _lead_size(obj, stage)
+        if index:
+            cursor += previous_half + 24.0 + width / 2
         boxes[obj.id] = _Box(x=cursor, y=lane_y, width=width, height=height)
-        cursor += width + 24.0
+        previous_half = width / 2
 
     boxes.update(_panel_boxes(scene, stage))
-    return boxes
+    return boxes, frozenset(obj.id for obj in movers)
 
 
 # `node` and `readout` read alike but are different levels of the vocabulary — the
@@ -807,10 +1127,38 @@ def _text_extent(text: str, *, minimum: float = MIN_PANEL_WIDTH) -> tuple[float,
     )
 
 
+def _text_width(text: str, font_size: float) -> float:
+    """How wide `text` draws at `font_size`, as a single line.
+
+    One estimator for every string the layout has to reserve room for, so the
+    panel column, a card's value and a verdict's label cannot come out of three
+    different guesses. It is the same coarse em-sum `_line_width` always was —
+    the point was never precision, it was that the number is *derived from the
+    text* rather than being a constant that never looked at it.
+    """
+    return sum(font_size * (PANEL_WIDE_EM if _is_wide(ch) else PANEL_NARROW_EM) for ch in text)
+
+
 def _line_width(line: str) -> float:
-    return sum(
-        PANEL_FONT_SIZE * (PANEL_WIDE_EM if _is_wide(ch) else PANEL_NARROW_EM) for ch in line
-    )
+    return _text_width(line, PANEL_FONT_SIZE)
+
+
+def _written_texts(obj: StoryboardObject, scene: StoryboardScene, prop: str) -> list[str]:
+    """Every string this object is given for `prop`: the declared one, and each beat's.
+
+    Shared by `text` and by `type`, because both are live props on the two
+    primitives that carry written content — `readout` and `card`. Whatever
+    reserves room for a string has to reserve it for every value the beat can
+    write into it, not only the one the object started with; the panel comment
+    below is the measurement that established this, and it is the same defect
+    one size down.
+    """
+    candidates: list[PropValue | None] = [obj.props.get(prop)]
+    for step in scene.steps:
+        state = step.object_states.get(obj.id)
+        if isinstance(state, dict):
+            candidates.append(state.get(prop))
+    return [value for value in candidates if isinstance(value, str) and value]
 
 
 def _panel_texts(obj: StoryboardObject, scene: StoryboardScene) -> list[str]:
@@ -825,13 +1173,12 @@ def _panel_texts(obj: StoryboardObject, scene: StoryboardScene) -> list[str]:
     So the box has to hold every value the prop can take, not the one it starts
     at. Sizing from the declared string drew the beat's longer text out over the
     panel's own edge, and nothing failed.
+
+    `label` is in the list as well, because a panel with no `text` declares
+    itself by its label — `_to_readout` falls back to it, so it is a string the
+    panel can really be showing.
     """
-    candidates: list[PropValue | None] = [obj.props.get("text"), obj.label]
-    for step in scene.steps:
-        state = step.object_states.get(obj.id)
-        if isinstance(state, dict):
-            candidates.append(state.get("text"))
-    return [value for value in candidates if isinstance(value, str) and value]
+    return [*_written_texts(obj, scene, "text"), obj.label]
 
 
 def _panel_extent(texts: Sequence[str]) -> tuple[float, float]:
@@ -864,10 +1211,15 @@ def _panel_span(heights: Sequence[float], stage: RenderStage) -> tuple[float, fl
     stage can show, and `_check_fit` says so by name.
     """
     margin = stage.height * STAGE_MARGIN_RATIO
+    # The caption's strip is the real floor, not `PANEL_BOTTOM_RATIO`. That
+    # ratio is where a comfortable stack sits, and 0.86 of 600 is 516 — with a
+    # 44-tall panel centred there the column ends at 538, which is 16 into the
+    # caption. It went unnoticed for exactly as long as there was no caption.
+    floor = _caption_top(stage)
     low = margin + heights[0] / 2
-    high = stage.height - margin - heights[-1] / 2
+    high = floor - heights[-1] / 2
     top = stage.height * PANEL_TOP_RATIO
-    bottom = stage.height * PANEL_BOTTOM_RATIO
+    bottom = min(stage.height * PANEL_BOTTOM_RATIO, high)
     if len(heights) == 1:
         return min(top, high), min(top, high)
     step = max((above + below) / 2 + MIN_PANEL_GAP for above, below in pairwise(heights))
@@ -909,6 +1261,861 @@ def _panel_boxes(scene: StoryboardScene, stage: RenderStage) -> dict[str, _Box]:
     return _column(readouts, x, top, bottom, lambda obj: (needed, extent[obj.id][1]))
 
 
+def _card_boxes(
+    scene: StoryboardScene,
+    stage: RenderStage,
+    frame: _Frame,
+    placed: dict[str, _Box],
+) -> dict[str, _Box]:
+    """The 值卡片 grid, shared by every preset — the way `_panel_boxes` is.
+
+    Shared rather than written into each placer because a card is not part of any
+    preset's spatial metaphor. `lane` says where things sit along a corridor and
+    `field` says where they sit on a plot; a row of values being compared is a
+    *list*, and a list is not a picture of a space. Putting one here means a card
+    draws under every `scene_type` rather than being a role only one preset can
+    place, which is the failure `_to_element`'s "没有被摆放" reports.
+
+    One width for the whole grid, the same call `_panel_boxes` makes, and for the
+    same reason: ragged cards read as a mistake rather than as a choice. It is the
+    widest *value any beat can write*, not the one the object declares, because
+    `text` is live — the same trap `_panel_texts` exists to avoid.
+
+    `placed` is what the preset already put down, and the grid starts below it.
+    A scene with both a picture and a row of values stacks the two; the case
+    where they still collide is left to `_check_fit`, which is where every other
+    overlap in this module is caught.
+    """
+    cards = _with_primitive(scene, "card")
+    if not cards:
+        return {}
+
+    widths = [
+        _text_width(text, CARD_VALUE_FONT_SIZE)
+        for obj in cards
+        for text in _written_texts(obj, scene, "text")
+    ]
+    widest = max(widths, default=0.0)
+    width = min(max(widest + CARD_PADDING * 2, CARD_MIN_WIDTH), CARD_MAX_WIDTH)
+    height = CARD_PADDING * 2 + CARD_VALUE_LINE_HEIGHT + CARD_TAG_HEIGHT
+
+    top = frame.top
+    if placed:
+        top = max(box.y + box.height / 2 for box in placed.values()) + CARD_GAP
+    centre_y = (top + frame.bottom) / 2
+
+    # Fewest rows that fit, so a row of three stays a row and a row of six wraps
+    # rather than shrinking. `frame.right_of` is asked at the block's own height,
+    # so a grid that is tall enough to reach a panel is measured against it.
+    count = len(cards)
+    chosen: tuple[int, int, float] | None = None
+    for rows in range(1, CARD_ROWS_MAX + 1):
+        columns = math.ceil(count / rows)
+        block = rows * height + (rows - 1) * CARD_GAP
+        room = frame.right_of(centre_y, block / 2) - frame.left
+        if columns * width + (columns - 1) * CARD_GAP <= room:
+            chosen = (rows, columns, block)
+            break
+    if chosen is None:
+        raise LayoutError(
+            f"场景 `{scene.id}` 有 {count} 张值卡片、每张 {width:.0f}px 宽，"
+            f"排到 {CARD_ROWS_MAX} 行也放不下。少写几张，或者把值写短一点"
+        )
+    rows, columns, block = chosen
+
+    left = frame.left
+    right = frame.right_of(centre_y, block / 2)
+    origin_y = centre_y - block / 2 + height / 2
+    boxes: dict[str, _Box] = {}
+    for index, obj in enumerate(cards):
+        row, column = divmod(index, columns)
+        # Centred per row rather than once for the grid: a last row of one card
+        # left-aligned under a full row reads as a card that fell off.
+        in_row = min(columns, count - row * columns)
+        row_width = in_row * width + (in_row - 1) * CARD_GAP
+        row_left = (left + right) / 2 - row_width / 2 + width / 2
+        boxes[obj.id] = _Box(
+            x=row_left + column * (width + CARD_GAP),
+            y=origin_y + row * (height + CARD_GAP),
+            width=width,
+            height=height,
+        )
+    return boxes
+
+
+# --------------------------------------------------------------------------
+# Blocks — the two primitives whose content is text laid out in rows
+# --------------------------------------------------------------------------
+
+
+def block_line_count(primitive: str, text: str) -> int:
+    """How many rows a `tree` or a `code` block draws.
+
+    Public because `validation.py` has to check a `focus` range against it, and
+    the two counting differently is exactly the drift that turns a line-numbered
+    promise into a lie. It is also the reason this is a function rather than a
+    `len(text.split("\\n"))` written out twice: the two primitives count
+    differently, and the difference is a decision (see `_block_rows`).
+    """
+    return len(_block_rows(primitive, text))
+
+
+def _block_rows(primitive: str, text: str) -> list[str]:
+    """A block's rows, as the parsers below need them.
+
+    `code` keeps every line it was given, because a blank line in a listing is
+    *part of the listing* — it is what separates one block of statements from the
+    next. `tree` drops them: a blank line in an outline is not a node, and a row
+    of nothing with four guides running down it is a mistake on screen rather
+    than a pause.
+    """
+    rows = text.strip("\n").split("\n")
+    if primitive == "tree":
+        return [row for row in rows if row.strip()]
+    return rows
+
+
+def _mono_width(text: str, font_size: float) -> float:
+    """How wide `text` draws in the monospace stack, as a single line."""
+    return sum(font_size * (PANEL_WIDE_EM if _is_wide(ch) else MONO_NARROW_EM) for ch in text)
+
+
+#: A tree row written as `键: 值`.
+#:
+#: Two patterns rather than one, because the two ways a writer quotes a key ask
+#: different things of the colon: `"a":"b"` has no space after it and nothing else
+#: to go on, while a bare `a: b` has only the space.
+#:
+#: Requiring that space is what keeps a URL in one piece — and the failure it
+#: prevents was found by reading the patterns back rather than by a test.
+#: `网址: https://x` splits at the *first* colon, which is the right one;
+#: `https://x` on its own splits nowhere, because the character after its colon
+#: is a slash. Without the rule it came out as the key `https` and the value
+#: `//x`, and a URL in two colours reads as a bug rather than as a scheme.
+_TREE_QUOTED_KEY = re.compile(r"""^(?P<key>"[^"]*"|'[^']*'):[ \t]*(?P<value>.*)$""")
+_TREE_BARE_KEY = re.compile(r"^(?P<key>[^:]+):[ \t]+(?P<value>.*)$")
+
+#: A row's own `[icon]` mark, at the front of the row and before the key.
+#:
+#: Lowercase names and hyphens only, and that is what keeps it out of the way of
+#: ordinary text. A row of JSON beginning with a bracket is the case to keep
+#: clear: `["a", "b"]` has a quote after its bracket, so it is text, while
+#: `[flask] 器材` has a name and is a mark. The name still has to *exist* —
+#: `_icon_of` checks it against the glyphs on disk, and `validation.py` refuses
+#: one that is not in `registry.TREE_ICONS` while there is still a model to
+#: retry, so reaching the check below with a bad name means the spec was written
+#: by hand.
+_TREE_ICON_MARK = re.compile(r"^\[([a-z][a-z-]*)\][ \t]+")
+
+
+def _icon_of(row: str) -> tuple[str, str]:
+    """`(icon, rest)`: a row's leading `[name]` mark, or nothing and the row.
+
+    Two ways a mark fails to be one, and both give back the row *unchanged*
+    rather than swallowing it: a name outside `registry.TREE_ICONS`, and a name
+    inside it whose glyph data is not installed. Either way the row draws
+    `[flask] 器材` in full instead of quietly eating six characters the author
+    wrote — the call `_glyph_to_draw` makes, and for the same reason. The
+    vocabulary check is here as well as in the validator because this function
+    is also reached by a hand-written sample, which never went past it.
+    """
+    match = _TREE_ICON_MARK.match(row)
+    if match is None:
+        return "", row
+    name = match.group(1)
+    if name not in TREE_ICON_NAMES or name not in _available_glyphs():
+        return "", row
+    return name, row[match.end() :]
+
+
+def tree_icon_marks(text: str) -> list[tuple[int, str]]:
+    """Every `[name]` mark in a tree's `text`, as `(row number, name)`.
+
+    Public for the same reason `block_line_count` is: `validation.py` has to
+    refuse a name that is not in `registry.TREE_ICONS`, and the two disagreeing
+    about what counts as a mark would turn a refusal into a silent miss — the row
+    would simply lose its marker, which reads as a row that never had one.
+
+    Reports **every** mark, including names this module will not draw. `_icon_of`
+    answers "what does this row draw"; this answers "what did the writer ask
+    for", and a validator needs the second one.
+
+    Row numbers are one-based, because the number a refusal prints is the number
+    a writer counts to.
+    """
+    marks: list[tuple[int, str]] = []
+    for index, row in enumerate(_block_rows("tree", text)):
+        match = _TREE_ICON_MARK.match(row.strip())
+        if match is not None:
+            marks.append((index + 1, match.group(1)))
+    return marks
+
+
+#: What a value *looks like*, for the one purpose of choosing a colour.
+_TREE_QUOTED = re.compile(r"""^(".*"|'.*')$""")
+_TREE_NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
+_TREE_LITERALS = frozenset({"true", "false", "null", "True", "False", "None"})
+
+
+def _split_tree_row(row: str) -> tuple[str, str, TreeValueKind]:
+    """One outline row as `(prefix, text, value_kind)`.
+
+    `prefix` keeps the colon and the space after it, so the drawer draws the key
+    and then puts the value at however wide those characters came out — see
+    `TreeLine`. A row with no key is all text, and its kind is `text`, which draws
+    in the ordinary colour.
+    """
+    for pattern in (_TREE_QUOTED_KEY, _TREE_BARE_KEY):
+        match = pattern.match(row)
+        if match is not None:
+            value = match["value"]
+            return f"{match['key']}: ", value, _value_kind(value)
+    return "", row, "text"
+
+
+def _value_kind(value: str) -> TreeValueKind:
+    """The gloss a value is coloured by: `string` / `number` / `literal` / `text`.
+
+    An *appearance*, not a parse, and it does not pretend otherwise — nothing
+    reads this tree as data and nothing validates that a quoted value is valid
+    JSON. The point is only that a value which looks like a number should read
+    like one, because a lesson about a structure is asking the viewer to tell the
+    kinds of thing apart.
+    """
+    if _TREE_QUOTED.match(value):
+        return "string"
+    if _TREE_NUMBER.match(value):
+        return "number"
+    if value in _TREE_LITERALS:
+        return "literal"
+    return "text"
+
+
+def _outline_of(text: str, object_id: str) -> list[TreeLine]:
+    """A block of indented text, as the rows of an outline.
+
+    The indent *unit* is inferred from the text rather than assumed, and the
+    reason is that the model is not the only writer. `TREE_INDENT_SPACES` is what
+    the vocabulary asks for; four spaces is what a listing uses and what a
+    hand-written sample reaches for by habit. Inferring the smallest indent that
+    actually appears gives both writers the hierarchy they meant, instead of
+    doubling the depth of the second one. The recommendation stays in the prompt
+    because a text still has to be self-consistent for this to work at all.
+
+    Depth is what makes the drawing a hierarchy rather than a list — which is why
+    an outline too deep to draw is refused rather than flattened, and refused with
+    the row that went too far, since that is the thing a writer has to change.
+    """
+    rows = _block_rows("tree", text)
+    if len(rows) > BLOCK_ROWS_MAX:
+        raise LayoutError(
+            f"`{object_id}`（结构树）有 {len(rows)} 行，最多 {BLOCK_ROWS_MAX} 行；"
+            "行数超了就不是一张树，是一页文字"
+        )
+    indents = [len(row.expandtabs(4)) - len(row.expandtabs(4).lstrip(" ")) for row in rows]
+    unit = min((value for value in indents if value > 0), default=TREE_INDENT_SPACES)
+    depths = [value // unit for value in indents]
+    if depths and max(depths) > TREE_DEPTH_MAX:
+        deepest = rows[depths.index(max(depths))].strip()
+        raise LayoutError(
+            f"`{object_id}`（结构树）嵌到了第 {max(depths) + 1} 层，最多 {TREE_DEPTH_MAX + 1} 层；"
+            f"每深一层要缩进 {TREE_INDENT:.0f}px，再深下去左边就全是空白了。"
+            f"最深的那一行是 {deepest[:24]!r}"
+        )
+    lines: list[TreeLine] = []
+    for index, row in enumerate(rows):
+        icon, without_icon = _icon_of(row.strip())
+        prefix, node, kind = _split_tree_row(without_icon)
+        lines.append(
+            TreeLine(
+                depth=depths[index],
+                prefix=prefix,
+                text=node,
+                value_kind=kind,
+                icon=icon,
+            )
+        )
+    return lines
+
+
+#: Python's own builtins as a set, computed once.
+#:
+#: `tokenize` hands back every identifier as a plain `NAME`, so `len` and `lens`
+#: look alike to it. `keyword.iskeyword` covers half the difference and this
+#: covers the other half — and it is what makes `print` in a listing read as a
+#: thing the language provides rather than as a name the author chose.
+_BUILTIN_NAMES: frozenset[str] = frozenset(dir(builtins))
+
+#: Token types that carry no characters of their own, or that carry the *line
+#: structure* the block already gets from its own rows. `INDENT`/`DEDENT` are in
+#: here for that second reason: the indentation they describe is real whitespace
+#: in the row, and `_spans_of` puts it back as a plain span.
+_SKIPPED_TOKENS: frozenset[int] = frozenset(
+    {
+        tokenize.ENDMARKER,
+        tokenize.NEWLINE,
+        tokenize.NL,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+    }
+)
+
+
+def _token_kind(tok: tokenize.TokenInfo, language: str) -> CodeKind:
+    if tok.type == tokenize.COMMENT:
+        return "comment"
+    if tok.type == tokenize.STRING:
+        return "string"
+    if tok.type == tokenize.NUMBER:
+        return "number"
+    if tok.type == tokenize.OP:
+        return "operator"
+    if tok.type == tokenize.NAME:
+        if language == "json":
+            # JSON's other keywords. `true` is a NAME to Python, and colouring it
+            # as one would leave the one token that says "this is a boolean" the
+            # same colour as the string beside it.
+            return "literal" if tok.string in ("true", "false", "null") else "name"
+        if keyword.iskeyword(tok.string):
+            return "keyword"
+        if tok.string in _BUILTIN_NAMES:
+            return "builtin"
+        return "name"
+    return "text"
+
+
+def _tokenize(text: str, language: str) -> list[CodeLine]:
+    """A listing, split into coloured spans and grouped by line.
+
+    The tokeniser is the standard library's, which is a genuine piece of luck
+    rather than a shortcut: zero dependencies, already in the interpreter, and it
+    hands back comments, strings, numbers, operators, keywords and builtins —
+    plus the indentation structure — as named tokens this project can classify.
+
+    `json` is the same tokeniser, and that is not a trick either: JSON's
+    punctuation *is* Python's (`{}[]:,` are all operators, `"x"` is a string, `1`
+    is a number), so the only thing that needs saying differently is that
+    `true`/`false`/`null` are literals rather than identifiers.
+
+    **The fragment case is the one that has to be handled**, and it is not
+    hypothetical: a lesson shows a *piece* of a file, and a piece of a file is
+    usually not a parse. Measured on `config = {\\n  "name": "demo",` — eight
+    correct tokens, then `TokenError: unexpected EOF in multi-line statement`.
+    Those eight are exactly what the block is meant to draw, so the error is
+    caught and the tokens already emitted are kept. Letting it propagate would
+    blank the one picture the scene exists for; catching it and discarding them
+    would do the same thing more quietly.
+
+    Text that is not Python at all does not raise in the first place —
+    `the quick brown fox` tokenises as five `NAME` tokens — so a listing in
+    another language draws as uncoloured words rather than failing.
+    """
+    rows = _block_rows("code", text)
+    if len(rows) > BLOCK_ROWS_MAX:
+        raise LayoutError(
+            f"这份代码有 {len(rows)} 行，最多 {BLOCK_ROWS_MAX} 行；"
+            "再多就只能靠缩小字号才塞得下，而缩到看不清的代码不如不放"
+        )
+    if language not in CODE_LANGUAGE_NAMES or language == "text":
+        return [CodeLine(spans=[CodeSpan(text=row, kind="text")]) for row in rows]
+
+    found: dict[int, list[tuple[int, int, CodeKind]]] = {
+        index: [] for index in range(1, len(rows) + 1)
+    }
+    stream = tokenize.generate_tokens(io.StringIO(text).readline)
+    while True:
+        try:
+            tok = next(stream)
+        except StopIteration:
+            break
+        except (tokenize.TokenError, IndentationError, SyntaxError):
+            # A fragment, or a file whose first line does not parse. Either way
+            # what came out before it is what the block draws.
+            break
+        if tok.type in _SKIPPED_TOKENS:
+            continue
+        row_number, start = tok.start
+        if not 1 <= row_number <= len(rows):
+            continue
+        row = rows[row_number - 1]
+        # A triple-quoted string is one token spanning rows; it is drawn from its
+        # first row on, and the rows inside it come out plain.
+        end = tok.end[1] if tok.end[0] == row_number else len(row)
+        found[row_number].append((start, min(end, len(row)), _token_kind(tok, language)))
+
+    return [CodeLine(spans=_spans_of(row, found[index + 1])) for index, row in enumerate(rows)]
+
+
+def _spans_of(row: str, tokens: list[tuple[int, int, CodeKind]]) -> list[CodeSpan]:
+    """One line's tokens, with the gaps between them put back as plain spans.
+
+    The gaps matter and are not obvious: `x = 1  # c` comes back as four tokens
+    covering columns 0-1, 2-3, 4-5 and 6-11, and the two spaces are **not among
+    them** — the tokeniser discards whitespace between tokens. Drawn from the
+    tokens alone, that line would render as `x=1# c`.
+    """
+    spans: list[CodeSpan] = []
+    cursor = 0
+    for start, end, kind in sorted(tokens):
+        if start > cursor:
+            spans.append(CodeSpan(text=row[cursor:start], kind="text"))
+        spans.append(CodeSpan(text=row[start:end], kind=kind))
+        cursor = max(cursor, end)
+    if cursor < len(row):
+        spans.append(CodeSpan(text=row[cursor:], kind="text"))
+    return spans
+
+
+def _block_text(obj: StoryboardObject) -> str:
+    """The text a block draws, falling back to its label.
+
+    The fallback is for a hand-written sample: `required_props` refuses a `text`
+    that was never written, so reaching it means the validator was bypassed, and
+    a one-row block that says the object's name is a better answer than a crash.
+    """
+    declared = obj.props.get("text")
+    return declared if isinstance(declared, str) and declared else obj.label
+
+
+def _language_of(obj: StoryboardObject) -> str:
+    """`language`, held to the three the tokeniser can honour.
+
+    An unrecognised name draws as plain text rather than as Python, and the
+    refusal itself happens upstream in `unknown_language` — a listing coloured
+    with the wrong language's rules is a worse picture than one with no colours,
+    because it is confidently wrong about where the strings are.
+    """
+    declared = obj.props.get("language")
+    return declared if isinstance(declared, str) and declared in CODE_LANGUAGE_NAMES else "text"
+
+
+def _form_of(obj: StoryboardObject) -> TreeForm:
+    """`form`, held to the five a tree can be drawn in.
+
+    A name the layout cannot place falls back to the outline rather than to a
+    guess, and the refusal itself happens upstream in `unknown_form` while there
+    is still a model to retry. Same division as `_language_of`, and the reason is
+    stronger here: a listing coloured by the wrong language's rules is merely
+    confidently wrong about where the strings are, while a structure drawn in the
+    wrong shape is confidently wrong about the structure.
+    """
+    declared = obj.props.get("form")
+    if isinstance(declared, str) and declared in TREE_FORM_NAMES:
+        # `cast` and not a check: the membership test above *is* the check, and
+        # the tuple is `registry.TREE_FORMS` — the same table the annotation on
+        # `TreeElement.form` is written from. mypy cannot see through `in` to a
+        # literal type, and the alternative is a plain `str` annotation that
+        # would drop the contract to keep the checker happy.
+        return cast(TreeForm, declared)
+    return "outline"
+
+
+def _focus_of(obj: StoryboardObject) -> str:
+    """`focus` as written, or "". Validation has already refused a bad one.
+
+    A bare number is accepted and stringified, because `{"focus": 3}` is a
+    perfectly natural thing to write and the difference between it and `"3"` is
+    one pair of quotes.
+    """
+    value = obj.props.get("focus")
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return value if isinstance(value, str) else ""
+
+
+#: The primitives a **shared** placer places, rather than the preset: the
+#: right-hand text column, the card grid, and the block stack.
+#:
+#: Everything else in a scene is the preset's business — which is the same
+#: division `_to_element` dispatches on, said from the other side.
+SHARED_PRIMITIVES: frozenset[str] = frozenset({"readout", "card", "tree", "code"})
+
+
+def _has_company(scene: StoryboardScene) -> bool:
+    """Is anything in this scene competing with a block for the frame?
+
+    Asked *before* the placer runs, so it cannot be "did the preset put anything
+    down" — the answer is needed to decide how much frame to give the preset in
+    the first place. So it is the question one step earlier: are there objects
+    the presets place, or cards for the grid to place? Those are what a block
+    stack has to share the bottom of the frame with. A readout is not, because
+    the panel column is a right-hand strip that a block is measured against
+    sideways rather than stacked against.
+
+    An unrecognised role counts as company, which is the safe direction: it
+    reserves room for something that may not arrive rather than crowding
+    something that does.
+    """
+    return any(_primitive_of(obj) not in SHARED_PRIMITIVES for obj in scene.objects)
+
+
+def _block_layout(
+    scene: StoryboardScene,
+    stage: RenderStage,
+    frame: _Frame,
+    has_company: bool,
+) -> tuple[dict[str, _Box], float]:
+    """Place the 结构树 / 代码块 stack; also say how far down the picture may go.
+
+    Returns `(boxes, picture_bottom)`. The second half is the part that is easy
+    to miss: a block does not slot into a gap, it *takes the bottom of the
+    frame*, and the preset is arranged in what is left. Getting the order the
+    other way round — place the picture, put the block underneath it — leaves the
+    block to start below whatever the picture's lowest object turned out to be,
+    which for a `generic` column is the bottom of the frame itself. Every such
+    scene then fails with a `LayoutError` after the last model call.
+
+    The stack is shared by every preset, the way `_card_boxes` is, and for the
+    same reason: a block is not part of any preset's spatial metaphor. `lane`
+    says where things sit along a corridor and `hub` says where they sit around a
+    centre; a listing is a *page*, and a page is not a picture of a space.
+
+    Two things it does differently from the card grid, both about the shape of
+    the content rather than about taste:
+
+    - **One width per block, but one shared left edge.** A card is a column in a
+      table and the grid gives them all one width; giving two *blocks* one width
+      would draw a five-line listing in a box cut for a fifteen-line one. What
+      they share instead is the left edge — which is the edge a tree's
+      indentation is read from, so a scene holding both reads as a page.
+    - **It stands at the bottom of the frame when it has company, and in the
+      middle when it does not.** A scene of one listing is the ordinary case, and
+      a single panel pinned to the floor of the stage reads as something that
+      fell there.
+
+    Failure is a `LayoutError` and not a squeeze: a block that has to shrink to
+    fit is a block nobody can read, and the fix — fewer rows — is one a model can
+    make while there is still a model to tell.
+    """
+    blocks = [obj for obj in scene.objects if _primitive_of(obj) in _BLOCK_FONTS]
+    if not blocks:
+        return {}, frame.bottom
+
+    widths: dict[str, float] = {}
+    heights: dict[str, float] = {}
+    longest: dict[str, str] = {}
+    framed = False
+    for obj in blocks:
+        primitive = _primitive_of(obj) or "code"
+        drawn, box_height, widest_row = _block_shape(
+            primitive, _block_text(obj), _form_of(obj), _language_of(obj), obj.id
+        )
+        widths[obj.id] = max(drawn + BLOCK_PADDING * 2, BLOCK_MIN_WIDTH)
+        heights[obj.id] = box_height + BLOCK_PADDING * 2 + BLOCK_HEADER_HEIGHT
+        longest[obj.id] = widest_row
+        framed = framed or (primitive == "tree" and _form_of(obj) == "boxes")
+
+    stack = sum(heights.values()) + BLOCK_GAP * (len(blocks) - 1)
+    if stack > frame.bottom - frame.top + FIT_TOLERANCE:
+        # The frames get their own sentence because the fix is different. A form
+        # that spends height on structure per *level* runs out for a reason the
+        # row count does not show, and "write fewer rows" is the wrong advice.
+        nested = (
+            f"（`form` 是 `boxes` 的那一棵：每多一层，框就要多占 "
+            f"{TREE_BOX_PAD:.0f}px 上下留白——换 `outline` 或者 `branch` 能省下来）"
+            if framed
+            else ""
+        )
+        raise LayoutError(
+            f"场景 `{scene.id}` 里这 {len(blocks)} 个代码块/结构树一共要 {stack:.0f}px 高，"
+            f"而整个画框只有 {frame.bottom - frame.top:.0f}px（下面还要留出字幕条）。"
+            f"块里的行数写少一点，或者拆到另一幕去{nested}"
+        )
+
+    top = frame.bottom - stack if has_company else frame.top
+    mid_y = (top + frame.bottom) / 2
+    room = frame.right_of(mid_y, stack / 2) - frame.left
+    widest = max(widths.values())
+    if widest > room + FIT_TOLERANCE:
+        offender = max(widths, key=lambda name: widths[name])
+        line = longest[offender]
+        raise LayoutError(
+            f"场景 `{scene.id}` 里 `{offender}` 有 {widest:.0f}px 宽，"
+            f"而画框只留得出 {room:.0f}px；写出去的话会跑到画布外面。"
+            f"最长的一行是 {line[:32]!r}——把它拆短，或者换一个短一点的例子"
+        )
+
+    left = frame.left + (room - widest) / 2
+    origin = top + (frame.bottom - top - stack) / 2
+    boxes: dict[str, _Box] = {}
+    for obj in blocks:
+        boxes[obj.id] = _Box(
+            x=left + widths[obj.id] / 2,
+            y=origin + heights[obj.id] / 2,
+            width=widths[obj.id],
+            height=heights[obj.id],
+        )
+        origin += heights[obj.id] + BLOCK_GAP
+    return boxes, (top - BLOCK_GAP if has_company else frame.bottom)
+
+
+def _tree_label(line: TreeLine) -> str:
+    """A tree row as it draws: the key and its separator, then the words."""
+    return line.prefix + line.text
+
+
+def _tree_spans(depths: list[int]) -> list[int]:
+    """`spans[i]` is one past the last row of row `i`'s subtree.
+
+    A preorder list makes this one stack scan: a subtree ends where the next row
+    that is no deeper than its root appears. Both the braces and the nested
+    frames are drawn per *subtree* rather than per row, and neither can be read
+    off a single row — which is why this is a function and not a field.
+    """
+    spans = [len(depths)] * len(depths)
+    stack: list[int] = []
+    for index, depth in enumerate(depths):
+        while stack and depths[stack[-1]] >= depth:
+            spans[stack.pop()] = index
+        stack.append(index)
+    return spans
+
+
+@dataclass(frozen=True, slots=True)
+class _TreeShape:
+    """A tree's rows with their geometry settled, and the box that holds them."""
+
+    lines: list[TreeLine]
+    width: float
+    height: float
+    #: The widest row as it draws, for the refusal message that names one.
+    widest: str
+
+
+def _column_layout(
+    lines: list[TreeLine], labels: list[float], form: str
+) -> tuple[list[float], list[float], float, float]:
+    """`outline`, `brace` and `boxes`: a node's y is its row, its x is its depth.
+
+    One function rather than three, because the three differ only in how far
+    apart the levels sit, how much room is reserved at their left, and what the
+    box has to leave above and below — which is the same three questions with
+    three different answers, not three different computations.
+    """
+    step = TREE_BOX_STEP if form == "boxes" else TREE_INDENT
+    left = {"brace": TREE_BRACE_ROOM, "boxes": TREE_BOX_PAD}.get(form, 0.0)
+    xs = [left + line.depth * step for line in lines]
+    ys = [(index + 0.5) * TREE_LINE_HEIGHT for index in range(len(lines))]
+    right = max((x + width for x, width in zip(xs, labels, strict=True)), default=0.0)
+    # A frame is drawn *outside* the rows it holds: `TREE_BOX_PAD` past the
+    # widest of them, the same at the top of the stack and the bottom.
+    height = len(lines) * TREE_LINE_HEIGHT
+    if form == "boxes":
+        right += TREE_BOX_PAD
+        height += TREE_BOX_PAD * 2
+    return xs, ys, right, height
+
+
+def _branch_layout(
+    lines: list[TreeLine], depths: list[int], row_widths: list[float], form: str
+) -> tuple[list[float], list[float], float, float]:
+    """`branch` and `mind`: depth runs along x, siblings along y.
+
+    This is the arrangement the outline cannot do, and the reason both forms
+    exist. Every node at one depth shares a column, so a chain of eight nodes
+    costs **one** row rather than eight — and a column is as wide as the widest
+    words in it rather than a constant, so what the picture costs sideways is a
+    fact about that level's own labels and not a budget spent in advance.
+
+    `y` is the one real piece of arithmetic here: leaves take consecutive slots
+    and a node sits at the middle of its own children. That it needs no further
+    collision pass follows from the rows arriving in preorder — two subtrees at
+    the same depth own disjoint runs of leaves, and the middle of one run can
+    never be the middle of another. `test_render_block.py` walks every fixture
+    looking for a coincidence anyway: "it cannot happen" is the kind of claim
+    this module has been wrong about before.
+    """
+    pill = TREE_PILL_PAD_X if form == "mind" else 0.0
+    spans = _tree_spans(depths)
+
+    # `row_widths` already carries the lead, so a column is as wide as the widest
+    # *row* in it rather than as its widest label plus that lead a second time.
+    widest: dict[int, float] = {}
+    for line, width in zip(lines, row_widths, strict=True):
+        widest[line.depth] = max(widest.get(line.depth, 0.0), width + pill)
+    columns = [pill]
+    for depth in range(1, max(depths, default=0) + 1):
+        columns.append(columns[-1] + widest.get(depth - 1, 0.0) + TREE_BRANCH_GAP)
+    xs = [columns[line.depth] for line in lines]
+
+    ys = [0.0] * len(lines)
+    leaves = 0
+    for index in range(len(lines)):
+        if spans[index] == index + 1:
+            ys[index] = (leaves + 0.5) * TREE_LINE_HEIGHT
+            leaves += 1
+    # Backwards, because a parent's middle is read off children that come *after*
+    # it in the list — which preorder guarantees are already settled by now.
+    for index in range(len(lines) - 1, -1, -1):
+        if spans[index] == index + 1:
+            continue
+        children = [
+            child for child in range(index + 1, spans[index]) if depths[child] == depths[index] + 1
+        ]
+        ys[index] = (ys[children[0]] + ys[children[-1]]) / 2
+
+    right = max((x + width + pill for x, width in zip(xs, row_widths, strict=True)), default=0.0)
+    return xs, ys, right, leaves * TREE_LINE_HEIGHT
+
+
+def _placed_tree(lines: list[TreeLine], form: str, font: float, object_id: str) -> _TreeShape:
+    """A tree's rows with their baked `x`/`y`, and the box the chosen form needs.
+
+    Baked rather than recomputed in the drawer, and `branch` is why: a node sits
+    at the middle of its children, which is a fact about the whole row list and
+    not about the row. A drawer that worked it out for itself would be the second
+    place the geometry lives, and `models.TreeElement` says what that costs.
+    """
+    depths = [line.depth for line in lines]
+    deepest = max(depths, default=0)
+    if form == "boxes" and deepest > TREE_BOX_DEPTH_MAX:
+        row = _tree_label(lines[depths.index(deepest)])
+        raise LayoutError(
+            f"`{object_id}`（套盒子）嵌到了第 {deepest + 1} 层，最多 "
+            f"{TREE_BOX_DEPTH_MAX + 1} 层：每多一层，框的下边就得再往上收 "
+            f"{TREE_BOX_NUDGE:.0f}px，而框和内容之间一共只有 {TREE_BOX_PAD:.0f}px 的余地，"
+            f"再深下去框就会切进它自己要装的那一行里。"
+            f"换成 `outline`（能装 {TREE_DEPTH_MAX + 1} 层），或者把这棵树压平一点。"
+            f"最深的那一行是 {row[:24]!r}"
+        )
+
+    # The icon slot is reserved on every row of a tree that has any icon, not only
+    # on the rows that carry one, for the reason `TREE_MARKER` is: a level's words
+    # have to start at one column whatever the row above them happened to be.
+    lead = TREE_MARKER + (TREE_ICON_SLOT if any(line.icon for line in lines) else 0.0)
+    row_widths = [lead + _mono_width(_tree_label(line), font) for line in lines]
+    if form in ("branch", "mind"):
+        xs, ys, width, height = _branch_layout(lines, depths, row_widths, form)
+    else:
+        xs, ys, width, height = _column_layout(lines, row_widths, form)
+
+    widest = max(range(len(row_widths)), key=lambda index: row_widths[index], default=None)
+    return _TreeShape(
+        lines=[
+            line.model_copy(update={"x": xs[index], "y": ys[index]})
+            for index, line in enumerate(lines)
+        ],
+        width=width,
+        height=height,
+        widest=_tree_label(lines[widest]) if widest is not None else "",
+    )
+
+
+def _block_shape(
+    primitive: str, text: str, form: str, language: str, object_id: str
+) -> tuple[float, float, str]:
+    """`(width, height, widest row)` for one block, as it will actually draw.
+
+    Measured from the *parsed* form rather than from the raw string, so the box
+    is cut for the characters that reach the canvas — `键 :  值` is normalised to
+    `键: 值` on the way to the spec, and a box measured from the raw text would
+    reserve two characters that never appear.
+
+    Width and height come back together because they are one computation here:
+    what a block draws is a shape. Asking for them separately is exactly how an
+    earlier version came to size a panel by counting *distinct* row texts — two
+    rows that happened to say the same thing counted once, so the panel came out
+    a row short with the last row hanging out of its bottom, and nothing caught
+    it: the panel is drawn from the height and the rows from their own count, so
+    the two disagreed in silence.
+    """
+    font = _BLOCK_FONTS[primitive]
+    if primitive == "tree":
+        shape = _placed_tree(_outline_of(text, object_id), form, font, object_id)
+        return shape.width, shape.height, shape.widest
+
+    lines = _tokenize(text, language)
+    texts = ["".join(span.text for span in line.spans) for line in lines]
+    widths = [CODE_GUTTER + _mono_width(row, font) for row in texts]
+    widest = max(range(len(widths)), key=lambda index: widths[index], default=None)
+    return (
+        max(widths, default=0.0),
+        len(lines) * CODE_LINE_HEIGHT,
+        texts[widest] if widest is not None else "",
+    )
+
+
+def _to_tree(obj: StoryboardObject, box: _Box) -> TreeElement:
+    """A nested structure, placed in whichever form the object asked for.
+
+    The placement is recomputed here rather than carried over from the sizing
+    pass, because the two answer different questions: that one wanted the box,
+    this one wants every row's own `x`/`y`. Both go through `_placed_tree`, so
+    the box and the rows inside it cannot come from two different layouts.
+    """
+    form = _form_of(obj)
+    shape = _placed_tree(_outline_of(_block_text(obj), obj.id), form, TREE_FONT_SIZE, obj.id)
+    return TreeElement(
+        id=obj.id,
+        role=obj.role,
+        label=obj.label,
+        x=box.x,
+        y=box.y,
+        form=form,
+        lines=shape.lines,
+        focus=_focus_of(obj),
+        width=box.width,
+        height=box.height,
+        props=_props_for(obj, "tree"),
+    )
+
+
+def _to_code(obj: StoryboardObject, box: _Box) -> CodeElement:
+    """A listing, tokenised here so the player only turns names into colours."""
+    return CodeElement(
+        id=obj.id,
+        role=obj.role,
+        label=obj.label,
+        x=box.x,
+        y=box.y,
+        lines=_tokenize(_block_text(obj), _language_of(obj)),
+        language=_language_of(obj),
+        focus=_focus_of(obj),
+        width=box.width,
+        height=box.height,
+        props=_props_for(obj, "code"),
+    )
+
+
+def _values_boxes(
+    scene: StoryboardScene, stage: RenderStage, frame: _Frame
+) -> tuple[dict[str, _Box], frozenset[str]]:
+    """A row of values being compared. The cards themselves are `_card_boxes`'.
+
+    So this arranges only what is left over: any `body` the scene also declares,
+    as a single row across the top of the frame, so the card grid below has
+    something to start under. A scene of nothing but cards gets an empty table
+    back, which is the honest answer rather than an invented arrangement.
+
+    No 主角, and it is a fact about the structure rather than a gap — the same
+    one `chain` and `field` give. A comparison has no first among equals, and
+    enlarging one member of a row is the one thing that cannot make the row a
+    subject.
+    """
+    bodies = _bodies_but(scene)
+    if not bodies:
+        return {}, frozenset()
+    tallest = max(_body_size(obj)[1] for obj in bodies)
+    y = frame.top + tallest / 2
+    pitch = 24.0
+    total = sum(_body_size(obj)[0] for obj in bodies) + pitch * (len(bodies) - 1)
+    room = frame.right_of(y, tallest / 2) - frame.left
+    if total > room:
+        raise LayoutError(
+            f"场景 `{scene.id}` 选了 `values`，但顶上那 {len(bodies)} 个对象横着要 "
+            f"{total:.0f}px，画框只留得出 {room:.0f}px"
+        )
+    cursor = frame.left + (room - total) / 2
+    boxes: dict[str, _Box] = {}
+    for obj in bodies:
+        width, height = _body_size(obj)
+        boxes[obj.id] = _Box(x=cursor + width / 2, y=y, width=width, height=height)
+        cursor += width + pitch
+    return boxes, frozenset()
+
+
 def _link_endpoint_ids(scene: StoryboardScene) -> set[str]:
     """Ids that some link connects to. These are the chain's participants."""
     return {
@@ -920,7 +2127,9 @@ def _link_endpoint_ids(scene: StoryboardScene) -> set[str]:
     }
 
 
-def _chain_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
+def _chain_boxes(
+    scene: StoryboardScene, stage: RenderStage, frame: _Frame
+) -> tuple[dict[str, _Box], frozenset[str]]:
     """A left-to-right pipeline: participants on a spine, everything else below it.
 
     **Who counts as a participant is derived, not read off the role.** The first
@@ -989,28 +2198,40 @@ def _chain_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> d
         )
         cursor += width + 24.0
 
-    return boxes
+    # No 主角, and it is a fact about the structure rather than a gap — see
+    # `_PRESETS_WITH_A_LEAD`. The subject of a chain is the row, and enlarging
+    # every member of a row is the one thing that cannot make it one.
+    return boxes, frozenset()
 
 
-def _generic_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
+def _generic_boxes(
+    scene: StoryboardScene, stage: RenderStage, frame: _Frame
+) -> tuple[dict[str, _Box], frozenset[str]]:
     """A vertical column plus the text column. The last resort, and it looks like it.
 
     Deliberately no slots: `generic` is what a scene falls back to when no preset
     describes it, so pretending to arrange it would mean inventing a structure
     nobody asked for. An ordered list is the honest answer.
 
-    Takes `frame` and does not read it, which is the same statement: a column has
-    no horizontal structure to stretch. Its span down the page is the panel
-    column's own span for the same non-reason — it is where an evenly spaced list
-    looked right, not a measurement of anything.
+    Reads `frame` for its bottom edge and not for anything horizontal, which is
+    the same statement: a column has no horizontal structure to stretch. The
+    span down the page is the panel column's own span — where an evenly spaced
+    list looked right, not a measurement of anything — except that the last item
+    now has to clear the caption, so the span is shortened by the tallest item
+    in it rather than left at `PANEL_BOTTOM_RATIO`.
     """
-    return _column(
-        _bodies_but(scene),
+    bodies = _bodies_but(scene)
+    # `_column` takes centres, and the frame gives an edge: the last body's
+    # centre has to sit half of it above the line it may not cross.
+    tallest = max((_body_size(obj)[1] for obj in bodies), default=0.0)
+    boxes = _column(
+        bodies,
         stage.width * GENERIC_COLUMN_X_RATIO,
         stage.height * PANEL_TOP_RATIO,
-        stage.height * PANEL_BOTTOM_RATIO,
+        frame.bottom - tallest / 2,
         _body_size,
     )
+    return boxes, frozenset()
 
 
 def _hub_spokes(
@@ -1069,12 +2290,20 @@ def _hub_radius_x(
     return room
 
 
-def _hub_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
+def _hub_boxes(
+    scene: StoryboardScene, stage: RenderStage, frame: _Frame
+) -> tuple[dict[str, _Box], frozenset[str]]:
     """A star: the first `node` at the centre, every other body on a ring.
 
     The centre is chosen by role because that is what `hub`'s `required_roles`
     already promises the model — the validator rejects a `hub` with no `node`, so
     the first one is the hub by construction rather than by guess.
+
+    That centre **is** this preset's 主角: it is the whole system, and the leaves
+    are the parts hung off it. Sized at the role table it came out 96x48 — the
+    same size as an `endpoint` leaf would be if the leaf roles were that big —
+    so "the centre is the important thing" was true of the position and of
+    nothing else.
 
     Spokes are **not** synthesised. A star's edges are the model's to write: if
     it wants the centre joined to its leaves it should say so with a `link`, and
@@ -1095,7 +2324,7 @@ def _hub_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dic
         x=stage.width * HUB_CENTER_X_RATIO,
         y=stage.height * HUB_CENTER_Y_RATIO,
     )
-    width, height = _body_size(centres[0])
+    width, height = _lead_size(centres[0], stage)
     boxes = {centres[0].id: _Box(x=centre.x, y=centre.y, width=width, height=height)}
 
     radius_y = stage.height * HUB_RADIUS_Y_RATIO
@@ -1109,11 +2338,24 @@ def _hub_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dic
             width=width,
             height=height,
         )
-    return boxes
+    return boxes, frozenset({centres[0].id})
 
 
-def _field_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> dict[str, _Box]:
+def _field_boxes(
+    scene: StoryboardScene, stage: RenderStage, frame: _Frame
+) -> tuple[dict[str, _Box], frozenset[str]]:
     """A 2D plot: every body on the ground line, one launch slot each.
+
+    **No 主角**, which is the third of the group structures — see
+    `_PRESETS_WITH_A_LEAD` for the run that settled it. Briefly: a ball grown to
+    the 主角 floor comes out 132 across and sits *centred* on the ground line, so
+    half of it is under the axis and it covers more of the plot than the arc it
+    is supposed to be tracing.
+
+    (That it is centred on the ground line at all is what "y = 492 is where the
+    body goes" has always meant, and at the role's own 28 it was invisible. It
+    becomes a visible wrongness the moment the ball is anything but tiny — which
+    is worth knowing independently of this constant.)
 
     Bodies share the field width evenly rather than stacking at the origin. A
     comparison scene — the projectile document draws 平抛/斜抛/竖直上抛 side by
@@ -1127,6 +2369,17 @@ def _field_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> d
     bodies = _with_primitive(scene, "body")
     if not bodies:
         raise LayoutError(f"场景 `{scene.id}` 选了 `field`，却没有任何 body 可以发射")
+    strangers = [obj for obj in bodies if obj.role != FLYING_ROLE]
+    if strangers:
+        who = strangers[0]
+        raise LayoutError(
+            f"场景 `{scene.id}` 选了 `field`，但 `{who.id}`（角色 `{who.role}`，"
+            f"标签「{who.label}」）不是抛体，布局不知道它该站在哪儿——"
+            "`field` 只把 `projectile` 放上发射位，其余 body 在这个预设里没有位置。"
+            "「抛出点」「最高点」这类标记要落在轨迹上或坐标轴上，"
+            "两个位置都得从抛物线推出来；在推出这个之前宁可失败，"
+            "也不要把它摆在一条它并不在的线上"
+        )
 
     origin_x = stage.width * FIELD_ORIGIN_X_RATIO
     origin_y = stage.height * FIELD_ORIGIN_Y_RATIO
@@ -1143,7 +2396,7 @@ def _field_boxes(scene: StoryboardScene, stage: RenderStage, frame: _Frame) -> d
         width, height = _body_size(obj)
         boxes[obj.id] = _Box(x=origin_x + slot * index, y=origin_y, width=width, height=height)
 
-    return boxes
+    return boxes, frozenset()
 
 
 def _field_origin(stage: RenderStage) -> RenderPoint:
@@ -1162,16 +2415,29 @@ def _field_origin(stage: RenderStage) -> RenderPoint:
 #: Every placer takes the frame whether or not it reads it. `lane` and `generic`
 #: both ignore it and both say why; a signature that varied per preset would put
 #: that decision somewhere other than the preset it belongs to.
-_PLACERS: dict[str, Callable[[StoryboardScene, RenderStage, _Frame], dict[str, _Box]]] = {
+#:
+#: Every placer also returns the ids of the scene's 主角, because it is the
+#: placer — and nothing else — that knows which object the structure it just
+#: built is *about*. Deriving that a second time, from the roles or from the
+#: beats, would be a second answer to a question the preset already answered;
+#: `_hub_boxes` says as much in its own words ("by construction rather than by
+#: guess"). An empty set is a real answer and two presets give it — see
+#: `_PRESETS_WITH_A_LEAD`.
+_PLACERS: dict[
+    str, Callable[[StoryboardScene, RenderStage, _Frame], tuple[dict[str, _Box], frozenset[str]]]
+] = {
     "lane": _lane_boxes,
     "chain": _chain_boxes,
     "hub": _hub_boxes,
     "field": _field_boxes,
+    "values": _values_boxes,
     "generic": _generic_boxes,
 }
 
 
-def _place(scene: StoryboardScene, stage: RenderStage) -> tuple[dict[str, _Box], _Frame]:
+def _place(
+    scene: StoryboardScene, stage: RenderStage
+) -> tuple[dict[str, _Box], frozenset[str], _Frame]:
     """Panels first, then the picture around them.
 
     The order used to be the other way round in effect: each placer arranged
@@ -1189,10 +2455,77 @@ def _place(scene: StoryboardScene, stage: RenderStage) -> tuple[dict[str, _Box],
         )
     panels = _panel_boxes(scene, stage)
     frame = _frame(stage, panels)
-    boxes = placer(scene, stage, frame)
+    # Blocks first, because a block is the one thing here that *takes* a strip of
+    # the frame rather than fitting into a slot of it. The picture is arranged
+    # afterwards in what is left, which is why the frame this returns is the one
+    # the placer and the card grid both get.
+    blocks, picture_bottom = _block_layout(scene, stage, frame, _has_company(scene))
+    picture_frame = _Frame(
+        left=frame.left,
+        top=frame.top,
+        right=frame.right,
+        bottom=picture_bottom,
+        panels=frame.panels,
+    )
+    boxes, leads = placer(scene, stage, picture_frame)
+    # What the *preset* put down, captured before the panel column joins the map.
+    #
+    # The card grid starts "below what is already there", and what that means is
+    # the picture — not the panels. The panels are a column running the height of
+    # the stage, so a grid measured against them begins below the bottom of the
+    # frame: `_card_boxes`' own docstring has said "`placed` is what the preset
+    # already put down" since it was written, and until this line it was handed
+    # the panels as well. `frame.right_of` reads them through `frame`, which is
+    # why nothing here needs them in `placed` to keep clear of them sideways.
+    picture = dict(boxes)
     boxes.update(panels)
+    boxes.update(_card_boxes(scene, stage, picture_frame, picture))
+    boxes.update(blocks)
+    _check_lead(scene, leads, boxes, stage)
     _check_fit(boxes, stage, scene.id)
-    return boxes, frame
+    return boxes, leads, frame
+
+
+def _check_lead(
+    scene: StoryboardScene,
+    leads: frozenset[str],
+    boxes: dict[str, _Box],
+    stage: RenderStage,
+) -> None:
+    """The scene has a 主角, and it is big enough to be one.
+
+    The size half of this is close to a tautology — `_lead_size` grows the body
+    to the floor, and scaling by one factor on both axes means the result's
+    longest side is the floor exactly. A tautology is still worth checking when
+    the two are written in different places: the placer decides the box,
+    `_to_body` draws *the box*, and a preset that marked a lead and then placed
+    it with `_body_size` would otherwise produce a picture whose "protagonist" is
+    the same size as everything else, with nothing anywhere saying so.
+
+    The presence half is not a tautology at all. It is the half that says a
+    preset in `_PRESETS_WITH_A_LEAD` must actually name one, so that a preset
+    edited later cannot quietly join the group structures.
+    """
+    if scene.scene_type in _PRESETS_WITH_A_LEAD and not leads:
+        raise LayoutError(
+            f"场景 `{scene.id}` 选了 `{scene.scene_type}`，但这个预设的画面是要有一个"
+            "主角的，布局却没有指定任何一个对象——这一屏就没有可以看的东西"
+        )
+    floor = stage.height * LEAD_EXTENT_RATIO
+    for name in sorted(leads):
+        box = boxes.get(name)
+        if box is None:
+            raise LayoutError(
+                f"场景 `{scene.id}` 把 `{name}` 当主角，但它没有被摆放"
+                "（主角是摆出来的，不是标出来的）"
+            )
+        extent = max(box.width, box.height)
+        if extent + FIT_TOLERANCE < floor:
+            raise LayoutError(
+                f"场景 `{scene.id}` 的主角 `{name}` 最长边只有 {extent:.0f}，"
+                f"达不到画幅 {stage.height:.0f} 的 {LEAD_EXTENT_RATIO:.0%}（{floor:.0f}）；"
+                "主角小到和配角差不多时，观众找不到该看哪里"
+            )
 
 
 def _check_fit(boxes: dict[str, _Box], stage: RenderStage, scene_id: str) -> None:
@@ -1207,7 +2540,21 @@ def _check_fit(boxes: dict[str, _Box], stage: RenderStage, scene_id: str) -> Non
     *supposed* to sit exactly on the body they are mounted on — they have no box
     of their own — so counting that as an overlap would reject every correct
     scene.
+
+    The bottom edge is the caption's strip and not the canvas, and it is checked
+    separately from the other three because it is a different failure. Off the
+    canvas is an object nobody can see; under the caption is an object the
+    subtitle is sitting on top of, which looks deliberate.
     """
+    caption_top = _caption_top(stage)
+    for element_id, box in sorted(boxes.items()):
+        if box.y + box.height / 2 > caption_top + FIT_TOLERANCE:
+            raise LayoutError(
+                f"场景 `{scene_id}` 里 `{element_id}` 画进了字幕条："
+                f"它下边缘在 {box.y + box.height / 2:.0f}，而字幕从 {caption_top:.0f} 开始。"
+                "字幕压在画面上就等于把这一拍要讲的东西挡住了"
+            )
+
     for element_id, box in sorted(boxes.items()):
         if (
             box.x - box.width / 2 < -FIT_TOLERANCE
@@ -1238,6 +2585,33 @@ def _check_fit(boxes: dict[str, _Box], stage: RenderStage, scene_id: str) -> Non
 
 def _body_size(obj: StoryboardObject) -> tuple[float, float]:
     return _BODY_SIZES.get(obj.role, (64.0, 48.0))
+
+
+def _lead_size(obj: StoryboardObject, stage: RenderStage) -> tuple[float, float]:
+    """A 主角 body: grown until it is the thing the eye lands on first.
+
+    Grown, never shrunk. A role already longer than the floor keeps its size —
+    `arm` is 96 in a role table that means "long enough that a swing moves
+    something", and pulling it down to a target would trade a working hinge for
+    a uniform number.
+
+    Scaling is by one factor on both axes, so the shape does not distort and the
+    result's longest side is the floor exactly. A glyph body therefore grows its
+    ink with its box, which is what `_drawn_size` is for and the reason nothing
+    here needs to know about it.
+
+    There is no companion width cap. The first version had one, on the theory
+    that a very lopsided role would grow past the stage; scaling to a floor on
+    the longest side cannot do that, because the longest side *becomes* the
+    floor. A cap that can never bind is a constant nobody can check.
+    """
+    width, height = _body_size(obj)
+    extent = max(width, height)
+    floor = stage.height * LEAD_EXTENT_RATIO
+    if extent >= floor:
+        return (width, height)
+    scale = floor / extent
+    return (width * scale, height * scale)
 
 
 def _body_pivot(role: str, drawn_width: float, drawn_height: float) -> tuple[float, float]:
@@ -1313,8 +2687,20 @@ def _to_body(
     scene: StoryboardScene,
     stage: RenderStage,
     frame: _Frame,
+    *,
+    lead: bool = False,
 ) -> BodyElement:
-    width, height = _body_size(obj)
+    # A 主角 draws at the size its placer decided, which is the size in its box.
+    # Recomputing `_lead_size` here would be a second answer to a question the
+    # placer already answered, and the two could drift apart with nothing to
+    # notice — `_check_lead` checks the box precisely because the box is the one
+    # that gets drawn.
+    #
+    # Not for an obstacle, whose box is the model's own `radius` while its drawn
+    # shape is the role's octagon: that difference predates this and is the
+    # obstacle's own business. Leads are never obstacles — `_lane_boxes` picks
+    # them with `_bodies_but(scene, "obstacle")`.
+    width, height = (box.width, box.height) if lead else _body_size(obj)
     is_obstacle = obj.role == "obstacle"
     glyph_name = _glyph_to_draw(obj)
     path, duration = _flight(obj, box, scene, stage, frame)
@@ -1344,6 +2730,24 @@ def _to_body(
     )
 
 
+#: The one role a `field` scene launches.
+#:
+#: "Which bodies fly" used to be "every body that is not an obstacle", and that
+#: was never a decision anyone made — it was the shape of an `if`. The cost
+#: showed up in a real run: `launch`（抛出点）and `apex`（最高点）, roled `object`
+#: because the model needed marker points and had no better role to reach for,
+#: each got a full parabola baked onto it and flew off with the ball. Everything
+#: anchored to them went too — including the two `dimension`s measuring 射程 R
+#: and 最大高度 H, which are exactly the quantities a marker that moves cannot
+#: measure.
+#:
+#: So the role names the fact. `projectile` literally means 抛体, and it is the
+#: preset's own `required_roles` entry — a `field` scene is guaranteed to have
+#: one. Anything else in a `field` scene is a body with no launch, and
+#: `_field_boxes` refuses it rather than guessing where it belongs.
+FLYING_ROLE = "projectile"
+
+
 def _flight(
     obj: StoryboardObject,
     box: _Box,
@@ -1369,9 +2773,16 @@ def _flight(
     """
     if scene.scene_type != "field":
         return [], 0.0
-    if obj.role == "obstacle":
+    if obj.role != FLYING_ROLE:
         return [], 0.0
 
+    # 45° when the model said nothing is a *default* here rather than a refusal,
+    # which is the opposite of the call `_to_vector` makes for a missing
+    # `direction` — and the difference is that 0° is a wrong direction while 45°
+    # is the generic throw. It is still not good enough to ship: a 平抛 at 45° is
+    # wrong, so `validation.py`'s `heading_missing_on_a_throw` refuses it before
+    # the model is done, and this line is only reachable from a storyboard
+    # written by hand.
     heading = _number(obj, "heading", 45.0)
     span = _field_slot(scene, stage, frame)
     points = _arc_points(RenderPoint(x=box.x, y=box.y), heading, span, stage)
@@ -1395,20 +2806,17 @@ def beat_duration(narration: str) -> float:
     made-up constants. Characters are countable; the rest would be numbers I
     chose and then dressed up as derivation.
 
-    The floor is currently inert: the shortest legal `description` is 12
-    characters, which already yields 4.5s. It stays as a guard, so that
-    loosening that bound some day cannot hand the player a beat it flips past
-    inside a frame. The ceiling binds at ~58 characters, which is past the
-    length of an ordinary beat and well short of the 200 the field allows — the
-    long tail gets 7s and no more, because a beat that outlasts the viewer's
-    patience is worse than one that moves on early.
+    There is no ceiling. The upper bound on a beat is the schema's bound on
+    `description`, which is where a length rule belongs — a second one here
+    would be a number nothing could check, since the schema already makes a
+    longer description impossible. The floor is `BEAT_MIN_SECONDS`, and it binds
+    only below 8 characters, which the schema also forbids.
 
     Public because `legacy.py` needs the same answer for the frozen baseline,
     which reaches the player by a different road and would otherwise keep the
     old behaviour of sitting on its first beat forever.
     """
-    readable = len(narration) / BEAT_CHARS_PER_SECOND
-    return min(max(BEAT_BASE_SECONDS + readable, BEAT_MIN_SECONDS), BEAT_MAX_SECONDS)
+    return max(len(narration) / SPEECH_CHARS_PER_SECOND, BEAT_MIN_SECONDS)
 
 
 def _to_emitter(obj: StoryboardObject, boxes: dict[str, _Box]) -> EmitterElement:
@@ -1595,6 +3003,153 @@ def _to_readout(obj: StoryboardObject, box: _Box) -> ReadoutElement:
     )
 
 
+def _mark_of(obj: StoryboardObject) -> str:
+    """Coerce `verdict.mark`, falling back to the one word that claims nothing.
+
+    A name the vocabulary never offered has already been refused by
+    `unknown_mark`, back when there was still a model to tell — so reaching the
+    fallback means a storyboard written by hand, or a validator bypassed. It is
+    `warn` rather than `ok` for a reason worth stating: an unrecognised mark is
+    missing information, and of the three words this is the only one that does
+    not assert a fact about the object it is pinned to. Guessing "对" would put a
+    tick on something nobody checked.
+    """
+    declared = obj.props.get("mark")
+    return declared if isinstance(declared, str) and declared in MARK_NAMES else "warn"
+
+
+def _mark_glyph(mark: str) -> str | None:
+    """The glyph for a mark, or None when the glyph data is not installed.
+
+    Checked against the directory rather than against `T2_GLYPH_NAMES`, which is
+    the same call `_glyph_to_draw` makes and for the same reason: the declared
+    list is a promise about data that a half-installed checkout has not kept, and
+    a name the player cannot resolve is worse than a badge drawn without one.
+    """
+    name = VERDICT_GLYPH.get(mark)
+    return name if name in _available_glyphs() else None
+
+
+def _type_gloss_of(name: str) -> str:
+    """A type name's words, or "" for a name nothing defines.
+
+    Not raised on, for the reason `_mark_of` is not: `unknown_type` did the
+    refusing upstream, where there was still a model to retry. A card that has
+    lost its tag is a worse card, but it is still a card, and it is not worth
+    the whole storyboard — so the only thing that happens is that no tag is
+    baked for that name.
+    """
+    return next((gloss for candidate, gloss in TYPE_GLOSSES if candidate == name), "")
+
+
+def _to_card(obj: StoryboardObject, box: _Box, scene: StoryboardScene) -> CardElement:
+    """One value card: a value set large, and the type it is an example of.
+
+    `tags` is built for every type *some beat can write*, not only the declared
+    one. `type` is live, so beat 4 may say `boolean` where the object declared
+    `string`, and the words for that type are not a thing the player can work out
+    — they are the glossary in `registry.py`. So the table travels with the card,
+    sized by the lesson rather than by the vocabulary.
+    """
+    declared_text = obj.props.get("text")
+    declared_type = obj.props.get("type")
+    return CardElement(
+        id=obj.id,
+        role=obj.role,
+        label=obj.label,
+        x=box.x,
+        y=box.y,
+        text=declared_text if isinstance(declared_text, str) and declared_text else obj.label,
+        value_type=declared_type if isinstance(declared_type, str) else "",
+        tags={
+            name: CardTag(
+                text=gloss,
+                width=_text_width(gloss, CARD_TAG_FONT_SIZE) + CARD_TAG_PADDING * 2,
+            )
+            for name in _written_texts(obj, scene, "type")
+            if (gloss := _type_gloss_of(name))
+        },
+        width=box.width,
+        height=box.height,
+        props=_props_for(obj, "card"),
+    )
+
+
+def _to_verdict(
+    obj: StoryboardObject,
+    scene: StoryboardScene,
+    boxes: dict[str, _Box],
+    stage: RenderStage,
+) -> VerdictElement:
+    """A ✓ / ✗ / ! pinned through its target's top-right corner.
+
+    The mark has no position of its own, so it is placed off the *target's* box
+    — the same dependency `_to_zone` has on its anchor, and the whole reason `of`
+    is a required relation here rather than a nicety.
+
+    Where it differs from a zone is what happens when it will not fit. A zone
+    that cannot be placed is a scene that is wrong; a verdict on a body the
+    layout already put near an edge is a scene that is merely crowded, and the
+    mark is the part that can move. So the badge is held inside the canvas
+    instead of failing, and the label picks the side with room — a decision about
+    a position, which is this layer's job and not the drawer's (decision D3).
+
+    `highlights` and `emphasis` do the rest: the badge takes the mark's colour
+    and the player already knows how to pulse it.
+    """
+    anchor = _relation(obj, "of")
+    box = _anchored_box(obj, anchor, boxes, "verdict")
+    declared_text = obj.props.get("text")
+
+    half = VERDICT_SIZE / 2
+    margin = stage.width * STAGE_MARGIN_RATIO
+    # `obj.label` is in the list because it is what gets drawn when no `text` is
+    # written — the same fallback and the same reason as `_panel_texts`.
+    label_widths = [
+        _text_width(text, VERDICT_LABEL_FONT_SIZE)
+        for text in (*_written_texts(obj, scene, "text"), obj.label)
+    ]
+    label_width = max(label_widths, default=0.0)
+    x = min(max(box.x + box.width / 2, margin + half), stage.width - margin - half)
+    y = min(
+        max(box.y - box.height / 2, margin + half),
+        _caption_top(stage) - margin - half,
+    )
+
+    side: Literal["right", "left", "below"] = "right"
+    if x + half + VERDICT_LABEL_GAP + label_width > stage.width - margin:
+        side = "left"
+    if side == "left" and x - half - VERDICT_LABEL_GAP - label_width < margin:
+        # Neither side has room, so the label goes under the badge. It is the
+        # worse position — it can sit on the body the mark is judging — but the
+        # alternatives are drawing it off the canvas or over the badge.
+        side = "below"
+
+    return VerdictElement(
+        id=obj.id,
+        role=obj.role,
+        label=obj.label,
+        x=x,
+        y=y,
+        mark=_mark_of(obj),
+        text=declared_text if isinstance(declared_text, str) and declared_text else obj.label,
+        size=VERDICT_SIZE,
+        # Every mark a beat can reach, not only the declared one. `mark` is live,
+        # so a beat may switch 存疑 to 通过 — and a single glyph resolved from the
+        # declared value would then draw a warning triangle inside a badge the
+        # drawer has coloured green, with `check` not even in the spec.
+        glyphs={
+            mark: glyph
+            for mark in _written_texts(obj, scene, "mark")
+            if (glyph := _mark_glyph(mark))
+        },
+        label_width=label_width,
+        label_side=side,
+        anchor=anchor,
+        props=_props_for(obj, "verdict"),
+    )
+
+
 # --------------------------------------------------------------------------
 # The `field` vocabulary — directions, curves and callouts
 # --------------------------------------------------------------------------
@@ -1758,7 +3313,21 @@ def _to_vector(
     anchor = _relation(obj, "of")
     box = _anchored_box(obj, anchor, boxes, "vector")
     length = _vector_lengths(scene)[obj.id]
-    angle = math.radians(_to_canvas_angle(_number(obj, "direction", 0.0)))
+    # No default. This was `_number(obj, "direction", 0.0)` — a silent 0, and 0
+    # is rightwards — which turned "the model did not say which way gravity
+    # points" into an arrow pointing off the right-hand edge of a physics lesson.
+    # The validator refuses the object first (`required_props` on `vector`), so
+    # reaching this line means the storyboard was written by hand or the
+    # validator was bypassed — which is exactly when a named refusal is worth
+    # more than a plausible arrow.
+    direction = obj.props.get("direction")
+    if isinstance(direction, bool) or not isinstance(direction, (int, float)):
+        raise LayoutError(
+            f"`{obj.id}`（{obj.role}）没有写 `direction`，箭头指哪儿没法知道。"
+            "布局不会替它挑一个角度：0 是「向右」，一支朝右的重力箭头是错的，"
+            "不是难看。合法写法见词表——0 向右、90 向上、-90 向下"
+        )
+    angle = math.radians(_to_canvas_angle(float(direction)))
     magnitude = abs(_number(obj, "magnitude", 1.0))
     return VectorElement(
         id=obj.id,
@@ -1901,6 +3470,7 @@ def _to_element(
     links: dict[str, tuple[RenderPoint, RenderPoint]],
     stage: RenderStage,
     frame: _Frame,
+    leads: frozenset[str] = frozenset(),
 ) -> RenderElement:
     """Dispatch on the primitive, so every preset shares one converter.
 
@@ -1924,13 +3494,19 @@ def _to_element(
             f"`{obj.id}`（角色 `{obj.role}`）的图元 `{primitive}` 还没有布局实现——"
             f"改用 {alternatives} 就能画出来"
         )
-    if primitive in ("body", "readout"):
+    if primitive in ("body", "readout", "card", "tree", "code"):
         box = boxes.get(obj.id)
         if box is None:
             raise LayoutError(f"`{obj.id}`（{primitive}）没有被摆放：预设没有给它位置")
         if primitive == "readout":
             return _to_readout(obj, box)
-        return _to_body(obj, box, scene, stage, frame)
+        if primitive == "card":
+            return _to_card(obj, box, scene)
+        if primitive == "tree":
+            return _to_tree(obj, box)
+        if primitive == "code":
+            return _to_code(obj, box)
+        return _to_body(obj, box, scene, stage, frame, lead=obj.id in leads)
     if primitive == "emitter":
         return _to_emitter(obj, boxes)
     if primitive == "zone":
@@ -1949,6 +3525,8 @@ def _to_element(
         return _to_dimension(obj, scene, boxes)
     if primitive == "angle":
         return _to_angle(obj, scene, boxes)
+    if primitive == "verdict":
+        return _to_verdict(obj, scene, boxes, stage)
     # Unreachable for every primitive the registry declares drawable, and a test
     # walks all of them to keep it that way. If it fires, the registry is lying:
     # `drawable=True` promised a picture the dispatch below cannot draw. Naming
@@ -2006,12 +3584,12 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
     stops matching the teaching order, for no gain.
     """
     stage = stage or RenderStage()
-    boxes, frame = _place(scene, stage)
+    boxes, leads, frame = _place(scene, stage)
     links = _link_points(scene, boxes)
     elements: list[RenderElement] = []
     for obj in scene.objects:
         try:
-            elements.append(_to_element(obj, scene, boxes, links, stage, frame))
+            elements.append(_to_element(obj, scene, boxes, links, stage, frame, leads))
         except ValidationError as exc:
             # The element models are strict and the model's props are not, so a
             # value can be legal in the vocabulary and out of range in the
@@ -2052,7 +3630,10 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
         attachment={
             element.id: element.anchor
             for element in elements
-            if isinstance(element, (EmitterElement, ZoneElement, TraceElement, VectorElement))
+            if isinstance(
+                element,
+                (EmitterElement, ZoneElement, TraceElement, VectorElement, VerdictElement),
+            )
             and element.anchor is not None
         },
         # Which zone is whose threshold, read off the relations rather than off
@@ -2084,17 +3665,7 @@ def layout_storyboard(storyboard: StoryboardIR, *, stage: RenderStage | None = N
     """Place every scene. The one call the pipeline and the CLI both use."""
     stage = stage or RenderStage()
     scenes = [layout_scene(scene, stage=stage) for scene in storyboard.scenes]
-    # Collected from the laid-out scenes rather than from the storyboard, so what
-    # is embedded is exactly what survived `_glyph_to_draw` — a glyph the model
-    # asked for and layout dropped does not get shipped anyway.
-    used = sorted(
-        {
-            element.glyph
-            for scene in scenes
-            for element in scene.elements
-            if isinstance(element, BodyElement) and element.glyph is not None
-        }
-    )
+    used = _embedded_glyphs(scenes)
     return RenderSpec(
         storyboard_id=storyboard.storyboard_id,
         lesson_id=storyboard.lesson_id,
@@ -2106,3 +3677,30 @@ def layout_storyboard(storyboard: StoryboardIR, *, stage: RenderStage | None = N
         glyphs={name: _load_glyph(name) for name in used},
         scenes=scenes,
     )
+
+
+def _embedded_glyphs(scenes: list[RenderScene]) -> list[str]:
+    """Every glyph the spec has to carry, in a stable order.
+
+    Two sources, and they are different kinds of fact: a body's glyph is a choice
+    the model made, a verdict's is derived from its `mark` — which is why the
+    element carries the resolved name rather than making the player resolve it.
+
+    Collected from the *laid-out* scenes rather than from the storyboard, so what
+    is embedded is exactly what survived `_glyph_to_draw`: a glyph the model asked
+    for and layout dropped does not get shipped anyway.
+    """
+    used: set[str] = set()
+    for scene in scenes:
+        for element in scene.elements:
+            if isinstance(element, BodyElement):
+                if element.glyph:
+                    used.add(element.glyph)
+            elif isinstance(element, VerdictElement):
+                used.update(element.glyphs.values())
+            elif isinstance(element, TreeElement):
+                # A tree row's icon, which is a choice the model made exactly as
+                # a body's glyph is. Absent for four forms out of five, and for
+                # every tree written before the icons existed.
+                used.update(line.icon for line in element.lines if line.icon)
+    return sorted(used)

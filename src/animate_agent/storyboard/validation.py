@@ -17,11 +17,20 @@ from dataclasses import dataclass
 
 from animate_agent.documents.models import DocumentIR
 from animate_agent.knowledge.models import LessonIR
+from animate_agent.rendering.layout import (
+    TRANSITION_SECONDS,
+    beat_duration,
+    block_line_count,
+    tree_icon_marks,
+)
 from animate_agent.rendering.registry import (
+    BLOCK_ROWS_MAX,
     BUTTON_ACTIONS,
+    CODE_LANGUAGE_NAMES,
     CONSUMABLE_PROPS,
     EMPHASIS_NAMES,
     KNOWN_OBJECT_PROPS,
+    MARK_NAMES,
     PENDING_ALTERNATIVES,
     PENDING_ROLES,
     PRESET_BY_NAME,
@@ -30,9 +39,12 @@ from animate_agent.rendering.registry import (
     SPEED_PRESETS,
     T2_GLYPH_NAMES,
     TONE_NAMES,
+    TREE_FORM_NAMES,
+    TREE_ICON_NAMES,
+    TYPE_NAMES,
     stage_range,
 )
-from animate_agent.storyboard.models import StoryboardIR, StoryboardScene
+from animate_agent.storyboard.models import PropValue, StoryboardIR, StoryboardScene
 
 #: Whitespace and punctuation are stripped before comparing key points, because
 #: the model is copying prose out of a lesson and cosmetic drift is not a defect.
@@ -49,7 +61,10 @@ class StoryboardLimits:
     """Thresholds the validator enforces, sourced from `agent:` in the YAML."""
 
     min_steps: int = 3
-    max_steps: int = 7
+    max_steps: int = 5
+    #: The finished video, in seconds, and how far off it a storyboard may land.
+    target_seconds: float = 60.0
+    target_band: float = 0.25
     require_visual_objects: bool = True
     require_interactive_demo: bool = True
     allowed_renderers: tuple[str, ...] = ()
@@ -166,12 +181,14 @@ def validate_storyboard(
         _check_required_relations(scene, where, issues)
         _check_required_props(scene, where, issues)
         _check_steps(scene, where, limits, issues)
+        _check_blocks(scene, where, issues)
         _check_controls(scene, where, issues)
         _check_orphans(scene, where, issues)
 
     if lesson is not None:
         _check_coverage(storyboard, lesson, covered_lesson_ids, issues)
     _check_demo_presence(storyboard, limits, issues)
+    _check_total_duration(storyboard, limits, issues)
 
     return issues
 
@@ -318,6 +335,25 @@ def _check_preset(scene: StoryboardScene, where: str, issues: list[ValidationIss
             )
         )
 
+    if preset.body_roles:
+        strangers = [
+            obj
+            for obj in scene.objects
+            if ROLE_TO_PRIMITIVE.get(obj.role) == "body" and obj.role not in preset.body_roles
+        ]
+        if strangers:
+            who = strangers[0]
+            issues.append(
+                ValidationIssue(
+                    "preset_body_role_refused",
+                    f"{where}.objects.{who.id}.role",
+                    f"预设 `{preset.name}` 里 body 只能是 "
+                    f"{'、'.join(preset.body_roles)}；`{who.id}`（角色 `{who.role}`，"
+                    f"标签「{who.label}」）在这个预设里没有位置。"
+                    f"{preset.note}",
+                )
+            )
+
     body_count = sum(1 for obj in scene.objects if ROLE_TO_PRIMITIVE.get(obj.role) == "body")
     if body_count > preset.max_bodies:
         issues.append(
@@ -451,6 +487,122 @@ def _check_emphasis(value: object, where: str, issues: list[ValidationIssue]) ->
             f"`{value}` 不是已注册的 emphasis；合法值：{'、'.join(EMPHASIS_NAMES)}。"
             "写错不会报错——播放器认不出就当没写，这一拍看起来什么都没发生，"
             "而「强调」本来正是这一拍存在的理由",
+        )
+    )
+
+
+#: Props whose legal values are a closed set of words: prop, the words, the
+#: issue code, and what a misspelling costs.
+#:
+#: `tone` and `emphasis` have functions of their own above, each carrying the
+#: measurement that put it there. These two arrived together and share one shape,
+#: so they share a function and a table rather than being copies three and four
+#: of the same paragraph.
+#:
+#: The cost is worth stating because it is the worst of the four. A misspelled
+#: `tone` draws in the wrong colour; a misspelled `emphasis` draws nothing; a
+#: misspelled `mark` draws the **opposite answer**. A tick where a cross was
+#: meant is a lesson that asserts the wrong thing, in the colour that means
+#: "correct", and nothing downstream can tell it apart from the model having
+#: meant it.
+WORD_PROPS: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
+    (
+        "mark",
+        MARK_NAMES,
+        "unknown_mark",
+        "写错不会报错——播放器认不出就按 `warn` 画，"
+        "而一个存疑的感叹号和一个写错的叉号在画面上一样理直气壮",
+    ),
+    (
+        "type",
+        TYPE_NAMES,
+        "unknown_type",
+        "写错不会报错——卡片照样画，只是底下那个类型标签空了，"
+        "而空标签看起来像是这张卡片本来就不打算标类型",
+    ),
+    (
+        "language",
+        CODE_LANGUAGE_NAMES,
+        "unknown_language",
+        "写错不会报错——代码照样画，只是整段没有任何颜色，"
+        "而一段不标颜色的代码看起来像是「本来就不需要标」",
+    ),
+    (
+        "form",
+        TREE_FORM_NAMES,
+        "unknown_form",
+        "写错不会报错——整棵树退回缩进大纲，而那是最能装的一种，"
+        "所以画出来照样像模像样：你不会知道自己要的形态一次都没出现过",
+    ),
+)
+
+
+def _check_word_prop(
+    prop: str,
+    names: tuple[str, ...],
+    code: str,
+    cost: str,
+    value: object,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    if not isinstance(value, str) or value in names:
+        return
+    issues.append(
+        ValidationIssue(
+            code,
+            where,
+            f"`{value}` 不是已注册的 {prop}；合法值：{'、'.join(names)}。{cost}",
+        )
+    )
+
+
+#: The presets whose bodies are *launched*, and therefore need an angle.
+#:
+#: `field` is the only one. `_flight` reads `heading` as a physics angle — 0
+#: horizontal, 90 straight up — for a throw and for nothing else; in `lane` the
+#: same prop is a car's facing, in canvas degrees, and 0 is the right default
+#: there. `_to_canvas_angle` is where the two conventions are reconciled and is
+#: the docstring that says so.
+LAUNCH_PRESETS: frozenset[str] = frozenset({"field"})
+
+
+def _check_heading_of_a_throw(
+    preset: str,
+    role: str,
+    props: dict[str, PropValue],
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """A throw with no angle written is drawn at 45°, and 45° is an answer.
+
+    The sibling of `_check_speed_preset` and the worse failure of the two. A
+    `speed` the preset ignores moves nothing, so the beat is merely dead. A
+    `heading` nobody wrote *draws*: `_arc_points` defaults to 45, so a 平抛
+    (which is 0°) and a 竖直上抛 (which is 90°) come out as the same diagonal
+    lob. The three-way comparison scene in a real run of `projectile_motion.md`
+    is exactly that — three identical arcs, each labelled with a different kind
+    of throw, and nothing anywhere reporting a problem.
+
+    So this is one of the few places the project insists on a number rather than
+    defaulting one, and the reason is that the default is not neutral: there is
+    no "unspecified throw" shape, only the wrong one. A missing angle and a
+    deliberately 45° angle are indistinguishable on screen, which is why the
+    refusal has to happen here, while there is still a model to tell.
+    """
+    if preset not in LAUNCH_PRESETS or role != "projectile":
+        return
+    written = props.get("heading")
+    if isinstance(written, (int, float)) and not isinstance(written, bool):
+        return
+    issues.append(
+        ValidationIssue(
+            "heading_missing_on_a_throw",
+            where,
+            f"预设 `{preset}` 里的 `projectile` 必须写 `heading`：发射角，"
+            "0 是水平（平抛）、45 是斜抛、90 是竖直上抛。"
+            "不写会按 45° 画——平抛和竖直上抛都会变成同一条斜线，"
+            "而画面上不会有任何东西告诉你它画错了",
         )
     )
 
@@ -591,6 +743,10 @@ def _check_roles_and_props(
                 issues,
             )
 
+        # Per object and not per prop, unlike the two above: this one is about a
+        # prop that is *absent*, so there is no iteration to hang it off.
+        _check_heading_of_a_throw(scene.scene_type, obj.role, obj.props, obj_where, issues)
+
         # Named, not looped: `_check_tone` refuses anything that is not one of
         # five words, and `readout.text` is a string too. `emphasis` is the
         # third prop of that kind, and it is named here for the same reason.
@@ -598,6 +754,21 @@ def _check_roles_and_props(
             _check_tone(obj.props["tone"], f"{obj_where}.props.tone", issues)
         if "emphasis" in obj.props:
             _check_emphasis(obj.props["emphasis"], f"{obj_where}.props.emphasis", issues)
+
+        # Looped rather than named, unlike the two above: `WORD_PROPS` is keyed
+        # on the prop itself, so a third entry costs a line in that table and
+        # nothing here.
+        for word_prop, names, code, cost in WORD_PROPS:
+            if word_prop in obj.props:
+                _check_word_prop(
+                    word_prop,
+                    names,
+                    code,
+                    cost,
+                    obj.props[word_prop],
+                    f"{obj_where}.props.{word_prop}",
+                    issues,
+                )
 
         glyph = obj.props.get("glyph")
         if isinstance(glyph, str) and glyph not in T2_GLYPH_NAMES:
@@ -841,6 +1012,176 @@ def _check_steps(
                     )
 
 
+#: The primitives whose content is a block of rows: `tree` and `code`.
+#:
+#: Named here because they are the only two objects in this vocabulary whose size
+#: is a function of *text the model wrote* rather than of a role or a prop. That
+#: is what makes the two checks below necessary and what makes them possible: the
+#: row count is knowable at validation time, which is the last moment anybody can
+#: be told about it.
+BLOCK_PRIMITIVES: frozenset[str] = frozenset({"tree", "code"})
+
+#: `"3"` or `"2-4"`. Parsed here rather than in `layout.py` because a `focus` the
+#: layout cannot read is a *silent* failure — the drawer highlights nothing — and
+#: a silent failure is what this module exists to convert into a retry.
+_FOCUS_RANGE = re.compile(r"^(\d+)(?:-(\d+))?$")
+
+
+def _focus_text(value: object) -> str | None:
+    """A `focus` prop as the string it will be read as, or None if it is not one.
+
+    `{"focus": 3}` is accepted and read as `"3"`: the difference between it and
+    `"3"` is one pair of quotes, and refusing it would spend a retry on
+    punctuation. `layout._focus_of` stringifies the same way, so the number the
+    check is made against is the number the drawer will see.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _check_blocks(
+    scene: StoryboardScene,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """The two gates a `tree` or a `code` block needs and no other primitive does.
+
+    Both failures below are invisible on screen, and both are invisible for the
+    same reason: a block's size is a function of text, so the text can disagree
+    with the box and with the beats that point into it.
+
+    - **Too many rows.** The layout cuts a box for the rows that are there and
+      refuses one that does not fit — so this is not silent, it is terminal,
+      which is worse. `LayoutError` runs after the last LLM call with nothing fed
+      back and nothing retried, and the whole document dies. Caught here it costs
+      one retry, which is the whole argument `Primitive.drawable` already makes.
+    - **A `focus` that names no line.** `focus: "9"` on a six-line listing
+      highlights nothing, so a beat whose entire content is 看第 9 行 draws a still
+      frame. That is `step_state_inert` moved one level down: the prop is real, the
+      beat is legal, and the picture does not move. The same defect `vector.direction`
+      had, with the same measurement behind it.
+    """
+    for obj_index, obj in enumerate(scene.objects):
+        primitive_name = ROLE_TO_PRIMITIVE.get(obj.role)
+        if primitive_name not in BLOCK_PRIMITIVES:
+            continue
+        text = obj.props.get("text")
+        if not isinstance(text, str) or not text:
+            continue  # `required_prop_missing` already reported it
+        rows = block_line_count(primitive_name, text)
+        obj_where = f"{where}.objects[{obj_index}]"
+        if rows > BLOCK_ROWS_MAX:
+            issues.append(
+                ValidationIssue(
+                    "block_too_many_rows",
+                    f"{obj_where}.props.text",
+                    f"`{obj.id}` 有 {rows} 行，`{primitive_name}` 最多 {BLOCK_ROWS_MAX} 行——"
+                    "再多就塞不进画框，布局层会直接让整份分镜作废。"
+                    "只留讲得到的几行，剩下的拆成另一幕",
+                )
+            )
+
+        # Named rather than looped over `scene.steps`, because the object's own
+        # `props` is the third place a `focus` can be written — and the one a
+        # hand-written sample uses.
+        written = [("props", obj.props.get("focus"))]
+        for step_index, step in enumerate(scene.steps):
+            state = step.object_states.get(obj.id)
+            if isinstance(state, dict):
+                written.append((f"steps[{step_index}]", state.get("focus")))
+
+        if primitive_name == "tree":
+            _check_icons(obj.id, text, obj_where, issues)
+
+        for source, value in written:
+            focus = _focus_text(value)
+            if focus is None:
+                continue
+            prop_where = (
+                f"{obj_where}.props.focus"
+                if source == "props"
+                else f"{where}.{source}.object_states.{obj.id}.focus"
+            )
+            issues.extend(_focus_issues(obj.id, focus, rows, prop_where))
+
+    # `language` is left to `WORD_PROPS`, which is keyed on the prop name and
+    # needs nothing from the text.
+
+
+def _check_icons(
+    object_id: str,
+    text: str,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """Refuse a row's `[name]` mark when the name is not one of the icons.
+
+    The third silent failure a block can have, and the quietest of the three.
+    Rows are marked independently, so a typo costs exactly one row its marker and
+    leaves every other row right — which is precisely what a row that never asked
+    for one looks like. Nothing on screen says "one of these is wrong", and the
+    `[name]` goes on being drawn as ordinary text in the middle of the line.
+
+    Names are checked against the *glyph* vocabulary in `registry.TREE_ICONS`
+    rather than against `T2_GLYPH_NAMES`, which is nine times the size and mostly
+    drawings of things — a car, a magnet, a wind turbine. Those are subjects, not
+    row markers, and a set the prompt can print is what makes the refusal cheap.
+    """
+    registered = "、".join(TREE_ICON_NAMES)
+    for row_number, name in tree_icon_marks(text):
+        if name in TREE_ICON_NAMES:
+            continue
+        issues.append(
+            ValidationIssue(
+                "unknown_icon",
+                f"{where}.props.text",
+                f"`{object_id}` 第 {row_number} 行的 `[{name}]` 不是已注册图标；"
+                f"合法值：{registered}。"
+                f"写错不会报错——那一行会把 `[{name}]` 原样当普通文字画出来，"
+                "少掉的记号看起来像是这一行本来就不该有",
+            )
+        )
+
+
+def _focus_issues(
+    object_id: str,
+    focus: str,
+    rows: int,
+    where: str,
+) -> list[ValidationIssue]:
+    """A `focus` checked against the number of rows the block actually has."""
+    match = _FOCUS_RANGE.match(focus)
+    if match is None:
+        return [
+            ValidationIssue(
+                "focus_not_a_range",
+                where,
+                f'`{focus}` 不是一个行号；写成 `"3"`（第 3 行）或 `"2-4"`'
+                "（第 2 到第 4 行）。写别的形状不会报错，"
+                "只是这一拍画面上不会有任何一行被强调——"
+                "而「强调某一行」正是这一拍存在的理由",
+            )
+        ]
+    first = int(match.group(1))
+    last = int(match.group(2) or match.group(1))
+    if first < 1 or last < first or last > rows:
+        return [
+            ValidationIssue(
+                "focus_out_of_range",
+                where,
+                f"`{focus}` 指向第 {first}~{last} 行，"
+                f"但 `{object_id}` 只有 {rows} 行（行号从 1 开始）——"
+                "指到不存在的行不会报错，只是那一拍画面上什么都没被强调",
+            )
+        ]
+    return []
+
+
 def _check_controls(
     scene: StoryboardScene,
     where: str,
@@ -1008,6 +1349,71 @@ def _check_orphans(scene: StoryboardScene, where: str, issues: list[ValidationIs
                     f"对象 `{obj.id}` 没有被任何节拍高亮，也没有被任何关系引用——画了但没教",
                 )
             )
+
+
+def _check_total_duration(
+    storyboard: StoryboardIR,
+    limits: StoryboardLimits,
+    issues: list[ValidationIssue],
+) -> None:
+    """The only check in this file that measures the finished video.
+
+    Every other threshold here is local: a preset fits, a relation resolves, a
+    beat changes something. A storyboard can satisfy all of them and still run
+    three and a half minutes, and until this existed none of them would have said
+    a word — the one-minute target lived in a person's head, which is not a place
+    a retry can read it from.
+
+    **The arithmetic is imported, not restated.** `beat_duration` and
+    `TRANSITION_SECONDS` come from `rendering/layout.py`, the same module that
+    bakes a beat's length onto the step: a validator computing its own answer
+    would be the second opinion that eventually disagrees, and the picture would
+    be the one telling the truth.
+
+    Two things are counted, and the second is why this belongs to the validator
+    rather than to the layout pass. A beat's length is `beat_duration`'s business.
+    The time *between* scenes is not a beat at all: the player dips to the
+    background for `TRANSITION_SECONDS` each way and holds the beat clock while it
+    does, so a ten-scene video spends 8.1 seconds on scene changes that no beat
+    accounts for. Counting only the beats would report a video 8 seconds shorter
+    than the one that plays.
+
+    **A ceiling, not a band.** The failure this exists to catch is a video that
+    runs long — every real run so far has been three times over, never once under
+    — and a floor would cost more than it bought. This validator is also what
+    checks a hand-authored fragment (`validate_storyboard`'s optional `lesson`),
+    and the two samples it is developed against are one scene apiece: 12 to 18
+    seconds of picture that are doing their job perfectly. A two-sided band makes
+    those invalid by construction, and it does the same to every test fixture in
+    the suite, which is a validator that has stopped being usable on the thing it
+    is used on. Brevity is pushed from the other end instead, by the floors that
+    already exist — `min_steps`, and the schema's own floor on `description`.
+    """
+    scenes = len(storyboard.scenes)
+    beats = sum(
+        beat_duration(step.description) for scene in storyboard.scenes for step in scene.steps
+    )
+    transitions = max(scenes - 1, 0) * 2 * TRANSITION_SECONDS
+    total = beats + transitions
+
+    ceiling = limits.target_seconds * (1 + limits.target_band)
+    if total <= ceiling:
+        return
+
+    count = sum(len(scene.steps) for scene in storyboard.scenes)
+    characters = sum(len(step.description) for scene in storyboard.scenes for step in scene.steps)
+    issues.append(
+        ValidationIssue(
+            "total_duration_over_target",
+            "scenes",
+            f"全片 {total:.1f} 秒，超过了 {ceiling:.0f} 秒的上限"
+            f"（目标 {limits.target_seconds:.0f} 秒）。构成：{count} 个节拍共 {beats:.1f} 秒"
+            f"（{characters} 字），{scenes - 1} 次换幕的淡入淡出共 {transitions:.1f} 秒。"
+            "一句话的时长是按字数推的（每秒 6 个字），所以只有「少说」能压时长："
+            "先把每个节拍砍到 10 字上下，还不够就减节拍数，再不够就减场景数。"
+            "把节拍写短不会让片子显得赶，写长才会",
+        )
+    )
 
 
 def _check_demo_presence(

@@ -285,6 +285,227 @@ class ReadoutElement(_Element):
     align: Literal["left", "center", "right"] = "left"
 
 
+class VerdictElement(_Element):
+    """A ✓ / ✗ / ! pinned through another object's corner.
+
+    `mark` is a **word**, not a shape. `registry.py` prints the three legal names
+    into the vocabulary and `validation.py` refuses any other, so by the time a
+    spec exists the value is one of three and the drawer's job is to turn it into
+    a colour and a glyph. That is the arrangement `tone` already has, and it is
+    here for the same reason: a name the drawer cannot place would otherwise
+    degrade quietly into a mark that reads as deliberate.
+
+    `glyphs` is a table for the same reason `CardElement.tags` is one, and the
+    mistake it prevents was caught by `player_smoke.mjs` on the first fixture
+    that flipped a mark mid-scene. `mark` is live, so a beat may turn a 存疑 into
+    a 通过 — and a single `glyph` field baked from the *declared* mark then draws
+    a warning triangle inside a badge the drawer has just coloured green. The
+    spec would not contain `check` at all, so the player could not have drawn it
+    even if it had asked. Only the marks some beat can reach are in here.
+
+    A mark with no glyph data (a half-installed checkout) is simply absent from
+    the table, which leaves the badge drawn as a bare disc in that mark's colour.
+
+    `label_side` and `label_width` are baked for the reason `readout.align` is:
+    they are positions, and positions are the layout's business (decision D3).
+    """
+
+    kind: Literal["verdict"] = "verdict"
+    mark: str = "warn"
+    text: str = ""
+    size: float = Field(default=0.0, ge=0)
+    glyphs: dict[str, str] = Field(default_factory=dict)
+    label_width: float = Field(default=0.0, ge=0)
+    label_side: Literal["right", "left", "below"] = "right"
+    #: The object this mark judges. Kept so the badge follows a body that moves
+    #: during playback, exactly as an emitter's or a vector's does.
+    anchor: str | None = None
+
+
+class CardTag(_Model):
+    """One type as a card draws it: the words, and the pill that holds them.
+
+    Baked per type rather than derived at draw time because both halves are
+    decided above the player. The words are the glossary in `registry.py` — a
+    fact about the vocabulary, not about this card — and the width is a text
+    measurement, which in this project is the layout's business. `drawReadout`
+    reading `element.width` instead of calling `measureText` is the precedent.
+    """
+
+    text: str = ""
+    width: float = Field(default=0.0, ge=0)
+
+
+class CardElement(_Element):
+    """One value set large, with the type it is an example of beneath it.
+
+    `text` and `type` are both live, so a beat can rewrite either — which is the
+    teaching move this primitive is for ("同一个位置，换一个值"). That is why
+    `tags` is a table rather than a single pair of fields: a beat that sets
+    `type: "boolean"` needs the words and the pill for *that* type, and there is
+    nowhere in the player to derive them from. Only the types some beat can
+    actually write are in here, so the table is the size of the lesson rather
+    than six entries times every card.
+
+    `value_type` is the name the model wrote, kept because the tag's *colour* is
+    keyed on the name while its words come out of `tags` — the glossary lives in
+    `registry.py` and the palette in the theme, which is the same split `tone`
+    has.
+    """
+
+    kind: Literal["card"] = "card"
+    text: str = ""
+    value_type: str = ""
+    tags: dict[str, CardTag] = Field(default_factory=dict)
+    width: float = Field(default=0.0, ge=0)
+    height: float = Field(default=0.0, ge=0)
+
+
+#: What a tree node's value *looks like*, for the one purpose of choosing a
+#: colour. Named rather than inlined so `layout._value_kind` can be annotated
+#: with it — a function that sniffs a type and returns `str` is a function the
+#: type checker cannot tell from one that returns anything at all.
+TreeValueKind = Literal["string", "number", "literal", "text"]
+
+
+class TreeLine(_Model):
+    """One row of a `tree`: how deep it sits, and what it says.
+
+    `prefix` holds the key **with its separator**, so the drawer places the value
+    without measuring anything: it draws `prefix`, then `text` at the width
+    `prefix` came out. That is the arrangement `CardTag.width` and
+    `ReadoutElement.width` already have — a text measurement is the layout's
+    business (decision D3) — and it is why the colon is baked into the string
+    rather than reconstructed on the canvas, where `": "` would have to come out
+    the same width in two different languages.
+
+    `value_kind` is the *sniffed* type of `text` — `"20"` is a number, `"\\"x\\""` a
+    string — and it is baked for the reason `CardElement.tags` is: the drawer is
+    handed a name and looks up a colour, and the words a person would read the
+    kind from are on the canvas, not in a parser. It is a hint and never a claim:
+    a JSON tree is text a lesson wrote, not a document anyone validated.
+
+    `depth` is what every form reads. Which node is under which is carried by
+    indentation, so a row that lost its depth would still draw every character it
+    has and stop being a picture of a hierarchy.
+
+    `icon` is a **name**, resolved by the player against `RenderSpec.glyphs` the
+    way `body.glyph` is, and it is written by the model *inside* `text` — see
+    `registry.TREE_ICONS` for the syntax and for why a separate per-row list
+    would have been worse.
+
+    `x` and `y` are where the row draws, as an offset from the panel's text
+    origin, and they are baked for **every** form. Two of the five need it and
+    the other three would be fine without it, but one rule for all five is one
+    rule to keep: a form that computed its own positions in the drawer would be
+    the second place the geometry lives, and the two would part company the first
+    time a constant moved. `None` means the spec was written before the fields
+    existed, and the drawer falls back to the outline's own rule — `depth *
+    TREE_INDENT` across, `index * TREE_LINE_HEIGHT` down — which is exactly what
+    those specs were drawn with.
+    """
+
+    depth: int = Field(default=0, ge=0)
+    prefix: str = ""
+    text: str = ""
+    value_kind: TreeValueKind = "text"
+    icon: str = ""
+    x: float | None = None
+    y: float | None = None
+
+
+#: How a `tree` arranges its rows. The closed set is `registry.TREE_FORMS`,
+#: written out here rather than unpacked so the annotation is readable — and held
+#: equal to it by `test_render_block.py`, the way `CodeKind` is held to
+#: `registry.CODE_KINDS`.
+TreeForm = Literal["outline", "branch", "mind", "brace", "boxes"]
+
+
+class TreeElement(_Element):
+    """A nested structure, drawn in whichever of the five forms fits it.
+
+    **Both axes are bounded, and that is the design constraint rather than a
+    preference.** The stage is 960 x 600 and the frame a block may occupy is
+    narrower than that, so a form whose width grows with the number of *leaves*
+    is a form that eventually cannot be rendered at all — and the failure would
+    arrive after the last model call, which is the worst possible time to learn
+    it. Every form here therefore puts **siblings on `y` and depth on `x`**:
+    width is a function of how deep the content goes, never of how much of it
+    there is.
+
+    An earlier version of this docstring said a tidy tree's width grows with its
+    leaves and that six of them is the whole stage. That measurement is right for
+    one way of drawing a tidy tree and wrong for the other, and the difference is
+    worth keeping: spreading the leaves across the available width is a choice,
+    not a property of tree diagrams. Put each *depth* at a fixed x instead and a
+    chain of eight nodes costs one row rather than eight, which is the case the
+    outline is worst at.
+
+    `form` is settled here rather than by the drawer for the reason `code`'s
+    `language` is: it changes the geometry, and geometry is baked. It is static —
+    a beat cannot change it — because every form decides the panel's size
+    differently, and a box cut for one form cannot hold another.
+
+    The five, and what each is for, are argued in `registry.TREE_FORMS`.
+    """
+
+    kind: Literal["tree"] = "tree"
+    form: TreeForm = "outline"
+    lines: list[TreeLine] = Field(default_factory=list)
+    #: The rows to emphasise, verbatim from the prop (`"3"`, `"2-4"`). Live, so a
+    #: beat can walk a lesson down a structure one node at a time; parsed by the
+    #: drawer, because a range is data and parsing four characters is not
+    #: executing code (decision D4 is about the latter).
+    focus: str = ""
+    width: float = Field(default=0.0, ge=0)
+    height: float = Field(default=0.0, ge=0)
+
+
+#: What one span of code *is*. The closed set is `registry.CODE_KINDS`, written
+#: out here rather than unpacked so the annotation is readable — and held equal to
+#: the registry's list by a test, the same arrangement `Tone` and `TONE_GLOSSES`
+#: have. `text`, `name` and `operator` are deliberately three names for what the
+#: drawer colours the same way: they are different *facts* (whitespace between
+#: tokens, an identifier, punctuation) and one *appearance*.
+CodeKind = Literal[
+    "text", "name", "keyword", "builtin", "string", "number", "comment", "operator", "literal"
+]
+
+
+class CodeSpan(_Model):
+    """A run of characters in one code line that shares a colour."""
+
+    text: str = ""
+    kind: CodeKind = "text"
+
+
+class CodeLine(_Model):
+    """One row of a `code` block. A line with no tokens is a blank one."""
+
+    spans: list[CodeSpan] = Field(default_factory=list)
+
+
+class CodeElement(_Element):
+    """A block of source, tokenised at build time and coloured at draw time.
+
+    The split is Shiki's — what the code *is* is decided once, above the player,
+    and the player turns names into colours. The alternative, shipping the source
+    and a tokeniser, would put a second implementation of the highlighting in
+    JavaScript and give the spec a string the player has to parse.
+    """
+
+    kind: Literal["code"] = "code"
+    lines: list[CodeLine] = Field(default_factory=list)
+    #: The name the model wrote, kept because the *colour* is keyed on it while
+    #: the choice of tokeniser was made above — the same split `CardElement.value_type`
+    #: has. Nothing in the drawer reads it today; it is here so a spec says which
+    #: language it was told it was, and so `player_smoke` can print it.
+    language: str = ""
+    focus: str = ""
+    width: float = Field(default=0.0, ge=0)
+    height: float = Field(default=0.0, ge=0)
+
+
 #: Discriminated on `kind`, so an unregistered one raises by name instead of
 #: being dropped — the Fabric.js `ClassRegistry` behaviour, minus the registry.
 RenderElement = Annotated[
@@ -300,7 +521,11 @@ RenderElement = Annotated[
     | AngleElement
     | RegionElement
     | WaveElement
-    | ReadoutElement,
+    | ReadoutElement
+    | VerdictElement
+    | CardElement
+    | TreeElement
+    | CodeElement,
     Field(discriminator="kind"),
 ]
 
@@ -431,9 +656,18 @@ class RenderSpec(_Model):
             for element in scene.elements
             if isinstance(element, BodyElement) and element.glyph is not None
         }
+        # A tree row's icon arrives the same way and fails the same way: the
+        # drawer holds a name and looks its geometry up, so a name with nothing
+        # behind it is a row marker that silently is not there.
+        named.update(
+            line.icon
+            for scene in self.scenes
+            for element in scene.elements
+            if isinstance(element, TreeElement)
+            for line in element.lines
+            if line.icon
+        )
         missing = sorted(named - set(self.glyphs))
         if missing:
-            raise ValueError(
-                f"这些字形被 body 引用了，spec 却没有带上它们的几何：{'、'.join(missing)}"
-            )
+            raise ValueError(f"这些字形被 spec 引用了，却没有带上它们的几何：{'、'.join(missing)}")
         return self

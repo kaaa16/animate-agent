@@ -1,8 +1,11 @@
 /*
  * Upload page stylesheet.
  *
- * The custom properties below are copied from `frontend/player/player.css:14-30`,
- * same names in the same order. They are **consistency, not a dependency**: the
+ * The custom properties below are copied from `frontend/player/player.css`,
+ * same names in the same order — `neon`, the player's default, and only that
+ * one: this page has no palette picker, so it keeps the palette the player
+ * starts in and does not grow five more sets of colours it never switches to.
+ * They are **consistency, not a dependency**: the
  * player runs inside its own iframe and `stage.js:readTheme` reads the tokens off
  * *that* document's `documentElement`, never off this one. They are copied
  * anyway so the page and the picture it produces look like one product, and so
@@ -23,6 +26,7 @@
   --panel-strong: rgba(19, 27, 41, 0.94);
   --line: rgba(83, 246, 255, 0.32);
   --line-hot: #42f7ff;
+  --accent: #42f7ff;
   --magenta: #ff2fd6;
   --yellow: #f4f06d;
   --green: #5dff9c;

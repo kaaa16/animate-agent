@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    4.0,
+    6.0,
+    17.0,
+    12.0
+  ],
+  "name": "check",
+  "parts": {
+    "outline": {
+      "d": "M5 12l5 5l10 -10",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:check@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

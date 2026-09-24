@@ -36,8 +36,13 @@ from pathlib import Path
 
 from animate_agent.documents.models import DocumentIR
 from animate_agent.knowledge.models import LessonIR
-from animate_agent.rendering.registry import PRESETS, PRIMITIVE_BY_NAME, ROLE_TO_PRIMITIVE
-from animate_agent.storyboard.models import StoryboardIR, StoryboardScene
+from animate_agent.rendering.registry import (
+    FALLBACK_ROLES,
+    PRESETS,
+    PRIMITIVE_BY_NAME,
+    ROLE_TO_PRIMITIVE,
+)
+from animate_agent.storyboard.models import StoryboardIR, StoryboardScene, StoryboardStep
 from animate_agent.storyboard.service import build_limits
 from animate_agent.storyboard.validation import format_issues, validate_storyboard
 
@@ -91,6 +96,128 @@ def _unanchored(scene: StoryboardScene) -> list[str]:
     return found
 
 
+#: A storyboard whose fallback share reaches this is saying something about the
+#: vocabulary rather than about itself. Measured over the 24 storyboards on disk,
+#: 23 sit at or under 6% and the one at 58% is the JSON lesson, whose picture is
+#: a column of grey boxes. The gap is wide enough that a threshold inside it is a
+#: reading, not a fudge.
+FALLBACK_SHARE_WARNING = 0.30
+
+#: The same, for one prop carrying the whole picture. Over the same 24 files the
+#: median storyboard spreads its changes over 6 props with the top one near a
+#: third. Two clear it: 86% (`emphasis`, the JSON lesson) and 100% (`progress`, a
+#: publish/subscribe lesson). The first is the problem this line exists to name.
+#: The second is a link whose bar fills — a legitimate picture — so what gets
+#: printed is an observation and not a complaint, and the explanation says so.
+TOP_PROP_SHARE_WARNING = 0.80
+
+
+def _visual_key(step: StoryboardStep) -> tuple[object, ...]:
+    """What the player draws a beat from, flattened into something comparable.
+
+    `highlights` is a **set** — the order objects are named in is not a picture —
+    and `object_states` is a mapping of mappings. Sorting both is what makes
+    "these two beats are the same frame" a question this can answer at all.
+    """
+    return (
+        tuple(sorted(step.highlights)),
+        tuple(
+            sorted(
+                (target, tuple(sorted(states.items())))
+                for target, states in step.object_states.items()
+            )
+        ),
+    )
+
+
+def _picture_report(storyboard: StoryboardIR) -> tuple[list[str], list[str]]:
+    """The lines to print, and the paragraphs to print only if something tripped.
+
+    Three numbers, none of them a pass/fail — and the one that *would* have been
+    a pass/fail turned out to be already covered. `storyboard/validation.py`
+    refuses a beat that changes nothing, and measured over the 24 storyboards on
+    disk **0 of 339 consecutive pairs are visually identical**: the schema needs
+    a highlight or a state, and `_check_steps` needs that state to be read, so
+    "this beat changed nothing" never survives to reach here. A rule for it would
+    be a rule that can never fire.
+
+    What is left to measure is the opposite failure, and it is the one the person
+    watching actually reports: a beat that changes something **nobody can see**.
+
+    The sharpest reading is not how many props a film moves — the JSON lesson
+    moves five and still lands 86% of them on `emphasis` — but the fallback
+    share. A fallback role is a storyboard saying *the vocabulary has no word for
+    the thing I am looking at*, which is a statement about this project rather
+    than about the document in front of it.
+
+    Neither number is refusable, and that is the point of printing them here
+    instead of adding a check next door. Refusing a fallback role would cost the
+    document its animation entirely — a wrong picture beats no picture — and
+    refusing a lopsided prop mix would push the model to vary its output for the
+    sake of varying it, which is how `generic` came to be described as a safe
+    default and then chosen over `field` three times in five.
+    """
+    props: collections.Counter[str] = collections.Counter()
+    for scene in storyboard.scenes:
+        for step in scene.steps:
+            for states in step.object_states.values():
+                for prop in states:
+                    props[prop] += 1
+
+    roles = collections.Counter(obj.role for scene in storyboard.scenes for obj in scene.objects)
+    cast = sum(roles.values())
+    fallbacks = sum(count for role, count in roles.items() if role in FALLBACK_ROLES)
+
+    pairs = 0
+    identical = 0
+    for scene in storyboard.scenes:
+        keys = [_visual_key(step) for step in scene.steps]
+        for before, after in zip(keys, keys[1:], strict=False):
+            pairs += 1
+            identical += int(before == after)
+
+    lines: list[str] = []
+    notes: list[str] = []
+
+    total = sum(props.values())
+    if total:
+        shown = "、".join(f"{name} {count}" for name, count in props.most_common(6))
+        lines.append(f"  改画面用到的属性：{shown}")
+        lines.append(f"      （共 {total} 处改动，{len(props)} 种属性）")
+        top_prop, top_count = props.most_common(1)[0]
+        share = 100 * top_count / total
+        if top_count / total >= TOP_PROP_SHARE_WARNING:
+            lines.append(f"      ⚠ `{top_prop}` 一种就占 {share:.0f}%，变化大多是同一个动作")
+            notes.append(
+                f"⚠ 全片 {total} 处改动里有 {share:.0f}% 压在 `{top_prop}` 一个属性上。"
+                "属性种类的上限就是图元种类的上限：一个兜底盒子身上能改的、看得见的东西，"
+                "基本只剩下 `emphasis`（弹一下、抖一下）。所以这一行常常是下面兜底角色那一行"
+                "的另一种写法——两行一起出现时，读下面那行，它说的是原因。"
+            )
+    else:
+        lines.append("  改画面用到的属性：（一处都没有）")
+
+    if cast:
+        fallback_name = "/".join(sorted(FALLBACK_ROLES))
+        share = 100 * fallbacks / cast
+        lines.append(f"  兜底角色 `{fallback_name}`：{fallbacks}/{cast} 个对象（{share:.0f}%）")
+        if fallbacks / cast >= FALLBACK_SHARE_WARNING:
+            lines.append(f"      ⚠ {share:.0f}% 的对象用了兜底角色，画面里多数东西没有专门的画法")
+            notes.append(
+                f"⚠ {cast} 个对象里有 {fallbacks} 个用了兜底角色 `{fallback_name}`。"
+                "这个角色是词表里「这东西没有合适的角色」的落点。模型写它不是在偷懒，"
+                "是在说「你给我的词里，没有一个说的是我看到的这个东西」——"
+                "所以它说的不是这份产物，是图元不够用。\n"
+                "  校验台拒不了它，也不该拒：拒了这份文档就一个画面都渲染不出来，"
+                "那比画面难看更糟（见 `generic` 被描述成「安全兜底」之后发生了什么，"
+                "`registry.py` 的 `PRESETS` 里记着）。它要的是往词表里加能画这类内容的东西，"
+                "不是把模型逼去选一个不匹配的角色。"
+            )
+    lines.append(f"  相邻两拍画面完全一样：{identical} 对（共 {pairs} 对，越接近 0 越好）")
+
+    return lines, notes
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("storyboard", type=Path, help="已落盘的 StoryboardIR JSON")
@@ -123,12 +250,23 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print("逐场景（预设选择 / 布局就绪度）：")
+    #: Two ways a scene ends up `generic`, and they mean opposite things. The
+    #: first is a regression — a domain preset it satisfied went unused. The
+    #: second is an inventory problem: `generic` was the *only* eligible
+    #: preset, so there was nothing to choose. The JSON lesson has five of the
+    #: second and none of the first; reporting both as "chose generic" would
+    #: send you looking for a model that picked wrong, when the model was right
+    #: and the vocabulary was short.
     unused_domain_preset = 0
+    forced_generic = 0
     for scene in storyboard.scenes:
         eligible = _eligible_presets(scene)
         alternatives = [name for name in eligible if name != scene.scene_type and name != "generic"]
-        if scene.scene_type == "generic" and alternatives:
-            unused_domain_preset += 1
+        if scene.scene_type == "generic":
+            if alternatives:
+                unused_domain_preset += 1
+            elif eligible == ["generic"]:
+                forced_generic += 1
         unanchored = _unanchored(scene)
         print(
             f"  {scene.id}: 选了 `{scene.scene_type}`；"
@@ -140,6 +278,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"      布局画不出来（缺必需关系）：{'、'.join(unanchored)}")
 
     print()
+    print("画面变化（这份产物在屏幕上动了什么）：")
+    picture_lines, picture_notes = _picture_report(storyboard)
+    for line in picture_lines:
+        print(line)
+    for note in picture_notes:
+        print()
+        print(note)
+
+    print()
     if unused_domain_preset:
         print(
             f"⚠ {unused_domain_preset} 个场景选了 `generic` 而更具体的预设本来可用。"
@@ -149,6 +296,20 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         print("没有「可用却没选」的领域预设。")
+
+    if forced_generic:
+        print()
+        print(
+            f"⚠ {len(storyboard.scenes)} 个场景里有 {forced_generic} 个**除了 `generic` "
+            "没有别的预设可选**——不是选错，是没得选。\n"
+            "  预设是按「必需角色齐不齐」发的牌：`lane` 要 vehicle+obstacle，`chain` 要 node，"
+            "`hub` 要 node+endpoint，`field` 要 projectile。一份讲键值对和数组的文档一个都不沾，"
+            "所以每一幕都落在竖排。\n"
+            "  这一行**不是**回归（上一行才是），也不该让模型换个预设来消掉——"
+            "把 `chain` 硬套在「值可以是字符串和数字」上只会更难看。"
+            "它和画面变化里那条兜底角色占比是同一件事的两种写法：**图元种类的账**，"
+            "要还的是往词表里加东西，不是改提示词。"
+        )
     return EXIT_OK
 
 

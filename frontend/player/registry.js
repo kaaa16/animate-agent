@@ -18,13 +18,17 @@ import {
   drawAngle,
   drawAxis,
   drawBody,
+  drawCard,
+  drawCode,
   drawDimension,
   drawEmitter,
   drawLink,
   drawReadout,
   drawTrace,
   drawTraveler,
+  drawTree,
   drawVector,
+  drawVerdict,
   drawZone,
 } from "./primitives.js";
 
@@ -41,6 +45,10 @@ const DRAWERS = {
   axis: drawAxis,
   dimension: drawDimension,
   angle: drawAngle,
+  verdict: drawVerdict,
+  card: drawCard,
+  tree: drawTree,
+  code: drawCode,
 };
 
 /**
@@ -92,6 +100,30 @@ export const LIVE_PROPS = {
   // `view.lookup` for it. It used to be listed and was not read, which is the
   // one shape of wrong this table exists to make impossible — see the note above.
   readout: ["text", "tone"],
+  // `mark` and `text` are the two a beat can change, and `mark` is the one worth
+  // stating: a beat that flips a ✓ to a ✗ *is* the beat. `of` is not here
+  // because it is a relation, settled once by the layout that resolved it.
+  verdict: ["mark", "text"],
+  // `type` alongside `text`, because 「同一个位置换一种值」 is only a lesson if
+  // the tag moves with the value. Both are read through `view.lookup` in
+  // `drawCard`, and the words for the new type come from the element's own
+  // `tags` table rather than being derived from the declared one.
+  card: ["text", "type"],
+  // `text` is absent on purpose, and it is the one a reader would expect. Both
+  // of these cut their box for the rows they hold at *layout* time, so a beat
+  // that swapped in a longer structure would draw it out over its own panel —
+  // the same call `readout.align` makes, for a stronger version of the same
+  // reason. What a beat does here instead is `focus`: a tree is walked through
+  // one node per beat and a listing is read one line at a time, and that is the
+  // beat this primitive exists for.
+  //
+  // `form` is absent for a second reason stacked on the same one. The five forms
+  // do not merely draw the box differently, they *size* it differently: `branch`
+  // puts a whole chain on one row and `boxes` spends height per level, so a beat
+  // that changed the form would be drawing into a panel cut for another picture.
+  // `registry.TREE_FORMS` says the same thing from the layout's side.
+  tree: ["focus", "tone"],
+  code: ["focus", "tone"],
 };
 
 /**

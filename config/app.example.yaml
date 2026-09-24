@@ -18,13 +18,22 @@ animation:
 agent:
   # 单个 storyboard 场景里的教学节拍（step）数量上限，与下面的下限一起读。
   # 注意：这是「一幕里的节拍数」，不是「文档里的幕数」——幕数由 LessonIR 的覆盖关系决定。
-  max_storyboard_steps: 7
+  # 一幕约 6 秒，一拍约 1.5 秒（见 rendering/layout.py 的 SPEECH_CHARS_PER_SECOND），
+  # 所以上限是 5 而不是 7。
+  max_storyboard_steps: 5
   require_visual_objects: true
   require_interactive_demo: true
 
 storyboard:
   # 单个场景的节拍数下限。上限沿用上面的 agent.max_storyboard_steps。
   min_storyboard_steps: 3
+  # 成片时长目标，以及允许超出的比例。这是整条链路里唯一的「成片」指标——
+  # 其余阈值都是局部规则，全部满足仍然可能拍出三分半。
+  # 总时长 = 各拍时长之和 + 换幕淡入淡出，超过 75 秒会被打回重写。
+  # 只有上限没有下限：这份校验也要能查手写片段和两幕的测试样例，
+  # 加下限会把它们统统判成不合格（见 validation._check_total_duration）。
+  target_seconds: 60
+  target_band: 0.25
   # 比 knowledge 的 0.4 低：这一层是 schema 密集型，创作部分上游已经做完。
   temperature: 0.3
   max_retries: 3
@@ -34,8 +43,9 @@ llm:
   model: deepseek-v4-pro
 
 knowledge:
-  # 场景数上限（硬校验，超出会打回重试）。prompt 引导 6~8，这里留一点余量。
-  max_scenes: 8
+  # 场景数上限（硬校验，超出会打回重试）。prompt 引导 10~12，这里留一点余量。
+  # 60 秒 ≈ 10 幕（参照 anything2explainer：275 秒 44 镜，平均 6.2 秒一镜）。
+  max_scenes: 12
   max_retries: 3
   temperature: 0.4
   # 要求原文每个 section / block 都至少被一个场景引用到，防止漏内容。

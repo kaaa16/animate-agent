@@ -54,11 +54,21 @@ class StoryboardStep(BaseModel):
 
     id: str = Field(min_length=1, max_length=48, pattern=ID_PATTERN)
     title: str = Field(min_length=1, max_length=24)
-    # 12, not 20. The quality baseline's own beat captions run 14~22 characters
-    # ("最近回波被标记为危险候选点。"), so a 20-character floor rejects the very
-    # writing this project is trying to match — 2 of its 4 steps would fail.
-    # See docs/storyboard-milestone.md (D5).
-    description: str = Field(min_length=12, max_length=200)
+    # Both bounds are now set by `SPEECH_CHARS_PER_SECOND` (6 characters a
+    # second, `rendering/layout.py`) rather than by taste.
+    #
+    # 12 was `docs/storyboard-milestone.md`'s D5: the quality baseline's beat
+    # captions run 14~22 characters ("最近回波被标记为危险候选点。"), so a
+    # 20-character floor rejected the writing this project is trying to match.
+    # Eight keeps that reasoning and adds a second one — at 6 characters a
+    # second, 8 characters is 1.3 seconds, and a subtitle that flashes for less
+    # than that is a flicker, not a beat.
+    #
+    # 40 is the ceiling for the same reason inverted: it is 6.7 seconds, and a
+    # beat that long means the script is several times longer than the video.
+    # `total_duration_off_target` says that in seconds, which is the unit the
+    # person cutting the video is thinking in.
+    description: str = Field(min_length=8, max_length=40)
     highlights: list[str] = Field(default_factory=list, max_length=12)
     object_states: dict[str, dict[str, PropValue]] = Field(default_factory=dict)
     key_points: list[str] = Field(default_factory=list, min_length=1, max_length=8)
@@ -115,9 +125,11 @@ class StoryboardControl(BaseModel):
 class StoryboardScene(BaseModel):
     """One animated scene: a set of objects, the beats that move them, and controls.
 
-    `steps` bounds are loose here on purpose. The 3..7 shot rule lives in
+    `steps` bounds are loose here on purpose. The shot rule lives in
     `StoryboardSettings` and is enforced by the validation pass, so the repo
-    states that rule exactly once instead of restating it in the schema.
+    states that rule exactly once instead of restating it in the schema. It was
+    3..7 when a beat ran 3.8~7.0 seconds; at a beat of 1.3~6.7 it is 3..5, which
+    is `StoryboardLimits`'s business and not this docstring's.
     """
 
     model_config = ConfigDict(extra="forbid")

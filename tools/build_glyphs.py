@@ -219,6 +219,12 @@ GLYPH_SOURCES: dict[str, GlyphSource] = {
     "wrench": GlyphSource("tool", 1, _outline(1)),
     # -- 状态与指示 --------------------------------------------------------
     "warning": GlyphSource("alert-triangle", 3, _outline(3)),
+    # One element and two, measured from the pinned release. Both are bare
+    # strokes: `drawVerdict` draws the disc behind them, in the colour the mark
+    # asks for, so a glyph with its own circle would be one the drawer could not
+    # recolour.
+    "check": GlyphSource("check", 1, _outline(1)),
+    "x": GlyphSource("x", 2, _outline(2)),
     "lock": GlyphSource("lock", 3, _outline(3)),
     "clock": GlyphSource("clock", 2, _outline(2)),
     "shield": GlyphSource("shield", 1, _outline(1)),

@@ -156,6 +156,33 @@ export function blend(prop, from, target, progress) {
 }
 
 /**
+ * Whether a beat change hands over from the last beat's values, or simply lands.
+ *
+ * `setStep` asks this before it records what the properties read as *now*. Two
+ * answers are "no", and they are the same answer twice — a beat change with
+ * nothing to hand over from:
+ *
+ * - **The same beat, loaded again.** 重置 and a `reset_scene` button put back the
+ *   beat already on screen, so "where it was" and "where it is going" are the
+ *   same place; easing between them would turn a reset into a slow slide.
+ * - **Any beat, while paused.** Nothing is moving when the beat clock is
+ *   stopped, so a change is a scrub and the picture has to land on the beat the
+ *   reader asked for. Getting this one wrong is not a one-frame artefact: the
+ *   departing values get recorded, the clock goes back to zero, and `blend` at
+ *   progress 0 hands back the *old* value by design — with nothing to advance
+ *   the clock, every live property on every later beat then drew the first
+ *   beat's, permanently. A paused code block kept the previous beat's emphasis
+ *   band, and a body a beat asked to hide stayed on screen.
+ *
+ * `playing` and `sameBeat` rather than the player's own state object, because
+ * this file is DOM-free on purpose, and that is the whole reason `checkEasing`
+ * in `tools/player_smoke.mjs` can run any of it.
+ */
+export function handsOver(playing, sameBeat) {
+  return playing && !sameBeat;
+}
+
+/**
  * How long a property takes to travel, in seconds.
  *
  * Shorter than about a third of a second reads as a glitch rather than as

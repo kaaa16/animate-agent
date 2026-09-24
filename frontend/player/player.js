@@ -14,9 +14,18 @@
  */
 
 import { createSimulation } from "./behaviors.js";
-import { EASE_SECONDS, blend, easeOutCubic } from "./easing.js";
+import {
+  CAPTION_FONT_SIZE,
+  CAPTION_LINE_HEIGHT,
+  CAPTION_PAD_X,
+  captionBand,
+  captionTop,
+  wrapCaption,
+} from "./caption.js";
+import { EASE_SECONDS, blend, easeOutCubic, handsOver } from "./easing.js";
 import { LIVE_PROPS, drawElement } from "./registry.js";
 import { createStage, readTheme } from "./stage.js";
+import { STORAGE_KEY, THEMES, resolveTheme } from "./themes.js";
 
 const FIXED_STEP = 1 / 60;
 /** Beyond this, drop the backlog rather than replaying a long stall frame by frame. */
@@ -49,6 +58,17 @@ const PRESENCE_PROP = {
   trace: "visible",
 };
 
+/**
+ * How faint the background grid is, as a fraction of the palette's own
+ * structural colour.
+ *
+ * The grid was a literal `rgba(83, 246, 255, 0.07)` — `neon`'s `--line` at 0.22
+ * — so under a light palette the stage was covered in cyan graph paper. Read as
+ * a fraction of `--line` instead, `0.32 × 0.22` is the same 0.07 it has always
+ * been on the default theme, and the grid belongs to whatever palette is up.
+ */
+const GRID_ALPHA = 0.22;
+
 const ui = {
   canvas: document.getElementById("stage"),
   title: document.getElementById("title"),
@@ -57,6 +77,7 @@ const ui = {
   goal: document.getElementById("goal"),
   steps: document.getElementById("steps"),
   controls: document.getElementById("controls"),
+  themes: document.getElementById("themes"),
   play: document.getElementById("play"),
   reset: document.getElementById("reset"),
   prev: document.getElementById("prev"),
@@ -221,8 +242,13 @@ function drawChrome(ctx, scene, theme, width, height) {
   const lane = scene.elements.find((element) => element.role === "vehicle");
   const laneY = lane ? lane.y : height / 2;
 
+  // Two `save`/`restore` pairs rather than one, because the grid runs at a
+  // fraction of the palette's opacity and the lane line does not. Sharing one
+  // block would mean handing the lane line the grid's alpha and drawing it a
+  // fifth as strongly as it has always been drawn.
   ctx.save();
-  ctx.strokeStyle = "rgba(83, 246, 255, 0.07)";
+  ctx.strokeStyle = theme.line;
+  ctx.globalAlpha *= GRID_ALPHA;
   ctx.lineWidth = 1;
   for (let x = 0; x <= width; x += 40) {
     ctx.beginPath();
@@ -236,6 +262,9 @@ function drawChrome(ctx, scene, theme, width, height) {
     ctx.lineTo(width, y);
     ctx.stroke();
   }
+  ctx.restore();
+
+  ctx.save();
   ctx.setLineDash([10, 14]);
   ctx.strokeStyle = theme.line;
   ctx.lineWidth = 2;
@@ -243,6 +272,53 @@ function drawChrome(ctx, scene, theme, width, height) {
   ctx.moveTo(0, laneY);
   ctx.lineTo(width, laneY);
   ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * The words at the bottom: this beat's narration, in the strip layout kept clear.
+ *
+ * On the canvas rather than in a DOM element under it, and that is the whole
+ * reason `caption.js` and `layout.py` have to agree on `CAPTION_BAND_RATIO`: the
+ * reserved strip is a piece of the stage's coordinates, so what is drawn in it
+ * has to be too. A DOM overlay would be laid out in CSS pixels against a canvas
+ * that is *scaled to fit*, and the two would part company the first time the
+ * window changed size — invisibly, and only at some window sizes.
+ *
+ * The plate is the theme's own panel colour, so a caption over the background
+ * grid reads as a card rather than as text on graph paper. Same problem
+ * `drawReadout` solves the same way.
+ */
+function drawCaption(ctx, step, theme, stage) {
+  const text = (step?.narration ?? "").trim();
+  if (text.length === 0) return;
+
+  const top = captionTop(stage);
+  const height = captionBand(stage);
+
+  ctx.save();
+  ctx.font = `${CAPTION_FONT_SIZE}px Inter, 'Microsoft YaHei', sans-serif`;
+  // `measureText`, not a width table: the font is the renderer's, and a
+  // half-width Latin table would break a Chinese caption in the wrong place.
+  const lines = wrapCaption(
+    text,
+    (line) => ctx.measureText(line).width,
+    stage.width - 2 * CAPTION_PAD_X,
+  );
+
+  ctx.fillStyle = theme.panel;
+  ctx.fillRect(0, top, stage.width, height);
+
+  ctx.fillStyle = theme.text;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Centred as a block, so a one-line beat and a two-line beat share a middle
+  // instead of one sitting on the floor of the band and the other floating.
+  const block = lines.length * CAPTION_LINE_HEIGHT;
+  const first = top + (height - block) / 2 + CAPTION_LINE_HEIGHT / 2;
+  lines.forEach((line, index) => {
+    ctx.fillText(line, stage.width / 2, first + index * CAPTION_LINE_HEIGHT);
+  });
   ctx.restore();
 }
 
@@ -276,6 +352,12 @@ function render() {
       return;
     }
   }
+
+  // After the elements and before the fade: the words are part of *this*
+  // scene, so a scene change has to take them with it. Drawn last, a caption
+  // would sit on top of the fade and survive into the next scene, reading as
+  // narration for a picture that is already gone.
+  drawCaption(ctx, state.scene.steps[state.stepIndex], state.theme, stage);
 
   // Last, so it covers the chrome and the elements alike: a scene change is
   // about the whole stage, not about the pictures inside it.
@@ -443,10 +525,15 @@ function stepBy(delta) {
 function setStep(index) {
   const total = state.scene.steps.length;
   const clamped = Math.max(0, Math.min(total - 1, index));
-  // Captured while `state.stepIndex` still names the beat being left. Loading
-  // the *same* beat again — 重置, or a `reset_scene` button — is not a hand-over
-  // and eases from nothing, so a reset is a reset rather than a slow slide back.
-  state.departing = clamped === state.stepIndex ? new Map() : captureDeparting();
+  // Captured while `state.stepIndex` still names the beat being left. Only a
+  // change that *has* something to hand over from captures anything — the same
+  // beat reloaded (重置, a `reset_scene` button), and any change at all while
+  // paused, both land instead of easing. `easing.js:handsOver` argues both, and
+  // the paused half is the one that was missing: a camera paused to inspect
+  // beat 3 was shown beat 1, because nothing was left to advance the ease.
+  state.departing = handsOver(state.playing, clamped === state.stepIndex)
+    ? captureDeparting()
+    : new Map();
   state.stepIndex = clamped;
   // Restart the beat from rest: a step is a moment, and a beat that inherits the
   // previous one's elapsed time can never be looked at twice. It is also what
@@ -540,6 +627,96 @@ function renderControls() {
   }
 }
 
+/* ------------------------------------------------------------------- theme */
+
+/**
+ * Point the page at a palette and hand the canvas the colours it now resolves
+ * to.
+ *
+ * `state.theme` is the only place a colour comes from — every drawer takes it
+ * as an argument and `render` passes this one — so re-reading it here *is* the
+ * whole switch. There is no cache to invalidate and nothing to repaint by hand;
+ * the next frame is already in the new palette.
+ *
+ * The attribute goes on `<html>` rather than on `<body>` so that the palette
+ * also covers whatever the stylesheet hangs off `:root`, and so that a swatch's
+ * own `data-theme` — which does the same job for one chip — nests inside it
+ * without either one having to know about the other.
+ */
+function applyTheme(id) {
+  document.documentElement.dataset.theme = id;
+  state.theme = readTheme(document.documentElement);
+  renderSwatches(id);
+}
+
+/**
+ * What a click on a swatch does: switch, remember, and keep the URL honest.
+ *
+ * The URL is rewritten because the acceptance run hands these links to a person,
+ * and a link that says `?theme=paper` while the page shows薄荷 is worse than a
+ * link with no theme in it at all. `replaceState`, not `pushState`: switching
+ * the colours twice is not two places to go back to.
+ */
+function chooseTheme(id) {
+  applyTheme(id);
+  try {
+    localStorage.setItem(STORAGE_KEY, id);
+  } catch (error) {
+    // Private mode can refuse `localStorage`. The palette still changes; it
+    // just will not survive a reload, and that is not worth failing over.
+  }
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("theme", id);
+    history.replaceState(null, "", url);
+  } catch (error) {
+    // A document that cannot rewrite its own URL — opened from a `file:` path,
+    // say. Same answer: the colours are what was asked for, the address is not.
+  }
+}
+
+/**
+ * Build the picker. Called on every switch, which is what moves the ring.
+ *
+ * Rebuilt rather than updated in place for the same reason `renderSteps` is:
+ * six buttons is nothing, and a `replaceChildren` cannot leave a stale
+ * `.is-active` on a button that no longer is one.
+ */
+function renderSwatches(current) {
+  ui.themes.replaceChildren(
+    ...THEMES.map((theme) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = theme.id === current ? "swatch is-active" : "swatch";
+      button.title = `换成「${theme.label}」配色`;
+      // The chip carries the palette id and the button does not. Everything
+      // inside a `[data-theme]` subtree resolves against *that* palette, and
+      // the label is text on the page — under `neon` it would come out
+      // near-white and vanish on a light background.
+      const chip = document.createElement("span");
+      chip.className = "swatch-chip";
+      chip.dataset.theme = theme.id;
+      const name = document.createElement("span");
+      // `textContent`, never `innerHTML`. These strings are ours rather than the
+      // model's, but a second way of writing text into the document is a second
+      // thing to have to audit for the one that is not.
+      name.textContent = theme.label;
+      button.append(chip, name);
+      button.addEventListener("click", () => chooseTheme(theme.id));
+      return button;
+    }),
+  );
+}
+
+/** What was chosen last time, or null. Never throws on a locked-down browser. */
+function storedTheme() {
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch (error) {
+    return null;
+  }
+}
+
 /* -------------------------------------------------------------------- boot */
 
 function togglePlay() {
@@ -625,7 +802,14 @@ async function main() {
   }
 
   state.spec = spec;
-  state.theme = readTheme(document.documentElement);
+  // Before the first frame, and before `bind` — the picker's listeners are
+  // attached in here, and a palette that arrived after the first draw would be
+  // one painted frame in the wrong colours.
+  //
+  // A `?theme=` outranks the stored choice: a link someone was handed is a
+  // statement about the picture they were handed, and the whole point of
+  // putting the palette in the URL is that opening it shows what it says.
+  applyTheme(resolveTheme(params.get("theme") ?? storedTheme()));
   state.viewport = createStage(ui.canvas, spec.stage);
   state.viewport.resize();
 
