@@ -95,7 +95,10 @@ class KnowledgeAgent:
                 # `LLMBudgetExhaustedError` still escapes, because it is a
                 # `RuntimeError` and no retry can make the same budget fit.
                 raw = await self._llm.chat(
-                    messages, temperature=self._temperature, max_tokens=DEFAULT_MAX_TOKENS
+                    messages,
+                    temperature=self._temperature,
+                    max_tokens=DEFAULT_MAX_TOKENS,
+                    label="知识层",
                 )
                 data = extract_json_object(raw)
                 lesson = self._validate(document, data)

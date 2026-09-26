@@ -115,7 +115,10 @@ class StoryboardAgent:
             raw = ""
             try:
                 raw = await self._llm.chat(
-                    messages, temperature=self._temperature, max_tokens=self._max_tokens
+                    messages,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    label="分镜层",
                 )
                 data = extract_json_object(raw)
                 return self._validate(lesson, document, data)

@@ -10,7 +10,7 @@ of them from drifting apart.
 Layers (see `docs/storyboard-milestone.md`):
 
 - **atoms**   — draw-layer shapes; never appear in the contract.
-- **T1 primitives** — the 17 semantic primitives the model may reference.
+- **T1 primitives** — the 19 semantic primitives the model may reference.
 - **macros**  — T2 glyphs and vector decomposition; they *expand into* T1
   primitives rather than being a new primitive kind.
 """
@@ -53,6 +53,36 @@ ATOMS: tuple[str, ...] = (
 #: model is *told*, so the refusal is a backstop rather than the first it hears
 #: of it.
 BLOCK_ROWS_MAX = 16
+
+
+#: How many wrapped lines a `bubble` may hold.
+#:
+#: Here for `BLOCK_ROWS_MAX`'s reason and not `layout.py`'s, where the wrap width
+#: and the line height live: the `bubble` note below prints it, and a note is
+#: built at import time.
+#:
+#: A fit, not a taste. Three lines is 78 pixels of text inside 28 of padding —
+#: 106 of a 486-tall frame, which is under the 132 the layout calls a 主角. A
+#: callout taller than the thing it points at has stopped being a callout. The
+#: refusal in `layout._to_bubble` is the backstop; this is the ceiling the model
+#: is *told*, so it is not the first it hears of the limit.
+BUBBLE_MAX_LINES = 3
+
+
+#: The step numbers an `ordinal` may carry.
+#:
+#: Here for `BUBBLE_MAX_LINES`'s reason rather than `layout.py`'s: the note below
+#: prints them, and a note is built at import time. `validation.py` refuses
+#: anything outside the pair, so the ceiling the model is told and the one it is
+#: held to are the same two numbers.
+#:
+#: Nine because a disc that holds one digit is a disc that reads at a glance, and
+#: because a procedure with more than nine steps is not one picture. Ten through
+#: ninety-nine would need either a smaller numeral or a wider disc, and both of
+#: those change the negotiation between a badge and the thing it numbers rather
+#: than the badge's meaning.
+ORDINAL_MIN = 1
+ORDINAL_MAX = 9
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +173,74 @@ class Primitive:
     #: test rather than a silent still (the `PENDING_KINDS` argument).
     live_props: tuple[str, ...] = ()
 
+    #: Which prop decides whether this object is on screen at all.
+    #:
+    #: One name per primitive, and the player keys off it **twice**: `easing.js`
+    #: ramps it from 0 to 1 (a boolean is the one value whose halfway point means
+    #: something), and `drawElement` turns that fraction into alpha and a small
+    #: rise. Both readers ask for the name by *kind*, so a primitive that named
+    #: the wrong prop here would fade against a gate nothing reads — the element
+    #: would appear whole, on the frame the beat changed, and no layer would say
+    #: anything. `frontend/player/player.js` mirrors this table by hand and a
+    #: test asserts the two are equal, the trade `LIVE_PROPS` makes.
+    #:
+    #: `visible` everywhere except `emitter` and `zone`, which have carried
+    #: `enabled` since before there was any way to appear gradually. Renaming
+    #: them would have been tidier and would have changed what every storyboard
+    #: already on disk means, so the vocabulary offers both names with **one
+    #: gloss between them** (`_prop_hint`). The model cannot see the seam; the
+    #: rule it reads is about appearing, not about spelling.
+    #:
+    #: What this is **not**: a re-layout. A hidden object keeps the room the
+    #: layout reserved for it, and the picture around it does not close up when
+    #: it leaves. Appearing is a change to one element, not to the arrangement —
+    #: which is the same reason `RenderSpec` carries positions rather than a
+    #: scene graph the player could re-solve.
+    presence_prop: str = "visible"
+
+    #: Whether the model may still be **offered** this primitive. Not the same
+    #: question as `drawable`, and the difference is the whole reason there are
+    #: two flags.
+    #:
+    #: `drawable = False` means the layout pass does not exist yet: a model that
+    #: writes it fails in `layout_scene`, after the last call. `retired = True`
+    #: means the opposite. The drawing code is finished, it works, and pictures
+    #: already drawn with it still come out — what changed is that we no longer
+    #: want new ones. So the prompt stops offering it and `validate_storyboard`
+    #: refuses it, naming what to write instead.
+    #:
+    #: Reusing `drawable` for this would have been one field instead of two and
+    #: would have made the vocabulary lie: its pending paragraph tells the model
+    #: 「写了不会失败在提示词上，而会失败在最后一步的布局——整份分镜作废」, which
+    #: is true of a pending primitive and false of a retired one.
+    #:
+    #: A retired primitive keeps its roles and stays in `T1_PRIMITIVES` on
+    #: purpose. Removing it would take a name out of `ROLE_TO_PRIMITIVE`, and
+    #: every storyboard on disk that wrote that role would stop drawing — a
+    #: picture that used to come out and now does not, over a change of mind
+    #: about the *vocabulary*. The refusal belongs in the validator, where there
+    #: is still a model to tell.
+    retired: bool = False
+
+
+#: Live props a beat does **not** hand on to the next one.
+#:
+#: `layout._render_steps` carries every beat's `object_states` forward, because a
+#: state is something a picture keeps until something changes it back. A card that
+#: turns from `true` to `false` and turns straight back on the following beat was
+#: never a card saying `false` — the storyboard that wrote the flip cannot tell,
+#: and neither could a reader of the picture.
+#:
+#: These two are the exception, and both say so in their own notes: `emphasis` is
+#: 「这一拍强调它」 and `focus` is 「看这一行的那一拍就靠它」. They are gestures, not
+#: states. Carried, an accent would fire again at the top of every later beat —
+#: the envelope restarts on each beat's own clock — and a focus band would sit on
+#: the same rows for the rest of the scene.
+#:
+#: Two names, and the list is meant to stay short: everything added here is a prop
+#: that stops meaning what the model writing it meant.
+TRANSIENT_LIVE_PROPS: frozenset[str] = frozenset({"emphasis", "focus"})
+
 
 T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
@@ -157,12 +255,25 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
             "projectile",
             "object",
             "arm",
+            "option",
         ),
-        props=("speed", "heading", "scale", "visible", "danger", "emphasis", "glyph"),
+        props=(
+            "speed",
+            "heading",
+            "scale",
+            "visible",
+            "danger",
+            "emphasis",
+            "glyph",
+            "shape",
+            "enter",
+        ),
         relations=(),
         live_props=("speed", "heading", "scale", "visible", "danger", "emphasis"),
-        note="基础形状由角色决定；`glyph` 是可选的实物图标，写了就画成那个图标"
-        "（见下面的字形清单），不写就画基础形状。"
+        note="基础形状由角色决定（见下面每个角色的形状那一段），"
+        "`shape` 可以在角色说不出来时改掉它。"
+        "`glyph` 是可选的实物图标，写了就画成那个图标"
+        "（见下面的字形清单），不写就画基础形状——**写了 `glyph`，`shape` 就不起作用**。"
         "`object` 是兜底角色，只在确实没有合适角色时才用——留它是为了让每个被抽出的"
         "对象都有地方去，而不是被硬塞进某个不匹配的域角色。"
         "**`heading` 只转车头，不改路线**：`lane` 预设里 body 永远沿车道直行，"
@@ -172,10 +283,11 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         "所以 `heading` 在它身上是一根摆动的臂，不是一次自转。"
         "要不要用 `arm` 看内容里有没有「绕轴摆动」这件事（机械臂、单摆、指针、杠杆）；"
         "只是一根静止的杆子，用 `object` 就好。"
-        "**`emphasis` 是「这一拍强调它」**：给一个 body 选一个强调动作，它就会在这一拍"
-        "开头自己动一下（涨缩、抖、晃、摆…），一晃就归位，不改变它在画面里的位置，"
-        "也不影响别的对象。适合「注意看这个」「关键就在这里」这一类节拍——"
-        "比只写 `highlights`（只是发一下光）强。"
+        "**`option` 是「对比中的一方」**：两样东西要并排比一比的时候，"
+        "两边各写一个 `option`，这一幕就能选 `compare` 预设，它们会左右摆开、"
+        "放大到主角尺寸。它和 `object` 是同一个东西、同一个尺寸，区别只在于"
+        "「我声明了这是要拿来比的」——所以只在一幕里成对出现时用它，"
+        "单独一个 `option` 没有意义。"
         "**`speed` 只在预设 `lane` 里有意义**：其余预设的 body 不靠它移动"
         "（`chain`/`hub`/`generic` 不动，`field` 是按抛物线飞），写了不会让画面变好，"
         "只会让这个对象莫名其妙地飘出去",
@@ -183,42 +295,48 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         name="emitter",
         roles=("sensor", "transmitter", "source"),
-        props=("radius", "fov", "enabled"),
+        props=("radius", "fov", "enabled", "emphasis", "enter"),
         relations=("of",),
         required_relations=("of",),
-        live_props=("radius", "enabled"),
+        live_props=("radius", "enabled", "emphasis"),
+        # `enabled` rather than `visible`, for the reason `Primitive.presence_prop`
+        # gives: the name predates the rule and every sample on disk writes it.
+        presence_prop="enabled",
         note="扇形 + N 条射线，其中一条高亮到命中点；radius 是探测距离（激光雷达半径）。"
         "必须挂在某个 body 上——storyboard 里没有坐标，离开母体就无处安放",
     ),
     Primitive(
         name="zone",
         roles=("threshold", "safe_distance", "coverage"),
-        props=("radius", "enabled"),
+        props=("radius", "enabled", "emphasis", "enter"),
         relations=("of",),
         required_relations=("of",),
-        live_props=("radius", "enabled"),
-        note="挂在 body 上的虚线扇区/圆/环",
+        live_props=("radius", "enabled", "emphasis"),
+        presence_prop="enabled",
+        note="挂在 body 上的一个虚线整圆，`radius` 就是它的半径。"
+        "**画出来的是圆**，不是扇形也不是环——`coverage` 这类讲「覆盖范围」的角色"
+        "用的是同一个圆",
     ),
     Primitive(
         name="link",
         roles=("topic", "edge", "flow", "relation"),
-        props=("active",),
+        props=("active", "visible", "emphasis", "enter"),
         relations=("from", "to"),
         required_relations=("from", "to"),
-        live_props=("active",),
+        live_props=("active", "visible", "emphasis"),
         note="两个 body 之间的连线，虚线↔实线；两端都必填，否则这条线不存在",
     ),
     Primitive(
         name="traveler",
         roles=("message", "request", "unit"),
-        props=("speed", "progress", "state"),
+        props=("speed", "progress", "state", "visible", "emphasis", "enter"),
         relations=("along",),
         required_relations=("along",),
         # `state` is live because the token wears it as a caption. The
         # hand-written ROS sample walks one message through 待发布 → 已发布 →
         # 已接收, which is the *whole lesson* — and until the drawer read this
         # prop, three beats of a publish/subscribe diagram showed the same token.
-        live_props=("speed", "progress", "state"),
+        live_props=("speed", "progress", "state", "visible", "emphasis"),
         # "或 trace" used to be here and was not true: `_to_traveler` keys off
         # `_link_points`, so an `along` naming a trace raised and killed the
         # whole run — after the last LLM call, with nothing fed back. The note
@@ -231,19 +349,19 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         name="trace",
         roles=("trail", "trajectory", "path"),
-        props=("length", "visible"),
+        props=("length", "visible", "emphasis", "enter"),
         relations=("of",),
         required_relations=("of",),
-        live_props=("length", "visible"),
+        live_props=("length", "visible", "emphasis"),
         note="折线：body 的历史轨迹，或按公式算出的曲线；`of` 表明是谁的轨迹",
     ),
     Primitive(
         name="vector",
         roles=("velocity", "force", "displacement"),
-        props=("magnitude", "direction"),
+        props=("magnitude", "direction", "visible", "emphasis", "enter"),
         relations=("of", "component_of"),
         required_relations=("of",),
-        live_props=("magnitude", "direction"),
+        live_props=("magnitude", "direction", "visible", "emphasis"),
         # `direction` and not `magnitude`: a magnitude the model forgot still
         # draws an arrow of the right *shape* at a scene-relative length, which
         # is what `_vector_lengths` does with every magnitude anyway. A direction
@@ -258,11 +376,11 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         name="axis",
         roles=("x_axis", "y_axis"),
-        props=("range", "ticks", "origin"),
+        props=("range", "ticks", "origin", "visible", "emphasis", "enter"),
         relations=(),
         # `origin` is not here: no drawer reads it. `range` drives the tick
         # labels, which is what turns an unlabelled arrow into a coordinate axis.
-        live_props=("range", "ticks"),
+        live_props=("range", "ticks", "visible", "emphasis"),
         # `range` is the whole difference between an axis and a notched arrow.
         # Three of the three axes in the sample documents' descendants omitted
         # it, and nothing said so: the drawing was complete and meaningless.
@@ -274,20 +392,20 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         name="dimension",
         roles=("range", "height", "span"),
-        props=("label",),
+        props=("label", "visible", "emphasis", "enter"),
         relations=("from", "to"),
         required_relations=("from", "to"),
-        live_props=("label",),
+        live_props=("label", "visible", "emphasis"),
         note="两端带箭头的标注线 + 标签（射程 R、最大高度 H）；"
         "from/to 是它量的那两个点，缺一个就画不出标注线",
     ),
     Primitive(
         name="angle",
         roles=("angle", "bearing"),
-        props=("degrees", "radius"),
+        props=("degrees", "radius", "visible", "emphasis", "enter"),
         relations=("of", "between"),
         required_relations=("of",),
-        live_props=("degrees", "radius"),
+        live_props=("degrees", "radius", "visible", "emphasis"),
         note="角弧 + 标注（发射角 θ）；`of` 是角的顶点所在的对象。"
         "`between`（夹角的两条边）可选——prop 的取值是标量，装不下两个 id，"
         "真要表达「哪两条边之间」得扩展取值类型",
@@ -322,7 +440,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         # handed a plain 14px panel then and it is handed a tokenised, line-numbered
         # one now.
         roles=("hud", "decision", "caption", "formula"),
-        props=("text", "align", "tone"),
+        props=("text", "align", "tone", "emphasis", "enter"),
         relations=(),
         # `align` is not here, for the reason `axis.origin` is not: it is settled
         # once, at layout time (`_align_of`), and `drawReadout` reads the baked
@@ -336,8 +454,67 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         # waved it through by design. The gate's own table held the defect the
         # gate exists to catch, and the JS↔Python drift test could not see it,
         # because both files said the same wrong thing.
-        live_props=("text", "tone"),
-        note="文本面板；公式在这里是构建期渲好的 path，不是可解析文本",
+        live_props=("text", "tone", "emphasis"),
+        # The note this carried said 「公式在这里是构建期渲好的 path，不是可解析
+        # 文本」. There is no such pass and there never was: `drawReadout` splits
+        # `element.text` on newlines and draws each line with `fillText`.
+        # `ReadoutElement`'s own docstring says the same thing correctly one file
+        # over (「drawn with `fillText`/`textContent` and never parsed」), so the
+        # two halves of the same claim disagreed, and the wrong half was the one
+        # the model read. Nothing downstream ever depended on it — which is what
+        # made it cost something anyway: the false half was load-bearing for a
+        # *decision*. It was quoted back as the reason formulas could not go in a
+        # bubble, and a round of planning was built on that before anyone checked.
+        note="文本面板：圆角框 + 里面的字，固定摆在画面右边一列",
+        # This is the primitive the 9-scene JSON lesson put in 8 of its 9 scenes,
+        # every one of them a `hud`, every one of them restating the subtitle
+        # underneath it. Two things about the table let that happen: the four
+        # roles were printed with no gloss at all (see `render_vocabulary`), so
+        # `hud` won by being first; and a panel in a fixed right-hand column is
+        # the one drawing in this vocabulary that is *always* there once asked
+        # for, so its cost to the picture never shows up as an error.
+        #
+        # Retired rather than deleted, and rather than fixed: what the model
+        # wanted was somewhere to put text, and it should not be a box in a
+        # corner. `note` below is that answer, with roles of its own.
+        #
+        # Measured before retiring, because the first estimate was taken off one
+        # lesson and was wrong: across the storyboards on disk these four roles
+        # appear ~30 times, and only the JSON lesson is all-`hud`. So the roles
+        # are *kept here* rather than moved across — a role is a key into
+        # `ROLE_TO_PRIMITIVE`, and moving one does not reprint the old picture,
+        # it changes it in silence. `note` takes new names instead.
+        retired=True,
+    ),
+    Primitive(
+        name="note",
+        # Three names the retired panel does not use, on purpose. `formula` and
+        # `decision` would have been the obvious words and they are the two this
+        # *cannot* take: they are `readout`'s, and a role declared twice keeps
+        # whichever primitive comes last and drops the other in silence —
+        # `test_no_role_is_claimed_twice` is the assertion that says so.
+        roles=("equation", "conclusion", "aside"),
+        props=("text", "tone", "visible", "emphasis", "enter"),
+        # Optional, unlike every other relation in this table. A note is the
+        # first primitive that reads as well standing on its own as pinned to
+        # something: 「公式 v = v₀ + at」 belongs to the scene, 「这一行是键」 belongs
+        # to the line it is next to. So `of` chooses between the two placements
+        # rather than deciding whether the object can be drawn at all — which is
+        # exactly the line `required_relations` draws, so it is not one.
+        relations=("of",),
+        live_props=("text", "tone", "visible", "emphasis"),
+        required_props=("text",),
+        note=(
+            "没有框的字：没有背景、没有边框、没有尖角，就只有一行字。"
+            "三个角色各是什么：`equation` 公式或表达式、"
+            "`conclusion` 一句话的结论（合法/非法、通过/不通过）、"
+            "`aside` 补一句说明。"
+            "**它和 `bubble` 的分工是「这句话属于谁」**：属于某一个对象的，用 `bubble`；"
+            "不属于任何对象、属于这一幕本身的（总公式、总结论），用 `note`。"
+            "`of` 是可选的——写了就贴在那个对象旁边，不写就站在画面顶部一条横带里。"
+            "**它是字幕之外的那点东西**：字幕已经在说同一句的时候不要用它，"
+            "公式、判定结论、画面里读不出来的数字才用"
+        ),
     ),
     # The only primitive that is drawn **on** another object rather than at a
     # place of its own. Everything else here is either a thing (`body`) or an
@@ -353,14 +530,50 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         name="verdict",
         roles=("verdict",),
-        props=("mark", "text"),
+        props=("mark", "text", "visible", "emphasis", "enter"),
         relations=("of",),
         required_relations=("of",),
         required_props=("mark",),
-        live_props=("mark", "text"),
+        live_props=("mark", "text", "visible", "emphasis"),
         note=(
             "对错标记：把一个 ✓ / ✗ / ! 钉在另一个对象上，"
             "讲「这样是对的、那样是错的」；`of` 指向被判断的那个对象"
+        ),
+    ),
+    # 气泡 —— a rounded box of words, with a tail that points at one object.
+    #
+    # The second primitive drawn *on* another object, and the reason it is not a
+    # free-floating text panel: a bubble with nothing to point at is the panel
+    # with a tail, and the tail is then the only part of it that is new. Anchoring
+    # is what makes it an annotation rather than a paragraph — the same question
+    # `verdict.of` answers, asked of a different drawing. So `of` is required, and
+    # the consequence is the cheap half of this primitive: it gets **no placer and
+    # no preset**, because it is not placed in the frame at all. It hangs.
+    #
+    # The note names `hud`, a *role*, and that is a correction rather than a
+    # style. A sentence whose job is to say 「该用什么」 may not name a primitive:
+    # the glyph paragraph used to, and one real run answered `role: readout`
+    # twelve times, every one of them an `unknown_role` that cost a whole retry.
+    # See the comment above the glyph list.
+    Primitive(
+        name="bubble",
+        roles=("callout",),
+        props=("text", "tone", "visible", "emphasis", "enter"),
+        relations=("of",),
+        required_relations=("of",),
+        required_props=("text",),
+        live_props=("text", "tone", "visible", "emphasis"),
+        note=(
+            "气泡：带尖角的圆角框，尖角指向另一个对象，讲「对着它说一句」；"
+            "`of` 指向被指的那个对象，尖角自己找边。"
+            f"`text` 是框里那句话，最多 {BUBBLE_MAX_LINES} 行——"
+            "它是一句批注，不是一段正文。"
+            "**它补的是画面里待着不动的东西**：那种东西自己说不出来的那句话"
+            "（这张卡上写的是 `true/false`，可它没告诉你只有这两种拼法），"
+            "才是气泡该写的内容。别拿它标注车、抛体、令牌这类**会移动**的对象："
+            "会动的东西，它的意思已经在动里了，气泡只是把同一句话说第二遍。"
+            "没有东西可指的时候也别用它：那种「不属于任何一个对象」的说明用 "
+            "`note` 的 `aside`，它会自己站在画面顶部"
         ),
     ),
     # The picture for 「这几种值有什么不同」: one value set large, its type on a
@@ -375,10 +588,10 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         name="card",
         roles=("value",),
-        props=("text", "type"),
+        props=("text", "type", "visible", "emphasis", "enter"),
         relations=(),
         required_props=("text", "type"),
-        live_props=("text", "type"),
+        live_props=("text", "type", "visible", "emphasis"),
         note="值卡片：大字显示一个具体的值，下面挂一个类型标签；讲「这几种值有什么不同」时用它",
     ),
     # 嵌套结构树 —— 「谁在谁里面」的那张图。
@@ -399,7 +612,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         name="tree",
         roles=("outline", "structure", "directory"),
-        props=("text", "form", "focus", "tone"),
+        props=("text", "form", "focus", "tone", "visible", "emphasis", "enter"),
         relations=(),
         required_props=("text",),
         # `text` is deliberately absent, and it is the one prop on this primitive
@@ -414,7 +627,7 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
         # differently — `branch` puts a whole chain on one row and `boxes` spends
         # height per level — so a beat that changed the form would be drawing
         # into a panel cut for a different picture.
-        live_props=("focus", "tone"),
+        live_props=("focus", "tone", "visible", "emphasis"),
         note=(
             "结构树：把「谁在谁里面」画出来。`text` 是一段多行文本，"
             "**一层缩进 2 个空格**，越靠右就越在里面；"
@@ -439,17 +652,56 @@ T1_PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         name="code",
         roles=("listing", "config", "command"),
-        props=("text", "language", "focus", "tone"),
+        props=("text", "language", "focus", "tone", "visible", "emphasis", "enter"),
         relations=(),
         required_props=("text",),
-        live_props=("focus", "tone"),
+        live_props=("focus", "tone", "visible", "emphasis"),
         note=(
             "代码块：等宽排版的一段源码，左边带行号，按 `language` 分词上色。"
             "`text` 是多行文本，**每一行都原样画出来**（不折行、不改写）。"
-            '`focus` 是被强调的行号（`"3"` 强调第 3 行，`"2-4"` 强调第 2~4 行），'
-            "被点到的行会垫一条底色带——讲「看这一行」的那一拍就靠它。"
+            "`focus` 要强调哪几行，写法与效果见属性行上那句。"
             "`language` 只影响上色，见下面的合法值。"
             f"**最多 {BLOCK_ROWS_MAX} 行**，`text` 只能整体设置一次"
+        ),
+    ),
+    # 序号圆点 —— the third primitive drawn *on* another object, after `verdict`
+    # and `bubble`, and the first whose content is a number.
+    #
+    # `n` is written rather than derived from the object order, and that is the
+    # decision the whole primitive is built around. Deriving it would cost no
+    # objects — a scene holds twelve and a five-step procedure would spend five
+    # of them on badges — but the order it would count includes every readout,
+    # card and link the model wrote, so inserting a panel above a node would
+    # silently renumber the lesson and no layer could notice. A number the model
+    # states is a number the validator can disagree with out loud
+    # (`ordinal_duplicate`), which is the trade decision D3 makes one level up.
+    #
+    # The only primitive whose live props are `visible` and nothing else, and the
+    # reason is the interesting half. This used to be 「the first primitive with
+    # none」, argued from a step number being a fact rather than something that
+    # changes — which is still true, and is why `n` is not on the live list. What
+    # the argument missed is that *when the dot shows up* is a different question
+    # from what the dot says. A procedure walked through one beat at a time is the
+    # case this whole round is about, and a badge that appears on the beat that
+    # explains it is the clearest instance of it there is.
+    Primitive(
+        name="ordinal",
+        roles=("ordinal",),
+        props=("n", "visible", "emphasis", "enter"),
+        relations=("of",),
+        required_relations=("of",),
+        required_props=("n",),
+        live_props=("visible", "emphasis"),
+        note=(
+            "序号圆点：一个带数字的圆点，钉在另一个对象上，"
+            "讲「这是第几步」；`of` 指向它编号的那个对象。"
+            f"`n` 是那一步的序号，只能写 {ORDINAL_MIN}~{ORDINAL_MAX} 的整数——"
+            "圆点里读得出的只有一位数。"
+            "**它是给分成几步的东西编号的**：每一步挂一个，观众一眼看得出走到哪了；"
+            "同一幕里两个 `n` 相同的圆点会被打回，而跳号（①③）是允许的——"
+            "一幕可能只展示流程的一部分。"
+            "序号本身是钉住的事实，改不了；**能改的只有它露不露面**——"
+            "想指出「现在看第 3 步」，就把这一拍的 `highlights` 点在那个圆点上"
         ),
     ),
 )
@@ -507,6 +759,26 @@ LIVE_PROPS_BY_PRIMITIVE: dict[str, tuple[str, ...]] = {
 LIVE_PROPS: frozenset[str] = frozenset(
     prop for primitive in T1_PRIMITIVES for prop in primitive.live_props
 )
+
+#: primitive name -> the prop that decides whether it is on screen.
+#:
+#: Derived, so the validator and the player cannot disagree with the
+#: declarations above about which name a kind answers to. `player.js` mirrors it
+#: by hand and a test holds the two equal — the trade `LIVE_PROPS` and
+#: `SPEED_PRESETS` make, and the one that matters most here, because both
+#: readers look the name up **by kind**: a table that named `visible` for a
+#: primitive whose drawer gates on `enabled` would fade an element that never
+#: arrives, silently.
+#:
+#: Keyed by every *drawable* primitive, including the retired `readout`, because
+#: the player asks the question unconditionally — it is handed a kind, not an
+#: intention. `readout` neither offers the prop nor gates on it, so the entry is
+#: inert: the lookup falls through to the default and every old picture draws
+#: exactly as it did. What it buys is that the player's table can be complete
+#: without a special case for a primitive nobody is meant to write.
+PRESENCE_PROP: dict[str, str] = {
+    primitive.name: primitive.presence_prop for primitive in T1_PRIMITIVES if primitive.drawable
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -704,6 +976,57 @@ TYPE_GLOSSES: tuple[tuple[str, str], ...] = (
 TYPE_NAMES: tuple[str, ...] = tuple(name for name, _ in TYPE_GLOSSES)
 
 
+#: `body.shape` -> the gloss that stands in for it in the prop list.
+#:
+#: This prop exists because of a picture that was wrong: a lesson about 匀速直线
+#: 运动 put a 小球 on screen and the vocabulary drew a rounded square. The role
+#: was `object` and the model had written `glyph: "ball"` — a name that is not a
+#: glyph and never was; there are ninety of them and not one is round.
+#:
+#: So the prop answers the question the role cannot. `object` is the fallback
+#: role, which means it is the *most* likely place for a model to be holding a
+#: thing whose shape is the whole point, and until now there was no way to say
+#: 圆 at all.
+#:
+#: Three of `BodyElement.shape`'s four values are offered. `capsule` is left out
+#: on purpose: the player has no branch for it and would draw a rounded rect,
+#: which is a name that draws something else — the same defect this prop was
+#: added to close. It stays in the model's `Literal` so a spec that already says
+#: it keeps drawing.
+SHAPE_GLOSSES: tuple[tuple[str, str], ...] = (
+    ("rect", "圆角方框"),
+    ("circle", "圆"),
+    ("polygon", "多边形（六边形）"),
+)
+
+SHAPE_NAMES: tuple[str, ...] = tuple(name for name, _ in SHAPE_GLOSSES)
+
+
+#: `enter` -> the gloss that stands in for it in the prop list.
+#:
+#: The five ways an object can arrive, and the exit is not a sixth: an object
+#: leaving runs the same motion backwards, which is what every motion-design
+#: reference this was checked against says to do and is also the only version
+#: that cannot drift. The constant is `EASE_SECONDS` and it is not settable —
+#: a beat is 1.5–2.3 seconds and can afford 0.55 of one on a transition, not a
+#: number the model picks. So what is offered is a *shape*, not a duration.
+#:
+#: `wipe` states its own limit because it has one: a reveal needs a box, and a
+#: link, a vector, an axis, a trace or a traveler has none — those arrive by
+#: `rise` instead. A name whose promise is conditional is only acceptable when
+#: the condition is printed next to it, which is the difference between this
+#: and the `zone` note that promised a sector it could not draw.
+ENTER_GLOSSES: tuple[tuple[str, str], ...] = (
+    ("fade", "只是淡入，原地不动"),
+    ("rise", "从下方浮上来（**不写就是这个**）"),
+    ("drop", "从上方落下来"),
+    ("zoom", "从略小涨到本来大小"),
+    ("wipe", "从左往右擦出来；没有方框的图元（线、箭头、令牌）擦不了，会退回 rise"),
+)
+
+ENTER_NAMES: tuple[str, ...] = tuple(name for name, _ in ENTER_GLOSSES)
+
+
 #: `language` -> the gloss that stands in for it in the prop list.
 #:
 #: A closed set of three, and the smallness is the point rather than a limitation
@@ -728,7 +1051,7 @@ CODE_LANGUAGE_NAMES: tuple[str, ...] = tuple(name for name, _ in CODE_LANGUAGES)
 
 #: How a `tree` may be drawn, as a closed set with the reason each one exists.
 #:
-#: Five, and they are not five coats on one drawing. They answer two different
+#: Three, and they are not three coats on one drawing. They answer different
 #: questions about the same rows, and which one a lesson picks is a claim about
 #: what it is teaching:
 #:
@@ -737,15 +1060,18 @@ CODE_LANGUAGE_NAMES: tuple[str, ...] = tuple(name for name, _ in CODE_LANGUAGES)
 #: - `branch` puts every node of one depth in the same column and lets depth run
 #:   to the right, so a chain of eight costs **one** row. That is the case the
 #:   outline is worst at, and a real config file is usually exactly that shape.
-#: - `mind` is `branch` in different clothes — rounded nodes and curving branches
-#:   instead of right-angle connectors. Same geometry, so choosing between them
-#:   is a question about how the content reads, not about what fits.
 #: - `brace` keeps the outline's rows and wraps each run of siblings in a curly
 #:   brace. It is the one form that *draws* 「这几个是一伙的」.
-#: - `boxes` frames each level so its contents sit inside it — containment as
-#:   geometry. The most direct picture of the idea, and the one with the tightest
-#:   ceiling: a level costs about 36px of height, so four of them is most of the
-#:   frame before a single row is drawn.
+#:
+#: Two more were drawn, looked at and withdrawn, and the reason they went is the
+#: same one twice: each was a second way of drawing a shape already in the set, so
+#: the only thing a model could do with the choice was guess. `mind` was `branch`
+#: in different clothes — rounded nodes and curving branches over byte-for-byte
+#: the same geometry — and a coin flip presented as a decision is worse than no
+#: decision, because it *looks* like the model thought about it. `boxes` framed
+#: each level so its contents sat inside the frame, which indentation already
+#: says; it was the least legible of the five and the tightest, at about 36px of
+#: height per level and a ceiling of four.
 #:
 #: What they have in common is the constraint that makes them a closed set:
 #: **siblings go on `y` and depth goes on `x`**, so width is a function of how
@@ -758,9 +1084,7 @@ CODE_LANGUAGE_NAMES: tuple[str, ...] = tuple(name for name, _ in CODE_LANGUAGES)
 TREE_FORMS: tuple[tuple[str, str], ...] = (
     ("outline", "缩进大纲：一行一个节点，越深越靠右。最能装，也最像一页清单"),
     ("branch", "横向树：根在左边，一层往右走一格，节点之间连线。又深又窄的东西用它"),
-    ("mind", "思维导图：和横向树同一个摆法，但节点是圆角块、分支是曲线。讲发散用它"),
     ("brace", "花括号分组：还是竖排的行，但同一层的兄弟被一个花括号括在一起"),
-    ("boxes", "套盒子：每一层画成一个框，东西真装在框里。层数别多，四层就到顶"),
 )
 
 TREE_FORM_NAMES: tuple[str, ...] = tuple(name for name, _ in TREE_FORMS)
@@ -805,9 +1129,55 @@ TREE_ICONS: tuple[tuple[str, str], ...] = (
     ("flask", "一次实验"),
     ("clock", "和时间有关"),
     ("warning", "需要注意的"),
+    # The two a model reaches for unprompted, and the two that used to cost a
+    # whole retry. `[check]` and `[x]` were refused as `unknown_icon` because
+    # they were absent from this tuple while `assets/glyphs/check.json` and
+    # `x.json` sat on disk the whole time — the marker drawings its verdict
+    # element already ships. So the most natural word for "this row is good"
+    # was, to the only writer that matters, not a word at all. Nothing about
+    # the drawing changed; it was only unregistered. A run that tripped this
+    # spent 159s of its 371s re-sending the same prompt.
+    ("check", "肯定、成立、做到了"),
+    ("x", "否定、不成立、做不到"),
 )
 
 TREE_ICON_NAMES: tuple[str, ...] = tuple(name for name, _ in TREE_ICONS)
+
+
+#: The palettes a lesson may be drawn in, as a closed set of **theme ids**.
+#:
+#: The colours are deliberately not here, and the glosses below do not name one.
+#: They live in `frontend/player/player.css`, one `[data-theme="…"]` block each,
+#: and `stage.js:readTheme` reads whichever block is up. That indirection is what
+#: makes 「框底」 and 「框里的字」 two independent slots across six palettes instead
+#: of six hand-paired colourings, and it is why this table can be written without
+#: a single hex value in it.
+#:
+#: This is a **third** copy of the six names — `player.css` declares them,
+#: `themes.js` lists them, and this is what the vocabulary prints and what
+#: `unknown_theme` validates against. That is the price of letting the model name
+#: one at all, and it is the same price `TREE_ICONS` pays; the difference is that
+#: the icons' second copy is data on disk while this one is a stylesheet.
+#: `test_player_theme.py` holds all three together, because an id in one and not
+#: another is a palette the model is told to use and the page cannot show — which
+#: draws as the default, silently, exactly like every other defect this file has
+#: a paragraph about.
+#:
+#: The glosses describe a *mood*, not a colour, because a mood is the only part of
+#: a palette a model can reason about. It knows what a lesson about a night sky is
+#: like; it has never seen `#c3a6ff`, and telling it that string would be asking
+#: it to do the renderer's job. Each one ends with what it suits, so the choice is
+#: about the lesson rather than about taste.
+PALETTES: tuple[tuple[str, str], ...] = (
+    ("neon", "霓虹：深底高饱和，像一排仪表。控制、代码、传感器"),
+    ("dusk", "暮紫：深底偏暖，安静。天文、夜间、周期"),
+    ("blueprint", "蓝图：深底藏青配金，像工程图。设计、测量、结构"),
+    ("paper", "纸白：米白底，像一页讲义。推导、定义、文字多的时候"),
+    ("mint", "薄荷：白底薄荷绿，清爽。生命、生态、健康"),
+    ("sakura", "樱粉：白底樱粉，柔和。人文、艺术、日常"),
+)
+
+PALETTE_NAMES: tuple[str, ...] = tuple(name for name, _ in PALETTES)
 
 
 #: The gloss that stands in for `focus` in the prop list.
@@ -821,7 +1191,46 @@ TREE_ICON_NAMES: tuple[str, ...] = tuple(name for name, _ in TREE_ICONS)
 #:
 #: Both block primitives carry it — a tree is walked through one node per beat
 #: exactly as a listing is walked through one line — so it is glossed here, once.
-FOCUS_GLOSS = '要强调的行：一个数（`"3"`）或一个区间（`"2-4"`），从 1 开始数'
+#:
+#: **It now says what the prop does as well as what it looks like.** The prop
+#: line is where the model reads the value it is about to write, and until this
+#: said so, the only sentence anywhere describing the band lived in `code`'s own
+#: note — a screen away from the prop, and absent from `tree` entirely. Same
+#: failure as `PRESENCE_GLOSS` and the tone glosses: a name whose meaning the
+#: model was never told at the point of writing it.
+FOCUS_GLOSS = (
+    '要强调的行：一个数（`"3"`）或一个区间（`"2-4"`），从 1 开始数；'
+    "被点到的行会垫一条底色带、随这一拍淡入——讲「看这一行」的那一拍就靠它。"
+    "**它只能写在某一拍里**（`object_states`），不能写在对象的 `props` 上——"
+    "写在对象上会一直亮着，校验台会打回"
+)
+
+
+#: The gloss for `visible` and `enabled`, which are one prop wearing two names.
+#:
+#: The fourth instance of 「a prop the model may set, whose meaning it was never
+#: told」, and the one with the largest gap between what the vocabulary said and
+#: what the player did. `visible` has been a live prop of `body` and `trace`
+#: since the beginning; `easing.js` has ramped it, `drawElement` has multiplied
+#: the alpha by it, and `_prop_hint` had never said a word about it. So the
+#: answer to 「我讲到这里它才出现」 was in the prompt the whole time as a bare
+#: name, and a model reading a bare name has no reason to think it is the word
+#: for that.
+#:
+#: One gloss for two names because there is one rule. `enabled` is older — it is
+#: what `emitter` and `zone` have always been gated on, and the sample on disk
+#: writes it — so renaming would have changed what those documents mean. Which
+#: name is legal is decided by the primitive; which one the model should reach
+#: for is not a decision at all, so it is never asked to make it.
+#:
+#: Kept to a line's length rather than a paragraph's, and shorter than any other
+#: gloss here for a mechanical reason: it prints on **sixteen** prop lines, so
+#: every clause in it is paid sixteen times in the prompt. What it keeps is the
+#: half that is a *legal value* — the two booleans and, the part nothing else in
+#: this vocabulary does, that the absent case is on. The half that is an
+#: instruction (write `false` here, `true` on the beat that explains it) is a
+#: paragraph above the whole list, printed once: see `render_vocabulary`.
+PRESENCE_GLOSS = "true 出现在画面上、false 不出现；**不写就是 true**（从第一拍起就在）"
 
 
 #: The kinds a `CodeSpan` may be given, as a closed set.
@@ -878,6 +1287,26 @@ PENDING_ROLES: frozenset[str] = frozenset(
 PENDING_ALTERNATIVES: dict[str, str] = {
     "region": "`zone`（挂在 body 上的虚线范围）或 `dimension`（带箭头的尺寸标注）",
     "wave": "`trace`（一条按算法采样出来的折线——它同样能画正弦）",
+}
+
+#: The same two halves again, one axis over: roles whose primitive is withdrawn.
+#:
+#: `PENDING_ROLES` is "the layout cannot build this yet"; this is "the drawing
+#: exists and we do not want any more of it". Both end at the same prompt — the
+#: name must not be offered — but they are separate sets because the *reason*
+#: printed to the model is different, and a reason is the whole of what a
+#: refusal is for.
+RETIRED_ROLES: frozenset[str] = frozenset(
+    role for primitive in T1_PRIMITIVES if primitive.retired for role in primitive.roles
+)
+
+#: Where a model that reached for a retired role should go instead. Beside the
+#: set for the reason `PENDING_ALTERNATIVES` is beside `PENDING_ROLES`.
+RETIRED_ALTERNATIVES: dict[str, str] = {
+    "hud": "`note` 的 `aside`（没有框的一行字）或 `bubble`（贴在某个对象旁边的气泡）",
+    "caption": "`note` 的 `aside`（没有框的一行字）或 `bubble`（贴在某个对象旁边的气泡）",
+    "decision": "`note` 的 `conclusion`（结论一行字），或者给对象钉一个 `verdict` 圆盘",
+    "formula": "`note` 的 `equation`（没有框的公式）",
 }
 
 
@@ -1252,8 +1681,34 @@ class Preset:
 
 PRESETS: tuple[Preset, ...] = (
     Preset("lane", ("vehicle", "obstacle"), 6, "一维通道上的避障：车、障碍、安全距离"),
-    Preset("chain", ("node",), 8, "有向链路：ROS 节点 / API 调用链"),
-    Preset("hub", ("node", "endpoint"), 8, "星形拓扑：一个中心与若干叶子"),
+    Preset(
+        "chain",
+        ("node",),
+        8,
+        "有向链路：ROS 节点 / API 调用链。**一步接一步的东西才用它**——"
+        "相邻两个节点之间**各写一条 `link`** 把它们连起来（5 个节点要 4 条，"
+        "一条都不能少），少了会被校验打回（说 `node_off_the_chain`）。"
+        "**几样并列、没有先后的东西不要用 `chain`**：画出来就是一排并排的框加一根箭头，"
+        "观众会去找它们之间的关系，而那里根本没有关系——并列的用 `generic`",
+    ),
+    # `hub` had a one-line note that said what it *draws* and nothing about when
+    # to reach for it, and it lost to `chain` for a scene it was made for. The
+    # scene was five JSON uses — 「常用于 A、B、C、D、E」 — and the model drew
+    # them as a chain, because a chain's note is a paragraph about the content
+    # ("一步接一步的东西才用它") while a hub's was a description of the picture.
+    # `values` and `compare` both carry a 「什么时候用它」 and both get chosen;
+    # that is the whole evidence, and it is why the sentence below is about
+    # sentences rather than about nodes.
+    Preset(
+        "hub",
+        ("node", "endpoint"),
+        8,
+        "星形拓扑：一个中心与若干叶子。"
+        "**同一个东西在好几处出现、每一处都要连回它**时用它——"
+        "一个配置源头带着几份配置、一台服务器带着几个客户端、一个总线带着几台设备。"
+        "第一个 `node` 站中心，其余对象围成一圈；"
+        "**连线要自己写**：想连就各写一条 `link`，不写就只有一圈点，没有线。",
+    ),
     Preset(
         "field",
         ("projectile",),
@@ -1270,19 +1725,71 @@ PRESETS: tuple[Preset, ...] = (
     # was costing is a name — a scene whose only legal answer was 「竖排对象」,
     # which is exactly the reading `tools/check_storyboard.py` reports as
     # 「除了 `generic` 没有别的预设可选」.
+    # 「一幕里两件事」, which is the shape the JSON lesson's second scene kept
+    # failing to fit. That scene was 「对象怎么写」（a listing）plus 「值有哪六种」
+    # （six cards), `scene_type` takes one value, and the model — with nothing
+    # saying the two can share a scene — picked `generic` and put both into one
+    # text blob. The layout was never the obstacle: `_card_boxes` places cards
+    # under every preset, `max_bodies` counts bodies rather than objects, and
+    # `_has_company` now knows a card is a thing that competes for the frame.
+    # So the fix is a sentence, because the sentence is what was missing.
     Preset(
         "values",
         ("value",),
         6,
         "并列对比：几张值卡片横排，每张是一个值加它的类型；"
-        "讲「这几种值有什么不同」「哪种写法合法」时用它",
+        "讲「这几种值有什么不同」「哪种写法合法」时用它。"
+        "**这一幕里可以同时放一个代码块或结构树**，两者不会叠在一起。"
+        "**上下顺序跟着你的讲解走：谁先被讲到，谁在上面。**"
+        "第一拍先讲代码，代码块就占上半、卡片排在下面；"
+        "第一拍先讲值，卡片就在上面——所以**想清楚这一幕先讲哪一样**，"
+        "那决定了画面的上下。"
+        "「这几种值长什么样」和「它们出现在哪段代码里」不必拆成两幕",
     ),
     # Described as the last resort, not as the safe default. It used to read
     # "永远合法的兜底预设", and the model — optimising for "don't get rejected" —
     # picked it for 3 of 5 scenes that `field` could have served. Nothing was
     # wrong with the model's output; the incentive in the wording was pointing
     # the wrong way. See `docs/storyboard-milestone.md`.
-    Preset("generic", (), 8, "竖排对象 + 说明面板；只在没有任何更具体的预设可用时才选它"),
+    # 对比 —— the picture that was missing, and the one whose absence was
+    # visible: a scene of two `object`s judged by two `verdict`s had nowhere to
+    # go but `generic`, which stacks them in a column at 64x48 each and leaves
+    # the frame nearly empty. See `_compare_boxes` for the geometry.
+    #
+    # `required_roles=("option",)` rather than nothing, and the narrowness is
+    # the point. A preset with no required roles is read as "always safe" and
+    # gets picked by default — `generic`'s own comment records that failure, and
+    # a second zero-role preset would compete with it for the same scenes. A
+    # `option` is the model saying 这两样要拿来比, which is the one signal that
+    # means this picture specifically.
+    Preset(
+        "compare",
+        ("option",),
+        2,
+        "两样东西左右并排对比：左边一个、右边一个，同一高度、都放大到主角尺寸，"
+        "中间留出一条空隙；讲「这两种写法哪个对」「这两个差在哪」时用它。"
+        "**它只放得下两个**——要多于两样，那是 `values`（值卡片）或 `field`"
+        "（同一个量的不同角度）的事。中间那条空隙是留给「这两者之间」的关系的："
+        "想画它们之间的一条连线或一个双向箭头，挂一个 `link`/`dimension` 上去",
+    ),
+    # `generic` no longer calls itself the last resort, because the last-resort
+    # framing *was* its failure mode — see the comment above `compare`. What
+    # replaced it is the shape of content it serves, which is also the shape
+    # `chain`'s note has been sending here all along: a flat list of peers. The
+    # two notes disagreed — `chain` said 「并列的用 generic」 while `generic` said
+    # 「只在没有更具体的可用时才选它」 — and a model reading both will duck the
+    # preset it is being pointed at. The trigger is not mood but tense: if the
+    # sentences cannot be joined by 然后, it is not a chain.
+    Preset(
+        "generic",
+        (),
+        8,
+        "几样**并列、没有先后**的东西：竖排几个对象，右边一块说明面板。"
+        "讲「有哪几类」「常用来做什么」「包含哪几部分」——"
+        "几条彼此平级、连起来说不出「先…然后…」时用它。"
+        "**能说出先后的不要用它**，那是 `chain`；"
+        "两样对比用 `compare`，一组值用 `values`。",
+    ),
 )
 
 PRESET_BY_NAME: dict[str, Preset] = {p.name: p for p in PRESETS}
@@ -1325,9 +1832,14 @@ def _prop_hint(primitive: str, prop: str) -> str:
 
     Keyed on the prop name rather than on `(primitive, prop)` because `tone`
     belongs to exactly one primitive, and if a second one ever declares it the
-    gloss is still the right gloss. `emphasis` extends that from two props to
-    three, `direction` to four, `mark` and `type` to six, and the two block
-    props — `language` and `focus` — to eight, without changing the arrangement.
+    gloss is still the right gloss. `direction` extends that to four, `mark` and
+    `type` to six, and the two block props — `language` and `focus` — to eight,
+    without changing the arrangement.
+
+    Two props are the exception and answer with a *pointer* instead of their
+    legal values: `visible`/`enabled` and `emphasis`. Both are carried by every
+    primitive, which makes their glosses a sentence paid eighteen times over.
+    The values are printed once, in a paragraph above this list.
     `tone` is the one that proves the keying: it began on `readout` alone and is
     now on four primitives, and it has needed no edit here to follow them.
 
@@ -1338,10 +1850,19 @@ def _prop_hint(primitive: str, prop: str) -> str:
     bounds = stage_range(primitive, prop)
     if bounds is not None:
         return f"（{bounds.unit} {bounds.low:g}~{bounds.high:g}）"
+    if prop in ("visible", "enabled"):
+        return f"（{PRESENCE_GLOSS}）"
     if prop == "tone":
         return _glossed(TONE_GLOSSES)
     if prop == "emphasis":
-        return _glossed(EMPHASIS_GLOSSES)
+        # A pointer rather than the seven glosses, which is a change from what
+        # this said and the reason is arithmetic: `emphasis` belonged to `body`
+        # alone, so printing the whole set on its one prop line cost nothing.
+        # Every primitive offers it now, and the same 120 characters eighteen
+        # times is 2 kB of prompt spent saying one sentence. The set is printed
+        # once in the paragraph above the prop list — the arrangement
+        # `PRESENCE_GLOSS` already uses for a prop every primitive carries.
+        return "（可选的动作见上面「强调动作」那一段；不写就是 none）"
     if prop == "direction":
         return f"（{DIRECTION_GLOSS}）"
     if prop == "mark":
@@ -1354,12 +1875,29 @@ def _prop_hint(primitive: str, prop: str) -> str:
         return _glossed(TREE_FORMS)
     if prop == "focus":
         return f"（{FOCUS_GLOSS}）"
+    if prop == "enter":
+        # A pointer, for the reason `emphasis` above is one and the presence
+        # property is: every primitive carries it, so the set is printed once in
+        # the paragraph above this list rather than eighteen times on the lines.
+        return "（可选的样子见上面「出场/入场」那一段；不写就是 rise）"
+    if prop == "shape":
+        # The precedence rides on the gloss rather than in `body`'s note because
+        # it is the one part of this prop a model can get wrong with no
+        # feedback: writing both `glyph` and `shape` is legal, one of them
+        # silently loses, and the picture that results is a shape nobody asked
+        # for that still looks deliberate.
+        return f"（{_values(SHAPE_GLOSSES)}；写了 `glyph` 就画字形，`shape` 不起作用）"
     return ""
+
+
+def _values(glosses: tuple[tuple[str, str], ...]) -> str:
+    """A closed set of words, rendered the one way."""
+    return "、".join(f"{name} {gloss}" for name, gloss in glosses)
 
 
 def _glossed(glosses: tuple[tuple[str, str], ...]) -> str:
     """A vocabulary rendered the one way, so the two of them cannot diverge."""
-    return "（" + "、".join(f"{name} {gloss}" for name, gloss in glosses) + "）"
+    return "（" + _values(glosses) + "）"
 
 
 def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
@@ -1402,10 +1940,23 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
         "绝对不能填进 `role`——填了会被校验打回。"
     )
     for primitive in T1_PRIMITIVES:
-        if not primitive.drawable:
+        if not primitive.drawable or primitive.retired:
             continue
         roles = "、".join(f"`{role}`" for role in primitive.roles)
         lines.append(f"- {primitive.name}（{primitive.note}）→ 角色只能是：{roles}")
+
+    # Every role's default shape, printed for the reason every other closed set
+    # is printed. `body`'s note said 「基础形状由角色决定」 and the code did not
+    # keep it: nine roles in ten drew the same rounded rectangle, so a model that
+    # believed the sentence had no way to discover it was false.
+    lines.append("")
+    lines.append(
+        "**`body` 的每个角色画出来是什么形状**（`glyph` 和 `shape` 都不写时）："
+        "`projectile` 画成**圆**，`obstacle` 画成**八角星**，"
+        "其余角色一律是**圆角方框**。"
+        "**角色说不出来的形状，用 `props.shape` 说**——讲一只小球、一个轮子、一个靶心，"
+        "角色只能写 `object`，它是方的还是圆的得由 `shape` 定。"
+    )
 
     # Named rather than omitted. A model that reaches for `waveform` and is told
     # "unknown role" will try again with another guess; one that is told the name
@@ -1427,6 +1978,26 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
                 f"{PENDING_ALTERNATIVES.get(primitive.name, '别的图元')}"
             )
 
+    # A third group, and the paragraph above cannot be reused for it. Written
+    # from the other end of the same worry: a model that has just been told a
+    # name is "not implemented yet" learns something false about the picture it
+    # would have got, and the next name it reaches for is a guess. This one says
+    # what is true instead — it draws, it is simply not wanted — and then says
+    # where to go, role by role, because a single replacement for four roles
+    # would be wrong for three of them.
+    if RETIRED_ROLES:
+        lines.append("")
+        lines.append(
+            "**下面这些图元画得出来，但新分镜不要再用了。**"
+            "不是没实现——是这种画法本身不要了（老分镜还照常出图）。"
+            "写了会被校验打回，并告诉你改用哪个。"
+        )
+        for primitive in T1_PRIMITIVES:
+            if not primitive.retired:
+                continue
+            for role in primitive.roles:
+                lines.append(f"- ~~`{role}`~~ → 改用 {RETIRED_ALTERNATIVES.get(role, '别的角色')}")
+
     lines.append("")
     lines.append("## 每个图元可设置的属性 prop")
     lines.append(
@@ -1434,8 +2005,55 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
         "另一组没有渲染代码读取，写进某一拍不会让画面动一下，"
         "那一拍就是一张幻灯片，校验台会打回。"
     )
+    # Said once here rather than in `PRESENCE_GLOSS`, because that gloss prints
+    # on sixteen lines. The paragraph is the instruction; the gloss is the legal
+    # values. Split the other way round, the prompt pays for the how-to sixteen
+    # times and the model still has to infer what an absent prop means.
+    lines.append(
+        "**每个图元都还有一个「露不露面」的属性**（`emitter` 和 `zone` 上它叫 "
+        "`enabled`，别的图元上叫 `visible`，同一个意思），列在下面每一行里。"
+        "不写就是 true，那样它从第一拍起就一直在画面上。"
+        "**想让它讲到才出现**：在这个对象的 `props` 里写 false 把它先藏起来，"
+        "再在讲它的那一拍用 `object_states` 改成 true——它会淡着浮上来。"
+        "同一拍里 `highlights` 到它是正常的，那正是它登场的那一下；"
+        "但写了 false 就必须有某一拍把它打开，整幕都不打开会被校验打回"
+        "（说 `object_never_visible`）。"
+        "**一组同类的东西尤其该这么做。** 一幕里几张并列的卡片、几个标记，"
+        "如果旁白本来就是一组一组讲下来的（「值是字符串或数字」「布尔值和 null 也是值」），"
+        "就让每一组在**讲到它的那一拍**才浮上来。一开头就全站到台上，"
+        "后面几拍就只剩发光提醒，画面看上去根本没动过——"
+        "登场那一下是这个项目里最省、也最容易被忘掉的叙事手段。"
+    )
+    # Printed once for the same reason the paragraph above is, and it was not
+    # always: `emphasis` belonged to `body` alone, and the seven glosses rode on
+    # its one prop line. Every primitive offers it now — a card that jolts when
+    # it is the wrong one is the same gesture a body makes — so the set is here
+    # and the prop line carries a pointer.
+    lines.append(
+        "**「强调动作」`emphasis`：让一个对象在这一拍的开头自己动一下。**"
+        "晃一下、涨一下，一晃就归位：**不改变它在画面里的位置，也不影响别的对象**。"
+        "适合「注意看这个」「关键就在这里」这一类节拍——比只写 `highlights`"
+        "（只是发一下光）强。**每个图元都有这个属性，不是只有 body 有**。"
+        "可选的动作：" + _values(EMPHASIS_GLOSSES) + "；不写就是 none。"
+        "**它和 `focus` 一样，只能写在某一拍里，不能写在对象的 `props` 上**——"
+        "这两个是「这一拍做的动作」，不是这个对象的状态；写在对象上，"
+        "没写它们的每一拍都会回落到那个值，动作每一拍重播、底色带整幕不灭。"
+    )
+    # The entrance, next to the accent because they are the two things a beat
+    # does *to* an object rather than about it. Printed once for the same
+    # arithmetic reason.
+    lines.append(
+        "**「出场/入场的样子」`enter`：这个对象登场的时候是什么样。**"
+        "**每个图元都有，只能整体设置一次**（它不是活属性，某一拍改它没有意义——"
+        "它早就登场了）。它消失的时候是同一个动作**倒放**，不用另写。"
+        "**只有在你确实希望它「从某个方向来」时才写**：不写就是 `rise`，"
+        "也就是现在一直在用的淡入 + 从下浮上来。可选的样子："
+        + _values(ENTER_GLOSSES)
+        + "。**入场只改样子、不改时长**——一拍只有一两秒，"
+        "过渡太长就没有时间讲东西了。"
+    )
     for primitive in T1_PRIMITIVES:
-        if not primitive.drawable:
+        if not primitive.drawable or primitive.retired:
             continue
         live = primitive.live_props
         static = tuple(prop for prop in primitive.props if prop not in live)
@@ -1512,7 +2130,7 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
         "`safe_distance` / `coverage` / `decision` / `range` 这类描述性的角色。"
         "不写不会错，只是画面更抽象；写对了，那一拍一眼就认得出画的是什么。"
         f"`glyph` 只对实物类角色有效：{body_roles}；"
-        "`sensor`、`threshold`、`hud`、`topic` 这些描述性的角色没有这个属性，写了也不画。"
+        "`sensor`、`threshold`、`topic` 这些描述性的角色没有这个属性，写了也不画。"
     )
     for glyph in T2_GLYPHS:
         lines.append(f"- `{glyph.name}`（{glyph.domain}）：{glyph.note}")
@@ -1533,6 +2151,21 @@ def render_vocabulary(renderers: tuple[str, ...] = ()) -> str:
     lines.append("")
     lines.append("## 按钮可用的 action")
     lines.append("、".join(f"`{action}`" for action in BUTTON_ACTIONS))
+
+    lines.append("")
+    lines.append("## 配色 theme（写在整个 storyboard 的顶层，在 `title` 旁边）")
+    # "不确定就省略" is load-bearing rather than polite. The alternative is a model
+    # that feels obliged to answer every question it is asked, and a palette
+    # chosen out of obligation is a coin flip with a confident-sounding gloss
+    # attached — the `mind`-versus-`branch` problem, one level up. Silence is a
+    # real option here (layout spins the wheel), so it has to be offered as one.
+    lines.append(
+        "整条片子用哪一套配色。**可以省略**——不写也会有一套，而且不同的课程会自动换，"
+        "不会条条都一个样。只在你能说出理由的时候才写：讲夜空写 `dusk`，"
+        "讲实验数据写 `blueprint`。不确定就省略，比随便挑一套强。"
+    )
+    for name, gloss in PALETTES:
+        lines.append(f"- `{name}`：{gloss}")
 
     if renderers:
         lines.append("")

@@ -158,4 +158,21 @@ class StoryboardIR(BaseModel):
     title: str
     subject: str
     eyebrow: str = ""
+    #: The palette the whole lesson is drawn in, or `""` for "no opinion" — which
+    #: is the ordinary answer and the one the vocabulary recommends.
+    #:
+    #: Optional rather than required, unlike nearly every field around it. A model
+    #: made to answer a question it has no basis for answers the middle of the
+    #: range; six palettes chosen from six times equally is not a decision, it is a
+    #: coin flip with a gloss attached. What actually keeps consecutive lessons
+    #: from looking alike is `layout._palette_for`, which hashes the lesson id onto
+    #: the same six names — so this field is the model's chance to *overrule* that
+    #: where the content makes one obviously right (a lesson about the night sky,
+    #: `dusk`), and its absence costs nothing.
+    #:
+    #: A misspelling is refused by `unknown_theme` rather than ignored, the same
+    #: way every other closed set here is. The fallback draws a perfectly
+    #: reasonable picture, so an ignored typo would be a model that asked for
+    #: something, was given something else, and never found out.
+    theme: str = ""
     scenes: list[StoryboardScene] = Field(min_length=1, max_length=10)

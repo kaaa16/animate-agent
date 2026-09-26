@@ -36,13 +36,19 @@ from pathlib import Path
 
 from animate_agent.documents.models import DocumentIR
 from animate_agent.knowledge.models import LessonIR
+from animate_agent.rendering.layout import carried_states
 from animate_agent.rendering.registry import (
     FALLBACK_ROLES,
     PRESETS,
     PRIMITIVE_BY_NAME,
     ROLE_TO_PRIMITIVE,
 )
-from animate_agent.storyboard.models import StoryboardIR, StoryboardScene, StoryboardStep
+from animate_agent.storyboard.models import (
+    PropValue,
+    StoryboardIR,
+    StoryboardScene,
+    StoryboardStep,
+)
 from animate_agent.storyboard.service import build_limits
 from animate_agent.storyboard.validation import format_issues, validate_storyboard
 
@@ -112,20 +118,26 @@ FALLBACK_SHARE_WARNING = 0.30
 TOP_PROP_SHARE_WARNING = 0.80
 
 
-def _visual_key(step: StoryboardStep) -> tuple[object, ...]:
+def _visual_key(
+    step: StoryboardStep, carried: dict[str, dict[str, PropValue]]
+) -> tuple[object, ...]:
     """What the player draws a beat from, flattened into something comparable.
 
     `highlights` is a **set** — the order objects are named in is not a picture —
-    and `object_states` is a mapping of mappings. Sorting both is what makes
-    "these two beats are the same frame" a question this can answer at all.
+    and the states are a mapping of mappings. Sorting both is what makes "these
+    two beats are the same frame" a question this can answer at all.
+
+    `carried` rather than `step.object_states`: a state is kept until something
+    changes it back, so the picture at beat *n* is what every beat up to and
+    including *n* has written. Reading the beat's own mapping would call two
+    frames different when the second one changes nothing — which is the defect
+    this count exists to name. `layout.carried_states` computes it; the rule is
+    not restated here.
     """
     return (
         tuple(sorted(step.highlights)),
         tuple(
-            sorted(
-                (target, tuple(sorted(states.items())))
-                for target, states in step.object_states.items()
-            )
+            sorted((target, tuple(sorted(states.items()))) for target, states in carried.items())
         ),
     )
 
@@ -171,7 +183,10 @@ def _picture_report(storyboard: StoryboardIR) -> tuple[list[str], list[str]]:
     pairs = 0
     identical = 0
     for scene in storyboard.scenes:
-        keys = [_visual_key(step) for step in scene.steps]
+        keys = [
+            _visual_key(step, held)
+            for step, held in zip(scene.steps, carried_states(scene.steps), strict=True)
+        ]
         for before, after in zip(keys, keys[1:], strict=False):
             pairs += 1
             identical += int(before == after)

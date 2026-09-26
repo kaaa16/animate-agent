@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -294,6 +295,13 @@ async def _generate_storyboard(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The per-call timing line (`llm._log_call`) is INFO, and INFO goes nowhere
+    # without a handler — Python's fallback shows WARNING and above only. That
+    # line is the only thing that says *which* of the two model calls is costing
+    # the minutes, so the entry point that runs the pipeline turns it on.
+    # `%(message)s` and no timestamp: the line already names its own stage, and
+    # the added prefix would be the same four words on every line.
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = _build_parser().parse_args(argv)
     return asyncio.run(_run(args))
 

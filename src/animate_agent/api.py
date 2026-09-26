@@ -11,8 +11,10 @@ still only about the Next app on :3000 and did not have to grow.
     # http://127.0.0.1:8000/specs  where generated specs land
 """
 
+import logging
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -110,7 +112,25 @@ class AnimationResponse(BaseModel):
     spec_url: str
 
 
-app = FastAPI(title="Animate Agent API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Turn on the per-call timing line while the server runs.
+
+    Same reason as `cli.main`'s: the pipeline is two sequential reasoning calls,
+    and the line `llm._log_call` emits is the only thing that says which one is
+    costing the minutes. Without a handler, INFO goes nowhere.
+
+    In the lifespan rather than at import: importing this module must not change
+    the process's logging, for the same reason `load_llm_config` reads `.env` at
+    call time. And `basicConfig` is a no-op when something else has already
+    configured root — which is exactly right, since under pytest that is the
+    capture handler and its output is not ours to rearrange.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    yield
+
+
+app = FastAPI(title="Animate Agent API", version="0.1.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],

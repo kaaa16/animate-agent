@@ -27,7 +27,7 @@
 import { readFileSync } from "node:fs";
 
 import { createSimulation } from "../frontend/player/behaviors.js";
-import { CAPTION_MAX_LINES, wrapCaption } from "../frontend/player/caption.js";
+import { CAPTION_MAX_LINES, captionTop, wrapCaption } from "../frontend/player/caption.js";
 import {
   EASE_SECONDS,
   EASINGS,
@@ -37,7 +37,8 @@ import {
   handsOver,
 } from "../frontend/player/easing.js";
 import { EMPHASIS_NAMES, EMPHASIS_SECONDS, emphasisAt } from "../frontend/player/emphasis.js";
-import { drawElement } from "../frontend/player/registry.js";
+import { ENTRANCE_NAMES, entranceAt } from "../frontend/player/entrance.js";
+import { DRAWABLE_KINDS, PRESENCE_PROP, drawElement } from "../frontend/player/registry.js";
 import { fitTransform, readTheme } from "../frontend/player/stage.js";
 
 /**
@@ -115,7 +116,7 @@ function fakeContext() {
     // into them rather than converting every coordinate.
     scale: record("scale"),
     quadraticCurveTo: record("quadraticCurveTo"),
-    // A `branch` or `mind` tree draws each edge as one bump curve, which is
+    // A `branch` tree draws each edge as one bump curve, which is
     // `bezierCurveTo` and nothing else. Same reason `quadraticCurveTo` is here:
     // a context missing a method the drawer calls reports a real spec as a
     // broken one, and the failure names the primitive rather than the harness.
@@ -124,6 +125,13 @@ function fakeContext() {
     stroke: record("stroke"),
     fillText: record("fillText"),
     fillRect: record("fillRect"),
+    // A `wipe` reveal clips the element to the part of its box that has arrived,
+    // and a clip path is built from `rect`. Both are geometry rather than style,
+    // so they stay in the `geometryOnly` serialization — a wiped element is a
+    // *smaller* picture, and a check that filtered the rect out would call two
+    // different pictures the same one.
+    rect: record("rect"),
+    clip: record("clip"),
     setLineDash: record("setLineDash"),
     setTransform: record("setTransform"),
     clearRect: record("clearRect"),
@@ -155,16 +163,38 @@ function fakeContext() {
  * runs. `binds` in particular: without that tier a bound property keeps the
  * value layout baked in, which is exactly the bug the tier exists to prevent.
  */
-function viewFor(scene, simulation, stepIndex, theme, overrides = {}, glyphs = {}) {
+function viewFor(scene, stage, simulation, stepIndex, theme, overrides = {}, glyphs = {}) {
   const byId = new Map(scene.elements.map((element) => [element.id, element]));
   const obstacleIds = scene.elements
     .filter((element) => element.role === "obstacle")
     .map((element) => element.id);
   const step = scene.steps[stepIndex];
+  const lookup = (elementId, prop, fallback) => {
+    const key = `${elementId}.${prop}`;
+    if (key in overrides) return overrides[key];
+
+    const fromStep = step?.states?.[elementId];
+    if (fromStep && prop in fromStep) return fromStep[prop];
+
+    const element = byId.get(elementId);
+    const bound = element?.binds?.[prop];
+    if (bound && bound in overrides) return overrides[bound];
+    if (element?.props && prop in element.props) return element.props[prop];
+
+    const sceneKey = `scene.${prop}`;
+    if (sceneKey in overrides) return overrides[sceneKey];
+    if (prop in (scene.params ?? {})) return scene.params[prop];
+    return fallback;
+  };
   return {
     live: simulation.live,
     time: simulation.t,
     theme,
+    // `player.js` hands the stage through for the same reason it hands the theme
+    // and the glyphs through: `drawBody` asks where the caption starts, and a
+    // harness that answered "nowhere" would draw a name the player holds out of
+    // the subtitle's way — a picture nobody runs.
+    stage,
     elementById: byId,
     obstacleIds,
     obstacleRadius: new Map(
@@ -176,29 +206,25 @@ function viewFor(scene, simulation, stepIndex, theme, overrides = {}, glyphs = {
     glyphs,
     highlighted: new Set(step?.highlights ?? []),
     isDangerous: (id) => simulation.isDangerous(id),
-    lookup: (elementId, prop, fallback) => {
-      const key = `${elementId}.${prop}`;
-      if (key in overrides) return overrides[key];
-
-      const fromStep = step?.states?.[elementId];
-      if (fromStep && prop in fromStep) return fromStep[prop];
-
-      const element = byId.get(elementId);
-      const bound = element?.binds?.[prop];
-      if (bound && bound in overrides) return overrides[bound];
-      if (element?.props && prop in element.props) return element.props[prop];
-
-      const sceneKey = `scene.${prop}`;
-      if (sceneKey in overrides) return overrides[sceneKey];
-      if (prop in (scene.params ?? {})) return scene.params[prop];
-      return fallback;
+    lookup,
+    // The same question the player asks, answered the same way, and this used to
+    // be a hardcoded `1`.
+    //
+    // The ramp is a *player* behaviour — it needs a beat boundary and a clock
+    // counting into it — and this harness draws each beat as a single instant,
+    // so there is nothing here to ramp. But `visible: false` is not a fraction,
+    // it is the answer "this element is not on screen", and a harness that
+    // answered `1` to that drew every hidden element and then reported the beats
+    // around it as still frames. That is the shape of failure this whole file
+    // exists to catch, one layer up: the check could not see the thing it was
+    // checking for, and said so in a warning nobody could act on.
+    presence: (elementId) => {
+      const prop = PRESENCE_PROP[byId.get(elementId)?.kind];
+      if (prop === undefined) return 1;
+      const value = lookup(elementId, prop, true);
+      if (typeof value === "number") return Math.max(0, Math.min(1, value));
+      return value === false ? 0 : 1;
     },
-    // Always 1 here. The ramp this feeds is a *player* behaviour — it needs a
-    // beat boundary and a clock counting into it, and this harness draws each
-    // beat as a single instant. What it does need from this view is that the
-    // element is drawn at all, which is what a missing `presence` would break:
-    // `drawElement` calls it unconditionally.
-    presence: () => 1,
   };
 }
 
@@ -225,7 +251,7 @@ function closestApproach(scene, stage, overrides) {
   const simulation = createSimulation(scene, stage);
   const nearest = new Map(obstacles.map((obstacle) => [obstacle.id, Number.POSITIVE_INFINITY]));
   for (let frame = 0; frame < 60 * 20; frame += 1) {
-    const { lookup } = viewFor(scene, simulation, 0, THEME, overrides);
+    const { lookup } = viewFor(scene, stage, simulation, 0, THEME, overrides);
     simulation.update(1 / 60, lookup);
     const node = simulation.live.get(vehicle.id);
     for (const obstacle of obstacles) {
@@ -299,6 +325,14 @@ function serializeCalls(calls, { geometryOnly = false } = {}) {
  * avoidance document's 扫描周期 beat turns the scanning beam off. Drawing
  * nothing is then the correct answer, and the "invisible element" check below
  * would otherwise call a working beat a defect.
+ *
+ * Read off `PRESENCE_PROP` rather than re-deciding it here. This function used
+ * to name four kinds and answer `false` for the other fourteen, which was the
+ * same fact written down a third time — and by the time `visible` became a prop
+ * of every primitive, that copy was wrong for twelve of them: a `card` waiting
+ * for its beat would have been reported as 隐形的, the very defect the check
+ * exists to find. A third copy of a table is a third chance to be wrong about
+ * it, and this one is now a lookup.
  */
 /**
  * The first `undefined` or `NaN` in what a drawer asked the context to do.
@@ -408,13 +442,9 @@ function checkCaptionWrapping() {
 }
 
 function switchedOff(element, view) {
-  if (element.kind === "emitter" || element.kind === "zone") {
-    return view.lookup(element.id, "enabled", true) === false;
-  }
-  if (element.kind === "body" || element.kind === "trace") {
-    return view.lookup(element.id, "visible", true) === false;
-  }
-  return false;
+  const prop = PRESENCE_PROP[element.kind];
+  if (prop === undefined) return false;
+  return view.lookup(element.id, prop, true) === false;
 }
 
 function brokenAttachment(scene, simulation) {
@@ -562,7 +592,7 @@ function main() {
       // safe again by then, so the final frame alone would report nothing.
       // Hoisted out of the frame loop: `lookup` reads through the closure and
       // never reads `view.time`, which is the one field that would go stale.
-      const beatView = viewFor(scene, simulation, stepIndex, THEME);
+      const beatView = viewFor(scene, spec.stage, simulation, stepIndex, THEME);
       for (let frame = 0; frame < 240; frame += 1) {
         simulation.update(1 / 60, beatView.lookup);
         // Seconds since this beat began, which is what the player's `sim.t` is
@@ -637,7 +667,7 @@ function main() {
         }
         previous = positions;
       }
-      const view = viewFor(scene, simulation, stepIndex, THEME, {}, spec.glyphs ?? {});
+      const view = viewFor(scene, spec.stage, simulation, stepIndex, THEME, {}, spec.glyphs ?? {});
       const beat = [];
       const shape = [];
       for (const element of scene.elements) {
@@ -668,7 +698,18 @@ function main() {
           return 1;
         }
         beat.push(`${element.id}: ${serializeCalls(ctx.calls)}`);
-        shape.push(`${element.id}: ${serializeCalls(ctx.calls, { geometryOnly: true })}`);
+        // Presence is in the shape string on purpose, and it is the one member
+        // of it that is not a canvas call. Whether an element is on screen at
+        // all is part of the picture rather than a styling of it, so a beat
+        // whose whole content is 「这样东西浮上来了」 has changed the picture —
+        // and the stricter reading below, which subtracts every style
+        // assignment, would otherwise file it as a still frame. Measured on the
+        // presence demo: three elements arriving on three beats, 3/3 of the
+        // adjacent pairs reported as 静拍 before this line existed.
+        shape.push(
+          `${element.id}@${view.presence(element.id)}: ` +
+            `${serializeCalls(ctx.calls, { geometryOnly: true })}`,
+        );
         drawn += 1;
       }
       pictures.push({
@@ -854,6 +895,24 @@ function main() {
     return 1;
   }
 
+  const nameFailure = checkANameStaysOutOfTheCaption();
+  if (nameFailure) {
+    console.error(`\n❌ ${nameFailure}`);
+    return 1;
+  }
+
+  const entranceFailure = checkEveryEntranceStyleIsAShapeAndNotADirection();
+  if (entranceFailure) {
+    console.error(`\n❌ ${entranceFailure}`);
+    return 1;
+  }
+
+  const accentKindFailure = checkTheAccentReachesEveryKind(spec);
+  if (accentKindFailure) {
+    console.error(`\n❌ ${accentKindFailure}`);
+    return 1;
+  }
+
   const captionFailure = checkCaptionWrapping();
   if (captionFailure) {
     console.error(`\n❌ ${captionFailure}`);
@@ -958,7 +1017,7 @@ function checkEasing() {
 }
 
 /**
- * The five tree forms draw five *different* pictures.
+ * The three tree forms draw three *different* pictures.
  *
  * Layout already measures each form's geometry and the Python tests hold those
  * numbers. What nothing else can reach is the *wiring*: the drawer dispatches on
@@ -969,7 +1028,7 @@ function checkEasing() {
  * silently becomes a different picture rather than a colour going wrong.
  *
  * Compared as recorded calls rather than as pixels. The harness has no
- * rasteriser, and "these five drew differently from one another" is the property
+ * rasteriser, and "these three drew differently from one another" is the property
  * that survives not having one — it is exactly the property a missing branch
  * destroys, and nothing weaker than a real comparison finds it.
  */
@@ -1013,7 +1072,7 @@ function checkTreeForms(glyphs) {
   };
 
   const drawn = new Map();
-  for (const form of ["outline", "branch", "mind", "brace", "boxes"]) {
+  for (const form of ["outline", "branch", "brace"]) {
     const ctx = fakeContext();
     try {
       drawElement(ctx, { ...base, form }, view);
@@ -1072,6 +1131,9 @@ function checkSpinningPartsTurn() {
       live: new Map([[element.id, { x: element.x, y: element.y }]]),
       time,
       theme: THEME,
+      // A view built by hand still has to carry the stage: `drawBody` asks where
+      // the caption starts, and this element carries a name.
+      stage: STAGE,
       elementById: new Map([[element.id, element]]),
       obstacleIds: [],
       obstacleRadius: new Map(),
@@ -1305,6 +1367,9 @@ function checkABodyTurnsAboutItsPivot() {
       live: new Map([[element.id, { x: element.x, y: element.y, heading: element.heading }]]),
       time,
       theme: THEME,
+      // A body's name is held out of the caption's strip at draw time, so even a
+      // view built by hand for one element has to say how big the stage is.
+      stage: STAGE,
       elementById: new Map([[element.id, element]]),
       obstacleIds: [],
       obstacleRadius: new Map(),
@@ -1503,7 +1568,7 @@ function checkEmphasisMovesThePenAndNotTheBody() {
   const restCalls = serializeCalls(
     (() => {
       const ctx = fakeContext();
-      drawElement(ctx, element, viewFor(scene, simulation, 0, THEME));
+      drawElement(ctx, element, viewFor(scene, STAGE, simulation, 0, THEME));
       return ctx.calls;
     })(),
   );
@@ -1514,7 +1579,7 @@ function checkEmphasisMovesThePenAndNotTheBody() {
     simulation.t = t;
     const before = snapshot();
     const ctx = fakeContext();
-    drawElement(ctx, element, viewFor(scene, simulation, 0, THEME));
+    drawElement(ctx, element, viewFor(scene, STAGE, simulation, 0, THEME));
     const after = snapshot();
     if (before !== after) {
       return (
@@ -1532,6 +1597,227 @@ function checkEmphasisMovesThePenAndNotTheBody() {
   console.log(
     `  ✓ 强调只动画笔：17 帧里 ${differing} 帧画得和静止姿势不同，` +
       "live 里的坐标一个都没变",
+  );
+  return null;
+}
+
+/**
+ * A body's name is held out of the subtitle's strip — checked by drawing one.
+ *
+ * Layout refuses to let a body's **box** into the strip, and says so by name when
+ * a preset tries. A name is not part of that box: it hangs below the shape, and
+ * layout does not model annotations at all — `AXIS_LABEL_GAP` in `layout.py`
+ * records the same gap being closed by hand on the axis label instead. A `hub`
+ * puts a leaf on the ring's floor by construction, so 「Java」 was written 13
+ * units into the strip, and the caption plate — painted after every element —
+ * erased it. The word was not on screen and nothing anywhere said so.
+ *
+ * Two cases, and both are needed. A drawer that simply never put a name below its
+ * body would pass the floor case on its own, and would be wrong for every scene
+ * that has the room.
+ *
+ * The view is built by hand rather than through `viewFor`, because an empty
+ * `live` leaves `drawBody` reading the element's own coordinates — which is the
+ * point. With a simulation in the way, a `lane` body's y is whatever the lane
+ * says, and this is a check about arithmetic, not about the lane.
+ */
+function checkANameStaysOutOfTheCaption() {
+  const CEILING = captionTop(STAGE);
+  const NAME = "底部对象";
+  // What layout bakes for this element: `drawn_height / 2 + LABEL_TAIL`, which
+  // for a body 40 tall is 20 + 21. Stated here rather than imported so that a
+  // change to either constant has to be made in two places — this file is
+  // checking the pair, and a fixture that read the constant would agree with
+  // itself whatever the constant said.
+  const LABEL_DY = 41;
+
+  const drawnNameY = (y) => {
+    const element = bodyElement({ label: NAME, x: 300, y, label_dy: LABEL_DY });
+    const ctx = fakeContext();
+    drawElement(ctx, element, {
+      live: new Map(),
+      time: 0,
+      theme: THEME,
+      stage: STAGE,
+      elementById: new Map([[element.id, element]]),
+      obstacleIds: [],
+      obstacleRadius: new Map(),
+      glyphs: {},
+      highlighted: new Set(),
+      isDangerous: () => false,
+      lookup: (_id, _prop, fallback) => fallback,
+      presence: () => 1,
+    });
+    const call = ctx.calls.find((entry) => entry.name === "fillText" && entry.args[0] === NAME);
+    return call ? call.args[2] : null;
+  };
+
+  const roomy = drawnNameY(120);
+  if (roomy === null) return "对象的名字根本没画出来——`drawBody` 丢掉了 `label`";
+  if (roomy !== 120 + LABEL_DY) {
+    return (
+      `上方有空位时名字没有停在布局烘的位置：画在 ${roomy}，` +
+      `应当是 120 + ${LABEL_DY} = ${120 + LABEL_DY}`
+    );
+  }
+
+  const floor = drawnNameY(490);
+  if (floor === null) return "对象的名字根本没画出来";
+  if (floor + 8 > CEILING) {
+    return (
+      `名字画进了字幕条：中间在 ${floor}，字幕从 ${CEILING} 开始——` +
+      "整条名字会被字幕底板盖掉"
+    );
+  }
+  if (floor >= 490 + LABEL_DY) {
+    return `名字贴在底边时没有被抬起来：画在 ${floor}，和没抬一样`;
+  }
+
+  console.log("  ✓ 对象的名字：有地方时停在布局烘的位置，贴到底边时被抬到字幕上方");
+  return null;
+}
+
+/**
+ * The accent reaches every kind, not just the bodies it used to belong to.
+ *
+ * `emphasis` lived inside `drawBody`, so a body was the only thing that could
+ * be emphasised — while the vocabulary now offers the prop on all eighteen
+ * primitives. A prop offered everywhere and read in one drawer is a promise the
+ * player breaks, and this break is silent in the way this file exists to catch:
+ * the beat still runs, the object is still on screen, the glow still happens,
+ * and the accent that was the beat's entire content does not.
+ *
+ * Driven off a real spec rather than eighteen hand-built elements, and the
+ * reason is the one `bodyElement` exists for: a hand-built `card` is a guess at
+ * what a card is, and a check that feeds a drawer fields no spec ever produces
+ * proves something about the harness instead of about the player.
+ *
+ * The comparison is on the recorded calls, which is the only instrument that
+ * can see this at all — whether a drawer reads a prop is invisible in every
+ * table on both sides of the fence.
+ */
+function checkTheAccentReachesEveryKind(spec) {
+  const reached = new Set();
+  const missed = new Set();
+  const undrawn = new Set();
+
+  for (const scene of spec.scenes) {
+    const simulation = createSimulation(scene, spec.stage);
+    simulation.reset();
+    // A third of the way in: past the zero at t=0 that every accent has, and
+    // well inside the window, so no motion is being read at its own endpoint.
+    simulation.t = EMPHASIS_SECONDS / 3;
+    for (const element of scene.elements) {
+      if (!DRAWABLE_KINDS.includes(element.kind)) continue;
+      const drawn = (emphasis) => {
+        const ctx = fakeContext();
+        const overrides = { [`${element.id}.emphasis`]: emphasis };
+        // `spec.glyphs` goes in for the reason `drawBody` throws without it: a
+        // body carrying a glyph draws from geometry the spec ships, and a view
+        // built without it reports a working spec as a broken one.
+        drawElement(
+          ctx,
+          element,
+          viewFor(scene, spec.stage, simulation, 0, THEME, overrides, spec.glyphs ?? {}),
+        );
+        return serializeCalls(ctx.calls);
+      };
+      const atRest = drawn("none");
+      // An element the spec itself keeps off screen draws nothing either way,
+      // and reporting that as a miss would blame the accent for a beat.
+      if (atRest === "") {
+        undrawn.add(element.kind);
+        continue;
+      }
+      (drawn("pop") !== atRest ? reached : missed).add(element.kind);
+    }
+  }
+
+  if (missed.size > 0) {
+    return (
+      `这些图元在强调之下画得和静止姿势一模一样：${[...missed].sort().join("、")}。` +
+      "强调只能在 drawElement 那一处实现——放进某个画法里，就只有那一种图元能被强调"
+    );
+  }
+  if (reached.size === 0) {
+    return "这一份 spec 里没有任何图元能被强调，这个检查什么都没证明";
+  }
+  // Kinds that were skipped in every scene they appeared in and never reached
+  // anywhere else — named, because a kind this spec cannot exercise is a kind
+  // this run did not check, and silence would read as coverage.
+  const untested = [...undrawn].filter((kind) => !reached.has(kind)).sort();
+  console.log(
+    `  ✓ 强调铺到每个图元：${[...reached].sort().join("、")} 都真的动了` +
+      (untested.length > 0 ? `（${untested.join("、")} 这一份 spec 里一次都没画出来，未测）` : ""),
+  );
+  return null;
+}
+
+/**
+ * Three properties every entrance style has to have, and none of them is
+ * visible in a picture of one.
+ *
+ * 1. **Identity at `presence === 1`.** This is what makes an element that never
+ *    hides draw on exactly the path it did before there was more than one style
+ *    — and it is also the whole of the exit: an element leaving runs the same
+ *    function on a descending `presence`, so it sinks if it rose. A style that
+ *    did not land on the identity would leave every element on disk drawn a few
+ *    pixels from where layout put it, which is the kind of wrong nobody can
+ *    attribute to a layer.
+ * 2. **Five styles, five different pictures.** A name that draws what another
+ *    name draws is a word in the vocabulary that does nothing — the same defect
+ *    as an accent no drawer reads.
+ * 3. **No clock.** The style is a pure function of `presence`, which is what
+ *    makes "the exit is the entrance reversed" true by construction rather than
+ *    by two code paths agreeing. A version that keyed off `view.time` or a
+ *    direction flag would pass a visual check on the way in and fail on the way
+ *    out, and this is the only instrument that can see the difference.
+ */
+function checkEveryEntranceStyleIsAShapeAndNotADirection() {
+  const element = bodyElement();
+  const style = (name, presence, time) =>
+    JSON.stringify(entranceAt(name, presence, element, { live: new Map(), time }));
+
+  const seen = new Map();
+  for (const name of ENTRANCE_NAMES) {
+    if (style(name, 1, 0) !== "{}") {
+      return (
+        `入场风格 \`${name}\` 在 presence=1 时不是恒等（${style(name, 1, 0)}）——` +
+        "落定之后画面会和布局摆的位置差一点，而这种偏差没人能归因到哪一层"
+      );
+    }
+    const midway = style(name, 0.5, 0);
+    const clash = seen.get(midway);
+    if (clash) {
+      return (
+        `入场风格 \`${name}\` 和 \`${clash}\` 在半路上画出来一模一样——` +
+        "词表里多了一个什么都不做的名字"
+      );
+    }
+    seen.set(midway, name);
+
+    for (const presence of [0.25, 0.5, 0.75]) {
+      if (style(name, presence, 0) !== style(name, presence, 7)) {
+        return (
+          `入场风格 \`${name}\` 在 presence=${presence} 时读了时钟——` +
+          "那样出场就不是同一个动作倒放，而是另一条代码路径，迟早会不一致"
+        );
+      }
+    }
+  }
+
+  // Exactly one style is allowed to leave the transform alone, and it is the
+  // one whose whole contribution is the alpha `drawElement` already applies.
+  // Anything else returning `{}` would have clashed with it above; `fade`
+  // itself returning something would mean the simplest style had been given a
+  // motion nobody asked for.
+  if (seen.get("{}") !== "fade") {
+    return "`fade` 在半路上动了——它的全部意思就是原地淡入，动了就不是它了";
+  }
+
+  console.log(
+    `  ✓ 入场风格：${ENTRANCE_NAMES.join("、")} 五个各不相同` +
+      "（只有 `fade` 原地不动），落定时都归零，且都不读时钟",
   );
   return null;
 }

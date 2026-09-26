@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+_LOG = logging.getLogger(__name__)
 
 #: Local key file, resolved against the repository root rather than the working
 #: directory so `animate-agent` reads the same file from anywhere it is invoked.
@@ -21,7 +25,15 @@ ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 #: on the storyboard prompt the reasoning alone runs to ~23k tokens. A tight
 #: budget is spent entirely on reasoning, which returns HTTP 200 with an empty
 #: body — not an error the transport can flag.
-DEFAULT_MAX_TOKENS = 32768
+#:
+#: 32768 was measured against `deepseek-v4-pro`. The endpoint is configured with
+#: `deepseek-flash` now, and that model reasons past it: the storyboard call came
+#: back with an empty body and `finish_reason=length` (2026-09-26). The endpoint
+#: accepts up to 131072 — probed, not assumed — so this is doubled rather than
+#: maximised. A cap is not a charge, but the read timeout below *is* wall clock:
+#: a budget far above what the reasoning needs only converts a budget failure
+#: into a timeout, which reads like a network fault and sends you elsewhere.
+DEFAULT_MAX_TOKENS = 65536
 
 
 class LLMBudgetExhaustedError(RuntimeError):
@@ -69,6 +81,71 @@ class LLMConfig:
     api_key: str
     model: str
 
+    #: `DEEPSEEK_THINKING`, passed through as `thinking: {"type": ...}`.
+    #:
+    #: Empty — the default, and what every run so far has used — sends no such
+    #: parameter at all, so the endpoint's own default applies.
+    #:
+    #: The only value worth setting is `"disabled"`. It is here because the wall
+    #: clock is the model's hidden reasoning and nothing on our side bounds it,
+    #: and it is off by default because **it was measured and it does not work.**
+    #:
+    #: What the endpoint does (probed 2026-09-26, a small puzzle): `disabled`
+    #: answered in **0.4s against 1.9s** with the same answer. Also, and more
+    #: important than the ratio, it is a **switch and not a dial** —
+    #: `thinking: {"type": "enabled", "budget_tokens": 64}` was accepted and then
+    #: reasoned 644 tokens, against 296 for the run that sent no parameter at
+    #: all. The budget is not enforced, so there is no "think a little".
+    #:
+    #: What it does to *this* pipeline (same day, `data/samples/
+    #: projectile_motion.md`, knowledge layer only): reasoning went 19419 tokens
+    #: to none and each call from ~76s to ~5.5s, so the speedup is real. The
+    #: lesson that came back was **rejected three times out of three** — the
+    #: model stops being able to hold a length limit it was told in prose. The
+    #: switch trades a correct run for a fast failure, so it is a knob for an
+    #: experiment and not a setting. The storyboard layer was not tried: it is
+    #: the more schema-dense of the two tasks, and the easier one already failed.
+    thinking: str = ""
+
+
+def _log_call(
+    label: str,
+    model: str,
+    response: httpx.Response,
+    elapsed: float,
+    max_tokens: int,
+) -> None:
+    """One line per call: which stage, how long, and what the model spent thinking.
+
+    The pipeline is two sequential calls to a reasoning model, and until this
+    existed nothing measured either of them. The only evidence that a call was
+    expensive was that the output file appeared late, which cannot tell you
+    *which* call — and that is the one question standing between "the run is
+    slow" and any decision about it.
+
+    `reasoning_tokens` is reported when the endpoint supplies it, and it is the
+    number that matters: `DEFAULT_MAX_TOKENS` above is a ceiling, so the
+    question "is 65536 being used or merely allowed" has an answer, and it is
+    not visible from the ceiling. It is also what makes the `thinking` switch
+    measurable rather than a guess.
+
+    Never raises. A diagnostic that can take down the call it is describing is
+    worse than no diagnostic, so a body that will not parse costs the extra
+    fields and nothing else.
+    """
+    parts = [f"LLM {label or '调用'}", f"{elapsed:.1f} 秒", f"max_tokens={max_tokens}"]
+    if response.status_code != 200:
+        parts.append(f"HTTP {response.status_code}")
+    else:
+        try:
+            usage = response.json().get("usage") or {}
+        except ValueError:
+            usage = {}
+        reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+        if reasoning is not None:
+            parts.append(f"推理 {reasoning} token")
+    _LOG.info("｜".join(parts) + f"｜{model}")
+
 
 class LLMClient:
     """Thin async client for OpenAI-compatible chat completions (DeepSeek, Moonshot)."""
@@ -76,7 +153,11 @@ class LLMClient:
     def __init__(self, config: LLMConfig, *, client: httpx.AsyncClient | None = None) -> None:
         self._config = config
         self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(120.0))
+        # 300s, not 120: `max_tokens` bounds the reasoning, and reasoning is wall
+        # clock. The storyboard call already takes 1-2 minutes. Doubling the
+        # budget while leaving the timeout at 120s would just trade an empty body
+        # for a read timeout on an answer that was on its way.
+        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(300.0))
 
     async def chat(
         self,
@@ -84,21 +165,36 @@ class LLMClient:
         *,
         temperature: float,
         max_tokens: int,
+        label: str = "",
     ) -> str:
-        """Send one chat request and return the assistant message content."""
+        """Send one chat request and return the assistant message content.
+
+        `label` names the stage for the timing line below ("知识层" / "分镜层").
+        It is a parameter rather than something read off the call stack because
+        the whole point of the line is that a person can tell which of the two
+        calls is costing the minutes, and a logger name cannot say that.
+        """
         payload: dict[str, Any] = {
             "model": self._config.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if self._config.thinking:
+            payload["thinking"] = {"type": self._config.thinking}
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
         url = self._config.base_url.rstrip("/") + "/chat/completions"
 
+        started = time.monotonic()
         response = await self._client.post(url, json=payload, headers=headers)
         if response.status_code == 429:
             await asyncio.sleep(3.0)
             response = await self._client.post(url, json=payload, headers=headers)
+        # Logged before `raise_for_status`, and so on the failure path too: a call
+        # that burned four minutes and *then* failed is exactly the one whose
+        # duration somebody needs to know, and it is the one a log placed after
+        # the success check would swallow.
+        _log_call(label, self._config.model, response, time.monotonic() - started, max_tokens)
         response.raise_for_status()
 
         data = response.json()
@@ -206,4 +302,5 @@ def load_llm_config() -> LLMConfig:
     base_url = os.environ.get("DEEPSEEK_BASE", "https://api.deepseek.com")
     api_key = os.environ.get("DEEPSEEK_KEY", "")
     model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
-    return LLMConfig(base_url=base_url, api_key=api_key, model=model)
+    thinking = os.environ.get("DEEPSEEK_THINKING", "").strip()
+    return LLMConfig(base_url=base_url, api_key=api_key, model=model, thinking=thinking)

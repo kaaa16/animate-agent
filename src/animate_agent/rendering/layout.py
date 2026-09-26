@@ -40,14 +40,16 @@ the only reason M1 (`legacy.py`) was built before this module.
 from __future__ import annotations
 
 import builtins
+import hashlib
 import io
 import keyword
+import logging
 import math
 import re
 import tokenize
 import unicodedata
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
 from typing import Literal, cast
@@ -58,6 +60,8 @@ from animate_agent.rendering.models import (
     AngleElement,
     AxisElement,
     BodyElement,
+    BodyShape,
+    BubbleElement,
     CardElement,
     CardTag,
     CodeElement,
@@ -66,7 +70,10 @@ from animate_agent.rendering.models import (
     CodeSpan,
     DimensionElement,
     EmitterElement,
+    EnterStyle,
     LinkElement,
+    NoteElement,
+    OrdinalElement,
     ReadoutElement,
     RenderControl,
     RenderElement,
@@ -87,11 +94,19 @@ from animate_agent.rendering.models import (
 )
 from animate_agent.rendering.registry import (
     BLOCK_ROWS_MAX,
+    BUBBLE_MAX_LINES,
     CODE_LANGUAGE_NAMES,
+    ENTER_NAMES,
     MARK_NAMES,
+    ORDINAL_MAX,
+    ORDINAL_MIN,
+    PALETTE_NAMES,
     PENDING_ALTERNATIVES,
     PENDING_PRIMITIVES,
     ROLE_TO_PRIMITIVE,
+    SHAPE_NAMES,
+    SPEED_PRESETS,
+    TRANSIENT_LIVE_PROPS,
     TREE_FORM_NAMES,
     TREE_ICON_NAMES,
     TYPE_GLOSSES,
@@ -289,6 +304,25 @@ CHAIN_ACTOR_Y_RATIO = 0.76
 #: narration introduces them.
 GENERIC_COLUMN_X_RATIO = 0.3
 
+#: The space between the two things a `compare` scene puts side by side, in stage
+#: units. Absolute pixels and not a fraction of the stage, for the reason
+#: `VERDICT_SIZE` and `PANEL_CLEARANCE` are: what it has to hold is a line and
+#: some words, and the smallest usable size of either does not scale.
+#:
+#: It has a job rather than a look. The model's way of saying 「这两者之间」 is a
+#: `link` or a `dimension` hung on both bodies, and with a gutter of 0 the line
+#: those draw has zero length — **and nothing anywhere fails**. A gap this wide
+#: is also what keeps two labels from meeting in the middle: a verdict's disc is
+#: 19 plus its 8-pixel gap plus a four-character label, 91 on one side alone.
+#:
+#: 140 is a judgement inside a range the frame gives. Below about 100 a connector
+#: reads as a drawing mistake rather than as a relation; above about 168 the pair
+#: stops fitting beside the widest readout panel the corpus has produced (448 on
+#: a 960 stage, measured on the recorded ROS document), because 404 of pair plus
+#: the panel has to fit in 902. The floor is the firmer of the two, so the value
+#: sits near it and leaves the margin to the panel.
+COMPARE_GUTTER = 140.0
+
 #: `hub` is a star: one centre and its leaves on a ring around it.
 #:
 #: An **ellipse** rather than a circle, because the stage is not square: a circle
@@ -438,6 +472,32 @@ DEFAULT_AXIS_TICKS = 5
 #: has none.
 AXIS_LABEL_GAP = 18.0
 
+#: How far below the centre of what it **draws** a body's name goes, plate and
+#: all: the gap left between the shape and the plate, plus the plate's own half
+#: above and below the words. Baked into `BodyElement.label_dy`, which is why it
+#: lives here rather than in the player.
+#:
+#: It used to be the player's arithmetic, and the player worked the half-extent
+#: out as `max(width, height) / 2` — the radius of the box's *circumscribed
+#: circle*, which is not where a shape ends. A `hub`'s leaf is 84x44, so its name
+#: was written 33 units below a box that ends 22 below its centre, and the leaf
+#: on the ring's floor sits on the frame's floor by construction: the name landed
+#: 13 units inside the caption's strip, and the caption plate — painted after
+#: every element — erased it. 「Java」 was simply not on screen. Two half-pictures:
+#: a name below its shape, a caption above everything, neither layer aware of the
+#: other.
+LABEL_GAP = 5.0
+
+#: The plate `annotation` paints behind a name, either side of the words.
+#: Mirrored from `ANNOTATION_PLATE_HALF` in `primitives.js` — a number this layer
+#: does not draw with but does have to add up, which is `AXIS_LABEL_GAP`'s
+#: situation exactly, and there is a test holding the two equal.
+LABEL_PLATE_HALF = 8.0
+
+#: The whole stand-off: what `_to_body` bakes, and what the player holds clear of
+#: the caption.
+LABEL_TAIL = LABEL_GAP + 2 * LABEL_PLATE_HALF
+
 #: Readouts stack in a right-hand column for **every** preset. One rule, because a
 #: text panel has no relation to the geometry to hang off — it needs a slot that
 #: does not move when the objects do. Colliding with a body is a `LayoutError`
@@ -527,6 +587,15 @@ VERDICT_SIZE = 38.0
 VERDICT_LABEL_FONT_SIZE = 16.0
 #: Between the badge's edge and the label, whichever side the label lands on.
 VERDICT_LABEL_GAP = 8.0
+#: Between two verdicts hung on the *same* anchor, and the same for ordinals
+#: below. A column rather than a heap, which is the whole of what this constant
+#: buys: five verdicts on one listing all landed on the identical pixel
+#: (`dx=134.5, dy=-99.0` to the byte) because each of them measured itself
+#: against the anchor's corner and none of them knew the others existed. Ten is
+#: read off the two sizes rather than chosen: a badge is 38 and a label is 16px
+#: of type, so 38+10 leaves a gap wider than the tallest thing that sits between
+#: two badges, and a disc at 32 gets the same air for a slightly denser stack.
+VERDICT_STACK_GAP = 10.0
 
 #: mark -> the glyph drawn inside the badge.
 #:
@@ -540,6 +609,70 @@ VERDICT_GLYPH: dict[str, str] = {
     "bad": "x",
     "warn": "warning",
 }
+
+#: 序号圆点, in stage units.
+#:
+#: `ORDINAL_SIZE` is a disc's diameter, and 32 is the floor `VERDICT_SIZE`'s
+#: comment measured — audience-facing type wants about 32px on a 960-wide stage.
+#: The verdict takes 38, a little *over* the line, because a judgement should be
+#: louder than the thing it judges. The ordinal takes exactly the line, because a
+#: step number is a signpost rather than a verdict: it should be findable, not
+#: emphatic. `ORDINAL_FONT_SIZE` equals `VERDICT_LABEL_FONT_SIZE` for the same
+#: reason told the other way round — a word beside a mark and a digit inside one
+#: are both "the smallest text this picture asks anyone to read".
+ORDINAL_SIZE = 32.0
+ORDINAL_FONT_SIZE = 16.0
+#: See `VERDICT_STACK_GAP`, which is the same number for the same reason.
+ORDINAL_STACK_GAP = 10.0
+
+#: 气泡, in stage units.
+#:
+#: `BUBBLE_FONT_SIZE` is the only one of these that is not lifted from a
+#: neighbour, and it is a judgement: a callout is spoken *about* the picture
+#: rather than being part of it, so it sits above every in-picture label the
+#: renderer draws (16 — a verdict's caption and a tree's rows) and below the
+#: caption strip's own 20.
+BUBBLE_FONT_SIZE = 18.0
+BUBBLE_LINE_HEIGHT = 26.0
+BUBBLE_PADDING = 14.0
+BUBBLE_RADIUS = 12.0
+#: A bubble holds a clause, not a paragraph. `CARD_MAX_WIDTH`'s number arrived at
+#: from the other end: about twelve full-width glyphs at `BUBBLE_FONT_SIZE`.
+BUBBLE_MAX_WIDTH = 260.0
+#: And it holds a *sentence*, not a heading. `MIN_PANEL_WIDTH`'s trade one size
+#: down — a bubble sized to a two-character text is a tag with a tail, and the
+#: box the words sit in should not read as a measurement of them.
+BUBBLE_MIN_WIDTH = 96.0
+#: Clear space between the anchor's *drawn* edge and the bubble's body. Fixed
+#: rather than a fraction of the anchor: a 132-wide 主角 and a 64-wide obstacle
+#: want the same amount of air, and a proportional gap would gape on one and shut
+#: on the other.
+BUBBLE_TAIL_GAP = 18.0
+#: How wide the tail's base is where it meets the body. Narrowed when the body is
+#: too short to hold it across its straight run — see `_tail_points`.
+BUBBLE_TAIL_WIDTH = 18.0
+
+#: 没有框的字, in stage units.
+#:
+#: One size up from a bubble's, because a note has no box to hold it together:
+#: a line of words with no background reads as smaller than the same words in a
+#: panel, and `PALETTE`'s own guidance puts a note under a diagram at 20-24.
+#: Nothing here is measured against the bubble except the wrap, which is shared
+#: with it on purpose — the two must break a sentence in the same places.
+NOTE_FONT_SIZE = 20.0
+NOTE_LINE_HEIGHT = 28.0
+#: Two lines. A note is the one line the subtitle is not saying; a paragraph in
+#: the middle of the picture is the thing this primitive was brought in to stop
+#: being written. Refused rather than truncated, at layout, with the words named
+#: — the same call `BUBBLE_MAX_LINES` makes, one size up.
+NOTE_MAX_LINES = 2
+#: Wider than a bubble's, because a bubble's width is a *box* and a note's is
+#: only where the words break. A formula or a conclusion is one clause and reads
+#: as one, so it is allowed to run further before wrapping than a callout is.
+NOTE_MAX_WIDTH = 320.0
+#: The band's own air: between the notes themselves, and between the band and
+#: the picture underneath it.
+NOTE_GAP = 16.0
 
 #: 值卡片, in stage units.
 #:
@@ -571,8 +704,9 @@ CARD_ROWS_MAX = 3
 #: code and want to read as a block — and that difference is the only entry in
 #: `_BLOCK_LINE_HEIGHT`.
 BLOCK_PADDING = 14.0
-#: Between two stacked blocks. The same call `_card_boxes` makes: a block starts
-#: below whatever else the scene put down, and it needs to not touch it.
+#: Between two stacked blocks, and between a block and whatever band it is
+#: sharing the frame with. The same call `_card_boxes` makes: two things that
+#: share a frame need a gap between them, whichever way round they are.
 BLOCK_GAP = 20.0
 #: The narrowest block still worth drawing a panel behind.
 BLOCK_MIN_WIDTH = 180.0
@@ -620,18 +754,13 @@ TREE_INDENT_SPACES = 2
 TREE_ICON_SLOT = 18.0
 TREE_ICON_SIZE = 15.0
 
-#: 横向树 and 思维导图. Depth runs along x here, so these three are what lay a
-#: row out sideways: a node's words start this far past its column, and the next
-#: column starts this far past the widest words in this one. A column is
-#: therefore as wide as its own widest label rather than a constant — which is
-#: the whole reason `initial_speed: 20` does not cost what `器材` costs.
+#: 横向树. Depth runs along x here, so these two are what lay a row out sideways:
+#: a node's words start this far past its column, and the next column starts this
+#: far past the widest words in this one. A column is therefore as wide as its own
+#: widest label rather than a constant — which is the whole reason
+#: `initial_speed: 20` does not cost what `器材` costs.
 TREE_BRANCH_LABEL_GAP = 10.0
 TREE_BRANCH_GAP = 26.0
-#: 思维导图's rounded node. The one difference from `branch` that changes
-#: geometry: a pill is wider than the words it holds, so the column has to be too.
-#: Its *height* is the row's business and stays in the drawer — a pill that
-#: outgrew its row would be a pill the box was not cut for.
-TREE_PILL_PAD_X = 10.0
 
 #: 花括号. One brace per run of siblings, drawn in a strip reserved down the left
 #: of the whole block. `TREE_BRACE_ROOM` is that strip; the two parts of it are
@@ -639,23 +768,6 @@ TREE_PILL_PAD_X = 10.0
 TREE_BRACE_WIDTH = 11.0
 TREE_BRACE_GAP = 7.0
 TREE_BRACE_ROOM = TREE_BRACE_WIDTH + TREE_BRACE_GAP
-
-#: 套盒子. Three numbers, and the arithmetic that ties them together is the one
-#: thing about this form worth reading before changing any of them.
-#:
-#: A frame is drawn `TREE_BOX_PAD` outside the rows it holds, and its bottom edge
-#: is pulled back up by `TREE_BOX_NUDGE` for every level of descent the subtree
-#: still has below it. That pull-in is what stops a frame and its last-born
-#: descendant from sharing a bottom edge — and it is bounded by the pad on the
-#: other side: with a subtree four levels deep the pull-in is 16 against a pad of
-#: 18, so the innermost frame still clears its own last row. Five levels would
-#: put the frame's edge *above* the row it is supposed to hold, which is why
-#: `TREE_BOX_DEPTH_MAX` is a separate and much smaller ceiling than
-#: `TREE_DEPTH_MAX`.
-TREE_BOX_STEP = 20.0
-TREE_BOX_PAD = 18.0
-TREE_BOX_NUDGE = 4.0
-TREE_BOX_DEPTH_MAX = 4
 
 #: Advance width per character in the monospace stack, in ems.
 #:
@@ -669,8 +781,8 @@ MONO_NARROW_EM = 0.6
 
 #: The font each block primitive draws at, and with it the set of primitives that
 #: *are* blocks. Row heights used to live here too; they moved into the shape
-#: functions when a tree grew five forms, because a row's height stopped being a
-#: constant a caller could multiply by a row count.
+#: functions when a tree grew a second form, because a row's height stopped being
+#: a constant a caller could multiply by a row count.
 _BLOCK_FONTS: dict[str, float] = {
     "code": CODE_FONT_SIZE,
     "tree": TREE_FONT_SIZE,
@@ -690,6 +802,35 @@ _BODY_SIZES: dict[str, tuple[float, float]] = {
     # end does not swallow the pivot it turns about.
     "arm": (34.0, 96.0),
     "object": (64.0, 48.0),
+    # The same pair as `object`, deliberately: an `option` *is* an object, and
+    # the only thing the role adds is the claim 这两样要拿来比. What makes it
+    # big is `compare` making it a 主角, not this table — a role that grew here
+    # would grow in every preset that ever places one.
+    "option": (64.0, 48.0),
+}
+
+#: role -> the shape that role draws, when `props.shape` does not say otherwise.
+#:
+#: Only the exceptions are listed, and the default is `rect` for the same reason
+#: `_BODY_PIVOTS` lists only `arm`: where a role *is* a shape fact, it says so,
+#: and everywhere else a box is the honest answer. Both entries here pass that
+#: test and nothing else does:
+#:
+#: - `projectile` means 抛体 — the thing a `field` scene launches. It is a ball,
+#:   and its box is already square (28x28), so the circle is exact.
+#: - `obstacle` is the baseline's eight-point star, and has been since `legacy.py`
+#:   translated `app.js`; it is listed here because the storyboard path used to
+#:   reach it through an `is_obstacle` branch and now reaches it through a table.
+#:
+#: The roles deliberately left out, and why the tempting ones are tempting:
+#: `agent` reads like a dot and is not one — it is whoever the lesson is *about*,
+#: and turning every agent picture into a disc would change the look of scenes
+#: that are not about shape at all. `object` is the fallback role, which makes it
+#: the single most likely place a model is holding something whose shape is the
+#: whole point — and that is exactly what `props.shape` is for, not this table.
+_BODY_SHAPES: dict[str, BodyShape] = {
+    "obstacle": "polygon",
+    "projectile": "circle",
 }
 
 #: role -> the local point a body turns about, as a fraction of its own box.
@@ -772,7 +913,24 @@ LEAD_EXTENT_RATIO = 0.22
 #:   A vertical list of equally-sized items has no first among equals, and a real
 #:   generated document used it for a scene of four readouts and no body at all.
 #:   Whether that should fail outright is the next question, not this one.
-_PRESETS_WITH_A_LEAD: frozenset[str] = frozenset({"lane", "hub"})
+#: - `compare` — the first preset with **two** subjects, and the reason this set
+#:   is a set of presets rather than a "the one 主角" field. A comparison has a
+#:   pair at its centre and no first among equals; `values` refuses a lead for
+#:   that same reason, and the difference is that a row of six values is not
+#:   *about* any one of them while a comparison is about exactly both.
+#:   `_check_lead` iterates `sorted(leads)` and always did, so nothing had to
+#:   change to hold two.
+_PRESETS_WITH_A_LEAD: frozenset[str] = frozenset({"lane", "hub", "compare"})
+
+#: The other half of the choice, written down because the docstring above has
+#: been promising a test for it since before `compare` existed — "a test walks
+#: `_PLACERS` to require every preset to be in exactly one of these two sets" —
+#: and there was no such test. What its absence cost is concrete: a preset that
+#: returns 132-wide boxes without joining the set above draws its bodies at
+#: `_BODY_SIZES` instead, which is the difference between `compare` and a
+#: `generic` with the boxes moved. The set is here so that a new preset has to
+#: answer the question rather than inherit an answer by omission.
+_PRESETS_WITHOUT_A_LEAD: frozenset[str] = frozenset({"chain", "field", "values", "generic"})
 
 #: Glyph data lives in `assets/glyphs/` as build-time products of
 #: `tools/build_glyphs.py`. Layout reads the directory rather than the
@@ -891,20 +1049,40 @@ def _clamp_value(primitive: str | None, prop: str, value: PropValue) -> PropValu
 
 
 def _props_for(obj: StoryboardObject, primitive: str) -> dict[str, PropValue]:
-    """`obj.props`, carried verbatim — except a distance, which is held to the stage.
+    """`obj.props`, carried verbatim — except two exceptions, both deliberate.
 
     The verbatim rule is what lets the player read `direction` or `magnitude` at
     playback: layout consumes a prop into geometry *and* keeps the value, rather
-    than transferring it. This is the one exception, and it is not a rewrite so
-    much as a consistency fix — `_stage_distance` already clamped the number that
-    got drawn, and leaving the raw one in `props` would mean the circle was
-    radius 24 while the danger gate that reads the same prop fired at 0.8.
+    than transferring it.
 
-    For any storyboard that passes validation the two are the same number, since
-    `prop_out_of_range` rejects a value outside this range. The clamp only bites
-    on a hand-written sample or a scene param, where there is no validator to ask.
+    **A distance is held to the stage.** Not a rewrite so much as a consistency
+    fix — `_stage_distance` already clamped the number that got drawn, and leaving
+    the raw one in `props` would mean the circle was radius 24 while the danger
+    gate that reads the same prop fired at 0.8. For any storyboard that passes
+    validation the two are the same number, since `prop_out_of_range` rejects a
+    value outside this range; the clamp only bites on a hand-written sample or a
+    scene param, where there is no validator to ask.
+
+    **A gesture is dropped.** `TRANSIENT_LIVE_PROPS` — `focus` and `emphasis` —
+    are things one *beat* does, and this dict is tier 3 of the player's lookup,
+    the source a beat that writes nothing falls back to (`player.js`'s
+    `makeLookup`). A gesture left in here is therefore not a default: it is a
+    band that stays lit on the same rows, or an accent that replays at the top of
+    every beat, for the rest of the scene. `validation._check_gestures` refuses
+    the writing while there is still a model to retry; this is the same refusal
+    for a spec assembled without it, and it is logged rather than dropped in
+    silence, because a band disappearing with no explanation is the kind of
+    picture this project keeps a paragraph about.
     """
     props = dict(obj.props)
+    for prop in TRANSIENT_LIVE_PROPS:
+        if props.pop(prop, None) is not None:
+            _LOG.warning(
+                "对象 `%s` 的 `%s` 写在对象上了，丢掉：它是某一拍的动作，"
+                "留在 props 里会变成整幕常亮（改写进该发生的那一拍）",
+                obj.id,
+                prop,
+            )
     for prop in props:
         props[prop] = _clamp_value(primitive, prop, props[prop])
     return props
@@ -983,8 +1161,12 @@ def _lane_boxes(
     make that beat a foregone conclusion — which is what the baseline does, and
     why its car always swerves the same way.
 
-    **The only preset that ignores `frame`, and the only one that should.** Every
-    position here is a fraction of the stage that `templates.py` also uses —
+    **This preset pins its vertical position to the stage, not to `frame`.** It is
+    not alone in that — `chain`, `hub`, `field` and `generic` each pin at least
+    one axis to a stage ratio too, and the comment on `_BLOCK_ON_TOP_PRESETS`
+    is where that matters. What is particular to `lane` is that the pin is the
+    point rather than a shortcut. Every position here is a fraction of the stage
+    that `templates.py` also uses —
     `LANE_VEHICLE_X_RATIO` is its car, `LANE_OBSTACLE_FIRST_X_RATIO` its first
     obstacle — so that a laid-out scene and the translated baseline can be put
     side by side and be talking about the same picture (M2's acceptance). Moving
@@ -1141,6 +1323,58 @@ def _text_width(text: str, font_size: float) -> float:
 
 def _line_width(line: str) -> float:
     return _text_width(line, PANEL_FONT_SIZE)
+
+
+def _fitting_prefix(text: str, font_size: float, max_width: float) -> int:
+    """How much of `text` fits in `max_width`, as a character count."""
+    fits = 0
+    for end in range(1, len(text) + 1):
+        if _text_width(text[:end], font_size) > max_width:
+            break
+        fits = end
+    return fits
+
+
+def _wrap_text(text: str, font_size: float, max_width: float) -> list[str]:
+    """Break `text` into lines that each fit `max_width`, greedily.
+
+    The same rule as `wrapCaption` in `frontend/player/caption.js`, and it has to
+    be: a caption and a callout are the only two things here that break a
+    sentence across lines, and two breakers that disagreed would put the same
+    words in different places depending on which one drew them. Greedy,
+    longest-fitting-prefix first, with the break nudged back to the last space
+    when there is one more than half-way along — which is what keeps a string
+    that mixes 中文 and English from splitting a word. Chinese has no spaces to
+    prefer, so the character break is already right for it.
+
+    It differs from `wrapCaption` in exactly one way, deliberately: this returns
+    **every** line, however many, and lets the caller decide. The caption has a
+    fixed band and no choice but to ellipsise; a bubble is the whole of what the
+    callout says, and `_to_bubble` refuses a text it cannot hold rather than
+    shortening the claim.
+    """
+    lines: list[str] = []
+    rest = text.strip()
+    while rest:
+        fits = _fitting_prefix(rest, font_size, max_width)
+        if fits >= len(rest):
+            lines.append(rest)
+            break
+        cut = fits
+        # `fits + 1` because `str.rfind`'s end is exclusive and JavaScript's
+        # `lastIndexOf(value, from)` is inclusive; the two wrappers have to agree
+        # on where a line ends.
+        space = rest.rfind(" ", 0, fits + 1)
+        if space > fits / 2:
+            cut = space
+        if cut <= 0:
+            # One glyph wider than the whole line. Taking it anyway is the only
+            # way to make progress; `BUBBLE_MIN_WIDTH` is the floor that keeps
+            # the box from being a sliver when this fires.
+            cut = 1
+        lines.append(rest[:cut])
+        rest = rest[cut:].lstrip()
+    return lines or [""]
 
 
 def _written_texts(obj: StoryboardObject, scene: StoryboardScene, prop: str) -> list[str]:
@@ -1690,7 +1924,7 @@ def _language_of(obj: StoryboardObject) -> str:
 
 
 def _form_of(obj: StoryboardObject) -> TreeForm:
-    """`form`, held to the five a tree can be drawn in.
+    """`form`, held to the three a tree can be drawn in.
 
     A name the layout cannot place falls back to the outline rather than to a
     guess, and the refusal itself happens upstream in `unknown_form` while there
@@ -1698,6 +1932,13 @@ def _form_of(obj: StoryboardObject) -> TreeForm:
     stronger here: a listing coloured by the wrong language's rules is merely
     confidently wrong about where the strings are, while a structure drawn in the
     wrong shape is confidently wrong about the structure.
+
+    The fallback is also what a spec drawn in a **withdrawn** form does. `mind`
+    and `boxes` were real names that real files were written with, and falling
+    back is the whole answer for them: an outline is a true picture of the same
+    rows, where a `LayoutError` would be a file that used to open and now does
+    not. Nothing rewrites those files; they simply draw as the form that has the
+    fewest opinions.
     """
     declared = obj.props.get("form")
     if isinstance(declared, str) and declared in TREE_FORM_NAMES:
@@ -1710,27 +1951,140 @@ def _form_of(obj: StoryboardObject) -> TreeForm:
     return "outline"
 
 
-def _focus_of(obj: StoryboardObject) -> str:
-    """`focus` as written, or "". Validation has already refused a bad one.
-
-    A bare number is accepted and stringified, because `{"focus": 3}` is a
-    perfectly natural thing to write and the difference between it and `"3"` is
-    one pair of quotes.
-    """
-    value = obj.props.get("focus")
-    if isinstance(value, bool):
-        return ""
-    if isinstance(value, (int, float)):
-        return f"{value:g}"
-    return value if isinstance(value, str) else ""
-
-
 #: The primitives a **shared** placer places, rather than the preset: the
 #: right-hand text column, the card grid, and the block stack.
 #:
 #: Everything else in a scene is the preset's business — which is the same
 #: division `_to_element` dispatches on, said from the other side.
+#:
+#: This answers *who places it*, which is not the question `_has_company` asks.
+#: The two lists differ by one word and `NON_COMPANY_PRIMITIVES` says why.
 SHARED_PRIMITIVES: frozenset[str] = frozenset({"readout", "card", "tree", "code"})
+
+#: The mounted primitives: the ones that hang off another object instead of
+#: taking a slot in the frame.
+#:
+#: Every one of them carries an `of`, and `_anchored_box` is the only thing that
+#: ever gives it a position. Written out rather than derived from
+#: `required_relations`, because "requires `of`" is not the question: `dimension`
+#: and `link` take `from`/`to` and are drawn between two slots the preset has
+#: already made, which is a different thing from hanging off one of them.
+MOUNTED_PRIMITIVES: frozenset[str] = frozenset(
+    {"emitter", "zone", "trace", "vector", "angle", "verdict", "bubble", "ordinal"}
+)
+
+#: What does **not** cost a block any of the frame. This one is `_has_company`'s.
+#:
+#: Close to `SHARED_PRIMITIVES` and deliberately not equal to it — same kind of
+#: table, different question, and each entry is a different reason:
+#:
+#: - `readout` — the panel column is a right-hand strip. `_Frame.right_of`
+#:   measures a block against it *sideways*; nothing stacks against it.
+#: - `tree` / `code` — the block stack itself. It is the thing being placed.
+#: - the mounted primitives — they are pinned to another object. A bubble on a
+#:   listing is part of that listing, not a second thing competing with it, and
+#:   treating it as company is what pinned the first four scenes of the JSON
+#:   lesson to the floor of the frame: one callout on a code block, and the
+#:   block and the whole picture were pushed into the bottom half with the top
+#:   half left empty.
+#:
+#: `card` is the one `SHARED_PRIMITIVES` has and this does not, and it is a
+#: correction rather than an omission. The card grid is a shared placer, so
+#: cards were waved through as costing a block nothing — while `_has_company`'s
+#: own docstring has said the opposite since it was written ("or cards for the
+#: grid to place"). The code did not.
+#:
+#: What that cost is not a picture drawn wrong; it is no picture at all. Both
+#: were centred in the whole frame, and `_check_fit` saw them intersect and
+#: raised. Measured: 「`listing` 和 `v0` 叠在一起了（横向重叠 39px，纵向重叠
+#: 53px）」. That is a `LayoutError` after the last model call — the whole
+#: storyboard lost, with nothing fed back and nothing retried — over a scene
+#: shape no one has written yet. It is fixed here rather than there because the
+#: answer is this function's to give: yes, the cards are company.
+NON_COMPANY_PRIMITIVES: frozenset[str] = MOUNTED_PRIMITIVES | {"readout", "tree", "code", "note"}
+
+
+#: The presets where a block may take the *top* of the frame instead of the floor.
+#:
+#: Narrow on purpose, and the reason is a collision rather than a preference.
+#: `values` and `compare` are the only two placers that honour `frame.top` — the
+#: other five pin at least one axis to a stage ratio (`lane` to `LANE_Y_RATIO`,
+#: `chain` to `CHAIN_Y_RATIO`, `generic` to `PANEL_TOP_RATIO`, `hub` and `field`
+#: to their own origins). A block anchored at the top of a `generic` scene would
+#: run through the column starting at y=84; a `lane` obstacle sits at y 272–348
+#: and a modest block is 288 tall from y 18. Both would be caught by `_check_fit`
+#: and become a `LayoutError` — **after the last model call**, which is the worst
+#: outcome this module has: the whole storyboard lost, nothing fed back, nothing
+#: retried.
+#:
+#: `compare` could join the list and does not: it has no card grid, and its pair
+#: is centred, so there is nothing in one of its scenes for the block to be
+#: ordered *against*. Widening this list means first making the preset honour
+#: `frame.top`, which is a change to that preset's picture and belongs with it.
+_BLOCK_ON_TOP_PRESETS: frozenset[str] = frozenset({"values"})
+
+_LOG = logging.getLogger(__name__)
+
+
+def _block_objects(scene: StoryboardScene) -> list[StoryboardObject]:
+    """The 结构树 / 代码块 objects here — the stack `_block_layout` places.
+
+    A function rather than a local, because two questions need this list and
+    they are asked from different places: what to place, and whether the block
+    was introduced before the rest of the picture.
+    """
+    return [obj for obj in scene.objects if _primitive_of(obj) in _BLOCK_FONTS]
+
+
+def _picture_objects(scene: StoryboardScene) -> list[StoryboardObject]:
+    """Everything *else* that a block has to share the frame with.
+
+    `_has_company`'s list, named, for the same reason: the ordering rule asks
+    the same question one level further on — not "is there company" but "was
+    the block introduced first".
+    """
+    return [obj for obj in scene.objects if _primitive_of(obj) not in NON_COMPANY_PRIMITIVES]
+
+
+def _first_mention(scene: StoryboardScene) -> dict[str, int]:
+    """object id -> the index of the first beat that names it.
+
+    `highlights` and the keys of `object_states` both count, because both are
+    the narration pointing at a thing: a beat that only changes a value is still
+    the beat that introduces it. The first index wins, and an object no beat
+    ever names is simply absent — which `_block_leads` reads as "after
+    everything", the safe direction for a question about precedence.
+    """
+    order: dict[str, int] = {}
+    for index, step in enumerate(scene.steps):
+        for target in (*step.highlights, *step.object_states):
+            order.setdefault(target, index)
+    return order
+
+
+def _block_leads(scene: StoryboardScene, blocks: list[StoryboardObject]) -> bool:
+    """Was the block introduced before the things it shares the frame with?
+
+    The rule, in the words it was asked for: 先讲到谁，谁在上面. A scene that
+    opens on a listing and then explains the values in it puts the listing on
+    top and the cards below it; a scene whose listing is the footnote keeps the
+    listing on the floor, which is what every scene did before this existed.
+
+    The answer is derived from what the model already wrote, so nothing new has
+    to be declared and nothing can disagree with it — the only lever is the
+    order in which the narration names things, which is the lever that *should*
+    decide it. `prompts.py` says so where the model can act on it.
+    """
+    order = _first_mention(scene)
+    after_everything = len(scene.steps) + 1
+
+    def first_mentioned(objects: list[StoryboardObject]) -> int:
+        return min(
+            (order.get(obj.id, after_everything) for obj in objects),
+            default=after_everything,
+        )
+
+    return first_mentioned(blocks) < first_mentioned(_picture_objects(scene))
 
 
 def _has_company(scene: StoryboardScene) -> bool:
@@ -1744,11 +2098,15 @@ def _has_company(scene: StoryboardScene) -> bool:
     the panel column is a right-hand strip that a block is measured against
     sideways rather than stacked against.
 
+    The list it asks that question of is `NON_COMPANY_PRIMITIVES`, and not
+    `SHARED_PRIMITIVES`, which is the near-miss this used to make. What hangs
+    off another object is not company — and what the card grid will place *is*.
+
     An unrecognised role counts as company, which is the safe direction: it
     reserves room for something that may not arrive rather than crowding
     something that does.
     """
-    return any(_primitive_of(obj) not in SHARED_PRIMITIVES for obj in scene.objects)
+    return bool(_picture_objects(scene))
 
 
 def _block_layout(
@@ -1756,16 +2114,23 @@ def _block_layout(
     stage: RenderStage,
     frame: _Frame,
     has_company: bool,
-) -> tuple[dict[str, _Box], float]:
-    """Place the 结构树 / 代码块 stack; also say how far down the picture may go.
+    *,
+    at_top: bool = False,
+) -> tuple[dict[str, _Box], _Frame]:
+    """Place the 结构树 / 代码块 stack; also say what frame is left for the rest.
 
-    Returns `(boxes, picture_bottom)`. The second half is the part that is easy
-    to miss: a block does not slot into a gap, it *takes the bottom of the
-    frame*, and the preset is arranged in what is left. Getting the order the
-    other way round — place the picture, put the block underneath it — leaves the
-    block to start below whatever the picture's lowest object turned out to be,
-    which for a `generic` column is the bottom of the frame itself. Every such
-    scene then fails with a `LayoutError` after the last model call.
+    Returns `(boxes, picture_frame)`. The second half is the part that is easy
+    to miss: a block does not slot into a gap, it *takes a band of the frame*,
+    and the preset is arranged in what is left. Getting the order the other way
+    round — place the picture, put the block under it — leaves the block to
+    start below whatever the picture's lowest object turned out to be, which for
+    a `generic` column is the bottom of the frame itself. Every such scene then
+    fails with a `LayoutError` after the last model call.
+
+    **Which band is `at_top`'s question**, and it is the narration's to answer:
+    see `_block_leads`. `at_top` with no company is the same as no company —
+    "the top of the frame" and "the middle of the frame" are the same place when
+    nothing else is in it.
 
     The stack is shared by every preset, the way `_card_boxes` is, and for the
     same reason: a block is not part of any preset's spatial metaphor. `lane`
@@ -1780,23 +2145,24 @@ def _block_layout(
       would draw a five-line listing in a box cut for a fifteen-line one. What
       they share instead is the left edge — which is the edge a tree's
       indentation is read from, so a scene holding both reads as a page.
-    - **It stands at the bottom of the frame when it has company, and in the
-      middle when it does not.** A scene of one listing is the ordinary case, and
-      a single panel pinned to the floor of the stage reads as something that
-      fell there.
+    - **It stands at the top or the bottom of the frame when it has company,
+      and in the middle when it does not.** A scene of one listing is the
+      ordinary case, and a single panel pinned to the floor of the stage reads
+      as something that fell there. Which edge it takes when it *does* have
+      company is `at_top`, and that is the narration's answer rather than this
+      function's.
 
     Failure is a `LayoutError` and not a squeeze: a block that has to shrink to
     fit is a block nobody can read, and the fix — fewer rows — is one a model can
     make while there is still a model to tell.
     """
-    blocks = [obj for obj in scene.objects if _primitive_of(obj) in _BLOCK_FONTS]
+    blocks = _block_objects(scene)
     if not blocks:
-        return {}, frame.bottom
+        return {}, frame
 
     widths: dict[str, float] = {}
     heights: dict[str, float] = {}
     longest: dict[str, str] = {}
-    framed = False
     for obj in blocks:
         primitive = _primitive_of(obj) or "code"
         drawn, box_height, widest_row = _block_shape(
@@ -1805,27 +2171,26 @@ def _block_layout(
         widths[obj.id] = max(drawn + BLOCK_PADDING * 2, BLOCK_MIN_WIDTH)
         heights[obj.id] = box_height + BLOCK_PADDING * 2 + BLOCK_HEADER_HEIGHT
         longest[obj.id] = widest_row
-        framed = framed or (primitive == "tree" and _form_of(obj) == "boxes")
 
     stack = sum(heights.values()) + BLOCK_GAP * (len(blocks) - 1)
     if stack > frame.bottom - frame.top + FIT_TOLERANCE:
-        # The frames get their own sentence because the fix is different. A form
-        # that spends height on structure per *level* runs out for a reason the
-        # row count does not show, and "write fewer rows" is the wrong advice.
-        nested = (
-            f"（`form` 是 `boxes` 的那一棵：每多一层，框就要多占 "
-            f"{TREE_BOX_PAD:.0f}px 上下留白——换 `outline` 或者 `branch` 能省下来）"
-            if framed
-            else ""
-        )
         raise LayoutError(
             f"场景 `{scene.id}` 里这 {len(blocks)} 个代码块/结构树一共要 {stack:.0f}px 高，"
             f"而整个画框只有 {frame.bottom - frame.top:.0f}px（下面还要留出字幕条）。"
-            f"块里的行数写少一点，或者拆到另一幕去{nested}"
+            f"块里的行数写少一点，或者拆到另一幕去"
         )
 
-    top = frame.bottom - stack if has_company else frame.top
-    mid_y = (top + frame.bottom) / 2
+    top = frame.top if (at_top or not has_company) else frame.bottom - stack
+    # Where the first block starts. Both anchored cases sit flush against the
+    # edge they took — `frame.bottom - stack` and `frame.top` — because "the
+    # block owns this band" is the entire claim being made. Only a lone block is
+    # centred: a panel that is the whole picture and sits at the very top of the
+    # stage reads as one that is still being placed.
+    origin = top if (at_top or has_company) else top + (frame.bottom - top - stack) / 2
+    # The block's own centre, which is where the room beside it is measured.
+    # Not the centre of the *band*: those coincide when the block owns the band,
+    # and they stop coinciding the moment it only owns one end of it.
+    mid_y = origin + stack / 2
     room = frame.right_of(mid_y, stack / 2) - frame.left
     widest = max(widths.values())
     if widest > room + FIT_TOLERANCE:
@@ -1838,7 +2203,6 @@ def _block_layout(
         )
 
     left = frame.left + (room - widest) / 2
-    origin = top + (frame.bottom - top - stack) / 2
     boxes: dict[str, _Box] = {}
     for obj in blocks:
         boxes[obj.id] = _Box(
@@ -1848,7 +2212,16 @@ def _block_layout(
             height=heights[obj.id],
         )
         origin += heights[obj.id] + BLOCK_GAP
-    return boxes, (top - BLOCK_GAP if has_company else frame.bottom)
+    # What is left for the preset and the card grid, in one object rather than a
+    # single edge: a top-anchored block moves the *other* boundary, and a
+    # function returning `picture_bottom` could only ever say one of the two.
+    return boxes, _Frame(
+        left=frame.left,
+        top=top + stack + BLOCK_GAP if at_top else frame.top,
+        right=frame.right,
+        bottom=frame.bottom if at_top else (top - BLOCK_GAP if has_company else frame.bottom),
+        panels=frame.panels,
+    )
 
 
 def _tree_label(line: TreeLine) -> str:
@@ -1887,37 +2260,29 @@ class _TreeShape:
 def _column_layout(
     lines: list[TreeLine], labels: list[float], form: str
 ) -> tuple[list[float], list[float], float, float]:
-    """`outline`, `brace` and `boxes`: a node's y is its row, its x is its depth.
+    """`outline` and `brace`: a node's y is its row, its x is its depth.
 
-    One function rather than three, because the three differ only in how far
-    apart the levels sit, how much room is reserved at their left, and what the
-    box has to leave above and below — which is the same three questions with
-    three different answers, not three different computations.
+    One function rather than two, because the two differ in exactly one number —
+    how much room is reserved down the left, which is `TREE_BRACE_ROOM` for the
+    form that draws a brace there and nothing for the one that does not.
     """
-    step = TREE_BOX_STEP if form == "boxes" else TREE_INDENT
-    left = {"brace": TREE_BRACE_ROOM, "boxes": TREE_BOX_PAD}.get(form, 0.0)
-    xs = [left + line.depth * step for line in lines]
+    left = TREE_BRACE_ROOM if form == "brace" else 0.0
+    xs = [left + line.depth * TREE_INDENT for line in lines]
     ys = [(index + 0.5) * TREE_LINE_HEIGHT for index in range(len(lines))]
     right = max((x + width for x, width in zip(xs, labels, strict=True)), default=0.0)
-    # A frame is drawn *outside* the rows it holds: `TREE_BOX_PAD` past the
-    # widest of them, the same at the top of the stack and the bottom.
-    height = len(lines) * TREE_LINE_HEIGHT
-    if form == "boxes":
-        right += TREE_BOX_PAD
-        height += TREE_BOX_PAD * 2
-    return xs, ys, right, height
+    return xs, ys, right, len(lines) * TREE_LINE_HEIGHT
 
 
 def _branch_layout(
-    lines: list[TreeLine], depths: list[int], row_widths: list[float], form: str
+    lines: list[TreeLine], depths: list[int], row_widths: list[float]
 ) -> tuple[list[float], list[float], float, float]:
-    """`branch` and `mind`: depth runs along x, siblings along y.
+    """`branch`: depth runs along x, siblings along y.
 
-    This is the arrangement the outline cannot do, and the reason both forms
-    exist. Every node at one depth shares a column, so a chain of eight nodes
-    costs **one** row rather than eight — and a column is as wide as the widest
-    words in it rather than a constant, so what the picture costs sideways is a
-    fact about that level's own labels and not a budget spent in advance.
+    This is the arrangement the outline cannot do. Every node at one depth shares
+    a column, so a chain of eight nodes costs **one** row rather than eight — and
+    a column is as wide as the widest words in it rather than a constant, so what
+    the picture costs sideways is a fact about that level's own labels and not a
+    budget spent in advance.
 
     `y` is the one real piece of arithmetic here: leaves take consecutive slots
     and a node sits at the middle of its own children. That it needs no further
@@ -1927,15 +2292,14 @@ def _branch_layout(
     looking for a coincidence anyway: "it cannot happen" is the kind of claim
     this module has been wrong about before.
     """
-    pill = TREE_PILL_PAD_X if form == "mind" else 0.0
     spans = _tree_spans(depths)
 
     # `row_widths` already carries the lead, so a column is as wide as the widest
     # *row* in it rather than as its widest label plus that lead a second time.
     widest: dict[int, float] = {}
     for line, width in zip(lines, row_widths, strict=True):
-        widest[line.depth] = max(widest.get(line.depth, 0.0), width + pill)
-    columns = [pill]
+        widest[line.depth] = max(widest.get(line.depth, 0.0), width)
+    columns = [0.0]
     for depth in range(1, max(depths, default=0) + 1):
         columns.append(columns[-1] + widest.get(depth - 1, 0.0) + TREE_BRANCH_GAP)
     xs = [columns[line.depth] for line in lines]
@@ -1956,7 +2320,7 @@ def _branch_layout(
         ]
         ys[index] = (ys[children[0]] + ys[children[-1]]) / 2
 
-    right = max((x + width + pill for x, width in zip(xs, row_widths, strict=True)), default=0.0)
+    right = max((x + width for x, width in zip(xs, row_widths, strict=True)), default=0.0)
     return xs, ys, right, leaves * TREE_LINE_HEIGHT
 
 
@@ -1969,25 +2333,14 @@ def _placed_tree(lines: list[TreeLine], form: str, font: float, object_id: str) 
     place the geometry lives, and `models.TreeElement` says what that costs.
     """
     depths = [line.depth for line in lines]
-    deepest = max(depths, default=0)
-    if form == "boxes" and deepest > TREE_BOX_DEPTH_MAX:
-        row = _tree_label(lines[depths.index(deepest)])
-        raise LayoutError(
-            f"`{object_id}`（套盒子）嵌到了第 {deepest + 1} 层，最多 "
-            f"{TREE_BOX_DEPTH_MAX + 1} 层：每多一层，框的下边就得再往上收 "
-            f"{TREE_BOX_NUDGE:.0f}px，而框和内容之间一共只有 {TREE_BOX_PAD:.0f}px 的余地，"
-            f"再深下去框就会切进它自己要装的那一行里。"
-            f"换成 `outline`（能装 {TREE_DEPTH_MAX + 1} 层），或者把这棵树压平一点。"
-            f"最深的那一行是 {row[:24]!r}"
-        )
 
     # The icon slot is reserved on every row of a tree that has any icon, not only
     # on the rows that carry one, for the reason `TREE_MARKER` is: a level's words
     # have to start at one column whatever the row above them happened to be.
     lead = TREE_MARKER + (TREE_ICON_SLOT if any(line.icon for line in lines) else 0.0)
     row_widths = [lead + _mono_width(_tree_label(line), font) for line in lines]
-    if form in ("branch", "mind"):
-        xs, ys, width, height = _branch_layout(lines, depths, row_widths, form)
+    if form == "branch":
+        xs, ys, width, height = _branch_layout(lines, depths, row_widths)
     else:
         xs, ys, width, height = _column_layout(lines, row_widths, form)
 
@@ -2055,7 +2408,6 @@ def _to_tree(obj: StoryboardObject, box: _Box) -> TreeElement:
         y=box.y,
         form=form,
         lines=shape.lines,
-        focus=_focus_of(obj),
         width=box.width,
         height=box.height,
         props=_props_for(obj, "tree"),
@@ -2072,7 +2424,6 @@ def _to_code(obj: StoryboardObject, box: _Box) -> CodeElement:
         y=box.y,
         lines=_tokenize(_block_text(obj), _language_of(obj)),
         language=_language_of(obj),
-        focus=_focus_of(obj),
         width=box.width,
         height=box.height,
         props=_props_for(obj, "code"),
@@ -2202,6 +2553,75 @@ def _chain_boxes(
     # `_PRESETS_WITH_A_LEAD`. The subject of a chain is the row, and enlarging
     # every member of a row is the one thing that cannot make it one.
     return boxes, frozenset()
+
+
+def _compare_boxes(
+    scene: StoryboardScene, stage: RenderStage, frame: _Frame
+) -> tuple[dict[str, _Box], frozenset[str]]:
+    """Two things, left and right, each as large as the frame will make them.
+
+    The picture a scene had no way to ask for. Two `object`s and two `verdict`s
+    — the commonest contrast in the corpus — could only pick `generic`, which
+    stacks them in a column at the role table's 64x48 with a readout panel down
+    one side, and the result was a frame with two small boxes in it.
+
+    **Both bodies are 主角.** That is not decoration; it is the whole mechanism.
+    `_to_body` takes a body's drawn size from its box only when the placer named
+    it a lead, and falls back to `_BODY_SIZES` otherwise — so a placer that
+    positions 132-wide boxes without joining `_PRESETS_WITH_A_LEAD` draws two
+    64x48 things at those positions and looks exactly like the problem. It is
+    also the first preset with **two** subjects: a comparison does not have a
+    first among equals, which is why `values` refuses a lead, and `compare`
+    is the case that shows the difference between "no subject" and "two".
+
+    Refuses a third thing rather than falling back to a row. `_PLACERS`' own
+    comment has the argument: a scene that asked for axes and silently got a
+    vertical list is a picture that lies about what it is. A comparison of three
+    is a row, which is `values` or `field` under a name that claims otherwise.
+    The validator refuses it earlier still, via `max_bodies` — so this raise is
+    reachable only from a hand-written storyboard, which is the same division
+    `_field_boxes` and `body_roles` have.
+
+    One body does **not** raise. A `Preset` has no minimum, so nothing upstream
+    can refuse it, and failing here would spend a whole model call to reach a
+    terminal error — the exact trade `Primitive.drawable` exists to avoid. It
+    draws one centred lead: a mislabelled picture rather than a lost lesson.
+    """
+    bodies = _bodies_but(scene)
+    if not bodies:
+        raise LayoutError(
+            f"场景 `{scene.id}` 选了 `compare`，但一个 body 都没有——对比要有两样东西可比"
+        )
+    if len(bodies) > 2:
+        raise LayoutError(
+            f"场景 `{scene.id}` 选了 `compare`，但它有 {len(bodies)} 个 body。"
+            "`compare` 只放得下两个：三样以上的东西要横排，"
+            "那是 `values`（值卡片）或者 `field`（同一个量的不同角度）"
+        )
+
+    sizes = [_lead_size(obj, stage) for obj in bodies]
+    half = max(height for _, height in sizes) / 2
+    y = (frame.top + frame.bottom) / 2
+    # `frame.left`, not `frame.left_of`. The panel column is a right-hand strip
+    # — `PANEL_RIGHT_RATIO` puts every panel's right edge on the stage's own
+    # margin — so `left_of` answers a question about a panel on your *left* and
+    # returns `931.2 + PANEL_CLEARANCE` here, which is a negative amount of room.
+    left = frame.left
+    right = frame.right_of(y, half)
+    pair = sum(width for width, _ in sizes) + COMPARE_GUTTER * (len(sizes) - 1)
+    if pair > right - left + FIT_TOLERANCE:
+        raise LayoutError(
+            f"场景 `{scene.id}` 选了 `compare`，两样东西并排要 {pair:.0f}px，"
+            f"画框只留得出 {right - left:.0f}px。它们不缩小——主角有一个下限，"
+            "缩到线下就不是主角了。把右边那段说明写短一点，或者把这一幕拆开"
+        )
+
+    cursor = left + (right - left - pair) / 2
+    boxes: dict[str, _Box] = {}
+    for obj, (width, height) in zip(bodies, sizes, strict=True):
+        boxes[obj.id] = _Box(x=cursor + width / 2, y=y, width=width, height=height)
+        cursor += width + COMPARE_GUTTER
+    return boxes, frozenset(obj.id for obj in bodies)
 
 
 def _generic_boxes(
@@ -2430,6 +2850,7 @@ _PLACERS: dict[
     "chain": _chain_boxes,
     "hub": _hub_boxes,
     "field": _field_boxes,
+    "compare": _compare_boxes,
     "values": _values_boxes,
     "generic": _generic_boxes,
 }
@@ -2455,34 +2876,85 @@ def _place(
         )
     panels = _panel_boxes(scene, stage)
     frame = _frame(stage, panels)
-    # Blocks first, because a block is the one thing here that *takes* a strip of
+    # The notes with no `of` take the top of the frame before anything else is
+    # decided, for the reason `_note_band` gives: they are pinned to nothing, so
+    # there is no later stage that could move them out of the way. Raising
+    # `frame.top` rather than making them company keeps the block question — "is
+    # anything *else* competing for the frame" — about other objects, where it
+    # belongs.
+    #
+    # The band is measured against the whole frame, so the whole frame is kept:
+    # `_centre_a_lone_note_band` later asks whether the band is the entire
+    # picture, and the reduced frame handed to the placer is the other half of
+    # that question and cannot answer it.
+    band_frame = frame
+    notes, notes_bottom = _note_band(scene, band_frame)
+    if notes:
+        frame = _Frame(
+            left=frame.left,
+            top=notes_bottom,
+            right=frame.right,
+            bottom=frame.bottom,
+            panels=frame.panels,
+        )
+    # Blocks next, because a block is the one thing here that *takes* a band of
     # the frame rather than fitting into a slot of it. The picture is arranged
     # afterwards in what is left, which is why the frame this returns is the one
     # the placer and the card grid both get.
-    blocks, picture_bottom = _block_layout(scene, stage, frame, _has_company(scene))
-    picture_frame = _Frame(
-        left=frame.left,
-        top=frame.top,
-        right=frame.right,
-        bottom=picture_bottom,
-        panels=frame.panels,
-    )
-    boxes, leads = placer(scene, stage, picture_frame)
-    # What the *preset* put down, captured before the panel column joins the map.
     #
-    # The card grid starts "below what is already there", and what that means is
-    # the picture — not the panels. The panels are a column running the height of
-    # the stage, so a grid measured against them begins below the bottom of the
-    # frame: `_card_boxes`' own docstring has said "`placed` is what the preset
-    # already put down" since it was written, and until this line it was handed
-    # the panels as well. `frame.right_of` reads them through `frame`, which is
-    # why nothing here needs them in `placed` to keep clear of them sideways.
-    picture = dict(boxes)
-    boxes.update(panels)
-    boxes.update(_card_boxes(scene, stage, picture_frame, picture))
-    boxes.update(blocks)
-    _check_lead(scene, leads, boxes, stage)
-    _check_fit(boxes, stage, scene.id)
+    # Which band is the narration's answer — 先讲到谁，谁在上面 — and it is only
+    # asked of the presets that honour `frame.top`. See `_BLOCK_ON_TOP_PRESETS`.
+    company = _has_company(scene)
+    at_top = (
+        company
+        and scene.scene_type in _BLOCK_ON_TOP_PRESETS
+        and _block_leads(scene, _block_objects(scene))
+    )
+
+    def assemble(block_on_top: bool) -> tuple[dict[str, _Box], frozenset[str]]:
+        blocks, picture_frame = _block_layout(scene, stage, frame, company, at_top=block_on_top)
+        boxes, leads = placer(scene, stage, picture_frame)
+        # What the *preset* put down, captured before the panel column joins the
+        # map.
+        #
+        # The card grid starts "below what is already there", and what that means
+        # is the picture — not the panels. The panels are a column running the
+        # height of the stage, so a grid measured against them begins below the
+        # bottom of the frame: `_card_boxes`' own docstring has said "`placed` is
+        # what the preset already put down" since it was written, and until this
+        # line it was handed the panels as well. `frame.right_of` reads them
+        # through `frame`, which is why nothing here needs them in `placed` to
+        # keep clear of them sideways.
+        picture = dict(boxes)
+        boxes.update(panels)
+        boxes.update(_card_boxes(scene, stage, picture_frame, picture))
+        boxes.update(blocks)
+        boxes.update(notes)
+        _centre_a_lone_note_band(boxes, notes, band_frame, notes_bottom)
+        _check_lead(scene, leads, boxes, stage)
+        _check_fit(boxes, stage, scene.id)
+        return boxes, leads
+
+    try:
+        boxes, leads = assemble(at_top)
+    except LayoutError as flipped_failure:
+        if not at_top:
+            raise
+        # The flipped arrangement is a *new* arrangement and it may not fit —
+        # a tall block over a lane, say. Falling back is not the same as hiding
+        # the problem: every failure that existed before this still surfaces,
+        # because if the floor arrangement fails too, its error is the one that
+        # propagates. The only thing swallowed is an error the flip itself
+        # introduced, and a scene that drew before draws again.
+        #
+        # Logged rather than silent, which is this module's own rule everywhere
+        # else: a fallback nobody can see is a fallback nobody can fix.
+        _LOG.warning(
+            "场景 `%s`：块本来该按讲解顺序放到顶部，但放不下（%s），退回原来的底部摆法",
+            scene.id,
+            flipped_failure,
+        )
+        boxes, leads = assemble(False)
     return boxes, leads, frame
 
 
@@ -2545,6 +3017,21 @@ def _check_fit(boxes: dict[str, _Box], stage: RenderStage, scene_id: str) -> Non
     separately from the other three because it is a different failure. Off the
     canvas is an object nobody can see; under the caption is an object the
     subtitle is sitting on top of, which looks deliberate.
+
+    **Boxes only.** A body's `label` hangs outside its box and is deliberately
+    not measured here, and the reason is worth writing down because the obvious
+    move — add `LABEL_TAIL` and refuse a name that lands in the strip — was tried
+    and taken back out. It refused two real scenes by three units each: a
+    `generic` column ends its stack at the frame's floor and a `field` centres
+    its projectiles *on* the ground line, both by construction, and both would
+    have had to move to satisfy a rule about a name. That is a change to every
+    physics layout in the project, not a caption fix.
+
+    So the name is the player's guarantee instead: `drawBody` will not let it
+    cross `CAPTION_BAND_RATIO`, and holds it up to `captionTop` when it would.
+    Which leaves this check exactly as strong as it was and no stronger, and the
+    honest note is that an annotation has never been modelled here — `AXIS_LABEL_GAP`
+    records the same gap being closed by hand on the axis label instead.
     """
     caption_top = _caption_top(stage)
     for element_id, box in sorted(boxes.items()):
@@ -2585,6 +3072,38 @@ def _check_fit(boxes: dict[str, _Box], stage: RenderStage, scene_id: str) -> Non
 
 def _body_size(obj: StoryboardObject) -> tuple[float, float]:
     return _BODY_SIZES.get(obj.role, (64.0, 48.0))
+
+
+def _body_shape(obj: StoryboardObject) -> BodyShape:
+    """What this body draws, with `props.shape` overriding the role's own.
+
+    The prop is checked against `SHAPE_NAMES` before it is used, the way
+    `_form_of` checks a tree's `form` and for the same reason: an unrecognised
+    word falls back to the role rather than reaching the player, so a name the
+    drawer cannot branch on never becomes a shape nobody chose. The validator
+    refuses the word earlier in the real chain (`unknown_shape`), which is where
+    the model finds out; this is the second half of that division of labour.
+    """
+    requested = obj.props.get("shape")
+    if isinstance(requested, str) and requested in SHAPE_NAMES:
+        return cast(BodyShape, requested)
+    return _BODY_SHAPES.get(obj.role, "rect")
+
+
+def _enter_of(obj: StoryboardObject) -> EnterStyle:
+    """How this object arrives, or the default for a word the player cannot read.
+
+    `_form_of`'s arrangement, and `_body_shape`'s: the validator refuses an
+    unknown word earlier with a message naming the legal ones (`unknown_enter`),
+    while there is still a model that can be asked for it again — and this is
+    the half that keeps a spec written by hand, or by an older contract,
+    drawing. An element that arrives plainly is a worse picture than one that
+    drops in; an element that does not arrive at all is not a picture.
+    """
+    requested = obj.props.get("enter")
+    if isinstance(requested, str) and requested in ENTER_NAMES:
+        return cast(EnterStyle, requested)
+    return "rise"
 
 
 def _lead_size(obj: StoryboardObject, stage: RenderStage) -> tuple[float, float]:
@@ -2649,14 +3168,124 @@ def _anchored_box(
     return box
 
 
+@dataclass(slots=True)
+class _Mounts:
+    """What the elements hanging off each anchor have already taken of the frame.
+
+    Two of the four mounted primitives place themselves off **their anchor
+    alone** — `verdict` at its top-right corner, `ordinal` at its top-left — and
+    both do it deterministically. Nothing in either function knows that a second
+    one exists, so they are not merely close: they are identical. A scene that
+    judged one code block five ways produced five verdicts at `dx=134.5,
+    dy=-99.0` **to the byte**, and the beats that revealed them two at a time
+    played as one mark replacing another rather than as a list of five.
+
+    So this is the missing knowledge, kept as one mechanism with two readers
+    rather than two fixes:
+
+    - **A badge reads its place in the column** (`index_of`) and the column's
+      length (`group`). The length is counted *before* anything is placed,
+      because a column has to know how far it will reach before its first badge
+      can be clamped into the frame.
+    - **A bubble or a note reads the rectangles already taken on its anchor**
+      (`others`) and passes them to `_beside` as obstacles — the same fix said
+      the other way round, 「it can see its siblings」.
+
+    Filled in declaration order and read in it, so the picture stays a function
+    of the storyboard alone. A sibling declared *later* is invisible to a bubble
+    declared earlier: greedy, and the only order-free alternative is laying the
+    frame out twice, which could not terminate on a pair that avoid each other
+    by swapping sides forever.
+    """
+
+    #: anchor id -> `(primitive, rectangle)`, in the order they were placed.
+    placed: dict[str, list[tuple[str, _Box]]] = field(default_factory=dict)
+    #: object id -> how many mounted elements of its own primitive share its anchor.
+    group: dict[str, int] = field(default_factory=dict)
+
+    def index_of(self, anchor: str, primitive: str) -> int:
+        """This one's place in the column: how many of `primitive` are already there."""
+        return sum(1 for prim, _ in self.placed.get(anchor, ()) if prim == primitive)
+
+    def others(self, anchor: str) -> list[_Box]:
+        """The rectangles already placed on `anchor`, whatever primitive put them there."""
+        return [rect for _, rect in self.placed.get(anchor, ())]
+
+    def add(self, anchor: str, primitive: str, rect: _Box) -> None:
+        self.placed.setdefault(anchor, []).append((primitive, rect))
+
+
+def _mounts_for(scene: StoryboardScene) -> _Mounts:
+    """A fresh `_Mounts` for one scene, with every group already counted.
+
+    Counted up front rather than accumulated, because the two badge primitives
+    clamp their **whole column** into the frame: the first badge has to know how
+    far down the last one will reach, and that is a question about the storyboard
+    rather than about what has been placed so far.
+
+    Elements a `_to_*` constructor is going to reject do not get here — nothing
+    here places anything, so a scene that fails to lay out still fails with the
+    same error it always did.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for obj in scene.objects:
+        primitive = _primitive_of(obj)
+        anchor = _relation(obj, "of")
+        if primitive is None or anchor is None:
+            continue
+        counts[(anchor, primitive)] = counts.get((anchor, primitive), 0) + 1
+    mounts = _Mounts()
+    for obj in scene.objects:
+        primitive = _primitive_of(obj)
+        anchor = _relation(obj, "of")
+        if primitive is None or anchor is None:
+            continue
+        mounts.group[obj.id] = counts[(anchor, primitive)]
+    return mounts
+
+
 def _glyph_to_draw(obj: StoryboardObject) -> str | None:
+    """The glyph this body asked for, or `None` if it asked for none.
+
+    **A name that is not on disk raises** — unless the whole glyph library is
+    missing. It used to return `None` for both cases, and the silence is the
+    reason this function has a docstring now: a lesson about 匀速直线运动 wrote
+    `glyph: "ball"`, `layout` dropped it without a word, and the picture drew a
+    rounded square. A silent substitution is worse than a failure because the
+    result looks deliberate.
+
+    The two cases are not the same thing and must not share an answer:
+
+    - **A name with no file, while the library is there.** The model wrote a
+      name that does not exist. `validation._check_glyphs` refuses it earlier in
+      the real chain (`unknown_glyph`), so reaching here means the caller never
+      went through the validator — a hand-written spec, or something that
+      imported `layout_storyboard` directly, which is exactly how the 小球
+      picture was produced. Raising is the whole point.
+    - **The library itself is absent.** Nothing can be drawn, so the only
+      alternatives are plain shapes or no picture at all, and degrading is the
+      choice on record (`test_a_glyph_with_no_data_is_omitted_but_the_request_is_kept`):
+      the requested name stays in `props`, so the gap is visible in the spec
+      rather than vanishing.
+    """
     requested = obj.props.get("glyph")
-    if isinstance(requested, str) and requested in _available_glyphs():
+    if requested is None:
+        return None
+    available = _available_glyphs()
+    if not available:
+        return None
+    if isinstance(requested, str) and requested in available:
         return requested
-    return None
+    raise LayoutError(
+        f"`{obj.id}` 要的字形 `{requested}` 在磁盘上没有几何；"
+        f"合法值见 `assets/glyphs/`（现有 {len(available)} 个）。"
+        "**不会退化成方框**——那样画出来的东西看着像是故意的"
+    )
 
 
-def _drawn_size(glyph_name: str | None, width: float, height: float) -> tuple[float, float]:
+def _drawn_size(
+    glyph_name: str | None, shape: str, width: float, height: float
+) -> tuple[float, float]:
     """How big a body actually draws, which is not always how big its box is.
 
     A body with no glyph fills its box exactly. A body with one does not: the
@@ -2671,14 +3300,42 @@ def _drawn_size(glyph_name: str | None, width: float, height: float) -> tuple[fl
     the arm it is meant to be bolted to, and the picture would be a six-axis arm
     swinging about a point in empty space — which reads as "the animation is
     wrong" and points at nothing in this file.
+
+    A circle is the same kind of answer for the same kind of reason. It is drawn
+    **inscribed in its box** — the player takes the smaller side as the diameter
+    — so a 64x48 box holds a 48-wide circle with 8 units of empty box either
+    side. The alternative, squaring the box here, would make `_check_lead` a lie
+    about a 主角's size and could drop one below `LEAD_EXTENT_RATIO`'s floor
+    while every check stayed green.
     """
     if glyph_name is None:
+        if shape == "circle":
+            side = min(width, height)
+            return (side, side)
         return (width, height)
     _, _, ink_width, ink_height = _load_glyph(glyph_name).ink_box
     if not (ink_width > 0 and ink_height > 0):
         return (width, height)
     scale = min(width / ink_width, height / ink_height)
     return (ink_width * scale, ink_height * scale)
+
+
+def _drawn_body(obj: StoryboardObject | None, width: float, height: float) -> tuple[float, float]:
+    """`_drawn_size` asked of an object, for the four 挂件 that hang off one.
+
+    A bubble, a verdict, an ordinal and an anchored note all have to know where
+    the *edge* of the thing they are pinned to really is, which is a question
+    about the glyph and the shape together — so it is asked in one place rather
+    than four times with one of the two halves forgotten.
+
+    `obj` may be `None`. By the time any of the four callers gets here the
+    relation has already been resolved and refused if it was missing, so a
+    `None` here means "no anchor to measure", and the box's own size is the
+    answer that keeps the measurement honest.
+    """
+    if obj is None:
+        return (width, height)
+    return _drawn_size(_glyph_to_draw(obj), _body_shape(obj), width, height)
 
 
 def _to_body(
@@ -2701,8 +3358,15 @@ def _to_body(
     # obstacle's own business. Leads are never obstacles — `_lane_boxes` picks
     # them with `_bodies_but(scene, "obstacle")`.
     width, height = (box.width, box.height) if lead else _body_size(obj)
-    is_obstacle = obj.role == "obstacle"
     glyph_name = _glyph_to_draw(obj)
+    shape = _body_shape(obj)
+    # `shape` is drawn only when there is no glyph — the player branches on the
+    # glyph first, and `_drawn_size` below branches the same way, or the pivot
+    # would be measured against a shape that never reaches the screen.
+    is_polygon = shape == "polygon"
+    # Measured once and answered twice, because the pivot and the name are the
+    # same question — where does this body *end* — asked from two directions.
+    drawn_width, drawn_height = _drawn_size(glyph_name, shape, width, height)
     path, duration = _flight(obj, box, scene, stage, frame)
     return BodyElement(
         id=obj.id,
@@ -2710,14 +3374,15 @@ def _to_body(
         label=obj.label,
         x=box.x,
         y=box.y,
-        shape="polygon" if is_obstacle else "rect",
+        shape=shape,
         width=width,
         height=height,
-        sides=OBSTACLE_SIDES if is_obstacle else 6,
-        inner_ratio=OBSTACLE_INNER_RATIO if is_obstacle else 1.0,
+        sides=OBSTACLE_SIDES if is_polygon else 6,
+        inner_ratio=OBSTACLE_INNER_RATIO if is_polygon else 1.0,
         heading=_number(obj, "heading", 0.0),
         # Against what the glyph draws, not against the box: see `_drawn_size`.
-        pivot=_body_pivot(obj.role, *_drawn_size(glyph_name, width, height)),
+        pivot=_body_pivot(obj.role, drawn_width, drawn_height),
+        label_dy=drawn_height / 2 + LABEL_TAIL,
         glyph=glyph_name,
         path=path,
         duration=duration,
@@ -3080,6 +3745,7 @@ def _to_verdict(
     scene: StoryboardScene,
     boxes: dict[str, _Box],
     stage: RenderStage,
+    mounts: _Mounts,
 ) -> VerdictElement:
     """A ✓ / ✗ / ! pinned through its target's top-right corner.
 
@@ -3096,10 +3762,35 @@ def _to_verdict(
 
     `highlights` and `emphasis` do the rest: the badge takes the mark's colour
     and the player already knows how to pulse it.
+
+    **The corner is baked as an offset from the anchor's centre, not as a
+    position.** `x`/`y` is the anchor's centre and `dx`/`dy` is where the badge
+    sits in that frame, which is `_to_bubble`'s arrangement and the one the
+    attachment pass actually honours: `behaviors.js` overwrites `x`/`y` of every
+    mounted element with its anchor's centre on every frame, so the absolute
+    corner this function used to bake was never read. The picture said one thing
+    and the player drew another, forty pixels apart over a 64x48 body — which is
+    why nobody saw it, and why `compare`'s 132x99 leads are what surfaced it.
+
+    The corner it aims at is the anchor's **drawn** corner (`_drawn_size`), not
+    the corner of its box: a glyph body fits its ink into the box by the smaller
+    ratio, so a badge measured against the box floats off the icon beside it.
+    `_to_bubble`'s tail asks the same helper for the same reason.
+
+    **Several verdicts on one anchor make a column, not a heap.** That is what
+    `mounts` is here for, and it is not a nicety: five verdicts on one listing
+    used to come out at byte-identical offsets, so a scene that judged the same
+    code block five ways drew one mark over another. See `_Mounts`.
     """
     anchor = _relation(obj, "of")
     box = _anchored_box(obj, anchor, boxes, "verdict")
+    # `_anchored_box` has just refused a missing `of`; this says the same thing
+    # to the checker, which cannot see through the call.
+    anchor = cast(str, anchor)
     declared_text = obj.props.get("text")
+
+    anchor_obj = _object_by_id(scene, anchor)
+    drawn = _drawn_body(anchor_obj, box.width, box.height)
 
     half = VERDICT_SIZE / 2
     margin = stage.width * STAGE_MARGIN_RATIO
@@ -3110,27 +3801,59 @@ def _to_verdict(
         for text in (*_written_texts(obj, scene, "text"), obj.label)
     ]
     label_width = max(label_widths, default=0.0)
-    x = min(max(box.x + box.width / 2, margin + half), stage.width - margin - half)
-    y = min(
-        max(box.y - box.height / 2, margin + half),
-        _caption_top(stage) - margin - half,
-    )
+    # The anchor's top-right corner, in stage coordinates, then held inside the
+    # canvas. Both are the anchor's centre plus an offset, which is the only way
+    # the two stay consistent under the attachment pass.
+    corner_x = box.x + drawn[0] / 2
+    corner_y = box.y - drawn[1] / 2
+    badge_x = min(max(corner_x, margin + half), stage.width - margin - half)
 
     side: Literal["right", "left", "below"] = "right"
-    if x + half + VERDICT_LABEL_GAP + label_width > stage.width - margin:
+    if badge_x + half + VERDICT_LABEL_GAP + label_width > stage.width - margin:
         side = "left"
-    if side == "left" and x - half - VERDICT_LABEL_GAP - label_width < margin:
+    if side == "left" and badge_x - half - VERDICT_LABEL_GAP - label_width < margin:
         # Neither side has room, so the label goes under the badge. It is the
         # worse position — it can sit on the body the mark is judging — but the
         # alternatives are drawing it off the canvas or over the badge.
         side = "below"
 
+    # **The column, not the badge.** Verdicts on one anchor stack down from its
+    # corner in the order they were declared, which is the order a walk-through
+    # reaches them. What gets clamped is the *column*: a stack near the bottom of
+    # the frame moves up as one piece, instead of the last badge sliding onto the
+    # one above it — which is the defect this replaced, arriving by a different
+    # road. One verdict is the old picture to the pixel, since with a single step
+    # the arithmetic below is `min(max(corner_y, low), high)`.
+    index = mounts.index_of(anchor, "verdict")
+    step = VERDICT_SIZE + VERDICT_STACK_GAP
+    if side == "below":
+        # A label under its badge is part of this row, so the next badge has to
+        # clear it. `side` is settled above and never reads `badge_y`, which is
+        # what lets the step be known before the column is placed.
+        step += VERDICT_LABEL_FONT_SIZE + VERDICT_LABEL_GAP
+    low = margin + half
+    high = _caption_top(stage) - margin - half
+    top = corner_y
+    lowest = top + (mounts.group.get(obj.id, 1) - 1) * step
+    if lowest > high:
+        top -= lowest - high
+    top = max(top, low)
+    badge_y = top + index * step
+
+    mounts.add(
+        anchor,
+        "verdict",
+        _Box(x=badge_x, y=badge_y, width=VERDICT_SIZE, height=VERDICT_SIZE),
+    )
+
     return VerdictElement(
         id=obj.id,
         role=obj.role,
         label=obj.label,
-        x=x,
-        y=y,
+        x=box.x,
+        y=box.y,
+        dx=badge_x - box.x,
+        dy=badge_y - box.y,
         mark=_mark_of(obj),
         text=declared_text if isinstance(declared_text, str) and declared_text else obj.label,
         size=VERDICT_SIZE,
@@ -3147,6 +3870,634 @@ def _to_verdict(
         label_side=side,
         anchor=anchor,
         props=_props_for(obj, "verdict"),
+    )
+
+
+def _to_ordinal(
+    obj: StoryboardObject,
+    scene: StoryboardScene,
+    boxes: dict[str, _Box],
+    stage: RenderStage,
+    mounts: _Mounts,
+) -> OrdinalElement:
+    """A numbered disc on its anchor's top-left corner.
+
+    `bubble`'s half of the mount and `verdict`'s half of the placement, which is
+    the combination the two of them arrived at from opposite directions: the
+    disc is at `box.x`/`box.y` *plus an offset* because the attachment pass
+    overwrites a mounted element's position with its anchor's centre, and the
+    corner it aims at is the anchor's **drawn** corner (`_drawn_size`) because a
+    glyph body's ink is narrower than its box.
+
+    **Top-left, not top-right.** `verdict` takes the right-hand corner, and a
+    scene that both numbers its steps and judges them — which is what a worked
+    example looks like — has to be able to do both without the two badges
+    colliding. Left is also the side a sequence is read from: the number comes
+    before the thing it numbers.
+
+    Clamped rather than refused, for `_to_verdict`'s reason: a step dot on an
+    object the layout already put in a corner is a scene that is merely crowded,
+    and the dot is the part that can move. What the clamp must *not* move is
+    `x`/`y` — that is the anchor, and shifting it would detach the dot from the
+    thing it numbers, which is the one thing this trade cannot do.
+    """
+    anchor = _relation(obj, "of")
+    box = _anchored_box(obj, anchor, boxes, "ordinal")
+    anchor = cast(str, anchor)  # `_anchored_box` refuses a missing `of`; see `_to_verdict`
+    anchor_obj = _object_by_id(scene, anchor)
+    drawn = _drawn_body(anchor_obj, box.width, box.height)
+
+    half = ORDINAL_SIZE / 2
+    margin = stage.width * STAGE_MARGIN_RATIO
+    disc_x = min(
+        max(box.x - drawn[0] / 2, margin + half),
+        stage.width - margin - half,
+    )
+
+    # A column, for `_to_verdict`'s reason and with the same arithmetic — the
+    # same `index`/`group` pair, the same whole-column clamp, and the same
+    # promise that one disc is the picture that was always drawn. A procedure
+    # numbering four steps of one object is the case this exists for: four discs
+    # used to land on the identical pixel, so the steps that revealed them one
+    # at a time played as one number replacing another.
+    index = mounts.index_of(anchor, "ordinal")
+    step = ORDINAL_SIZE + ORDINAL_STACK_GAP
+    low = margin + half
+    high = _caption_top(stage) - margin - half
+    top = box.y - drawn[1] / 2
+    lowest = top + (mounts.group.get(obj.id, 1) - 1) * step
+    if lowest > high:
+        top -= lowest - high
+    top = max(top, low)
+    disc_y = top + index * step
+
+    mounts.add(anchor, "ordinal", _Box(x=disc_x, y=disc_y, width=ORDINAL_SIZE, height=ORDINAL_SIZE))
+
+    return OrdinalElement(
+        id=obj.id,
+        role=obj.role,
+        label=obj.label,
+        x=box.x,
+        y=box.y,
+        dx=disc_x - box.x,
+        dy=disc_y - box.y,
+        # `_bounded` and not `_number`, so a hand-written `n: 12` draws 「9」
+        # rather than a two-digit number that does not fit its disc. The real
+        # gate is `validation.py`, which refuses the value and names the object;
+        # this is the backstop for a storyboard that never went through it.
+        n=int(_bounded(obj, "n", float(ORDINAL_MIN), ORDINAL_MIN, ORDINAL_MAX)),
+        size=ORDINAL_SIZE,
+        anchor=anchor,
+        props=_props_for(obj, "ordinal"),
+    )
+
+
+#: The four sides a bubble may hang on, in the order ties are broken. Right first
+#: because a left-to-right diagram reads that way; the order only decides a tie,
+#: and the scores below are what does the work.
+BUBBLE_SIDES: tuple[str, ...] = ("right", "left", "above", "below")
+
+
+def _bubble_extent(table: dict[str, list[str]]) -> tuple[float, float]:
+    """The box that holds every entry of the wrapped table, padding included.
+
+    Sized from the table rather than from the declared string because `text` is
+    live and the box is cut once. It is `_panel_texts`' measurement one size
+    down, and that comment has the numbers: 11 of the 16 readouts in the sample
+    documents are given a longer string by some beat than the object declares.
+
+    Width is the widest entry and height is the tallest, and **the two need not
+    come from the same entry**. Taking the `max` of a per-entry `(w, h)` pair —
+    the obvious way to write this — lets a wide-but-short text and a
+    narrow-but-tall one each contribute nothing, and the third line then draws
+    out of the bottom of the box.
+    """
+    widest = 0.0
+    tallest = 0
+    for lines in table.values():
+        widest = max(
+            widest,
+            max((_text_width(line, BUBBLE_FONT_SIZE) for line in lines), default=0.0),
+        )
+        tallest = max(tallest, len(lines))
+    # At least one line tall: an empty table is a hand-written storyboard that
+    # skipped a required prop, and a zero-height box would be a sliver.
+    return (
+        min(max(widest + BUBBLE_PADDING * 2, BUBBLE_MIN_WIDTH), BUBBLE_MAX_WIDTH),
+        max(tallest, 1) * BUBBLE_LINE_HEIGHT + BUBBLE_PADDING * 2,
+    )
+
+
+def _note_extent(table: dict[str, list[str]]) -> tuple[float, float]:
+    """The room a note needs: the widest line, times the tallest entry.
+
+    `_bubble_extent` without the padding and without the clamps, and both
+    omissions are the point rather than an economy. There is no box, so there is
+    nothing to pad — and there is no `NOTE_MIN_WIDTH` for the same reason
+    `BUBBLE_MIN_WIDTH` exists: a minimum is a *box* holding words that would
+    otherwise be narrower than it, and words with no box simply take the room
+    they take.
+
+    The `max`-of-max reason still applies, one primitive over: width comes from
+    the widest entry and height from the tallest, and they need not be the same
+    entry, because `text` is live and the room is reserved once.
+    """
+    widest = 0.0
+    tallest = 0
+    for lines in table.values():
+        widest = max(
+            widest, max((_text_width(line, NOTE_FONT_SIZE) for line in lines), default=0.0)
+        )
+        tallest = max(tallest, len(lines))
+    return widest, max(tallest, 1) * NOTE_LINE_HEIGHT
+
+
+def _overlap_area(cx: float, cy: float, width: float, height: float, other: _Box) -> float:
+    """How much of this rectangle another placed box covers.
+
+    Zero unless the two intersect on **both** axes, which is `_check_fit`'s rule
+    and for its reason: one axis of clearance is enough for two boxes to read as
+    separate.
+    """
+    gap_x = abs(cx - other.x) - (width + other.width) / 2
+    gap_y = abs(cy - other.y) - (height + other.height) / 2
+    if gap_x >= 0 or gap_y >= 0:
+        return 0.0
+    return float(-gap_x * -gap_y)
+
+
+def _bubble_spot(
+    box: _Box, drawn: tuple[float, float], size: tuple[float, float], side: str
+) -> tuple[float, float]:
+    """Where the body's centre goes on `side`, before the frame has its say."""
+    across = drawn[0] / 2 + BUBBLE_TAIL_GAP + size[0] / 2
+    down = drawn[1] / 2 + BUBBLE_TAIL_GAP + size[1] / 2
+    if side == "right":
+        return (box.x + across, box.y)
+    if side == "left":
+        return (box.x - across, box.y)
+    if side == "above":
+        return (box.x, box.y - down)
+    return (box.x, box.y + down)
+
+
+def _beside(
+    box: _Box,
+    drawn: tuple[float, float],
+    size: tuple[float, float],
+    boxes: dict[str, _Box],
+    anchor: str | None,
+    stage: RenderStage,
+    taken: Sequence[_Box] = (),
+) -> tuple[float, float]:
+    """Where a box that must sit *beside* something goes, in stage coordinates.
+
+    Shared by `bubble` and `note`, which are the two primitives that hang off an
+    object instead of taking a slot: four candidate sides, clamped into the
+    frame, scored by how much of the picture they cover. The scores are ordered
+    (area covered, distance from where the side wanted to be, side order), so a
+    candidate that would land on something always loses to one that would not,
+    and among the ones that would not, `BUBBLE_SIDES` order breaks the tie.
+
+    **The anchor counts as an obstacle too, but as what it *draws* rather than as
+    the box it was given.** Both halves of that are load-bearing. Excluding it
+    outright lets a candidate the frame clamped back onto the anchor score a
+    clean zero and win — the lane fixture does exactly that, and the callout
+    lands on the car. Counting its whole box instead would punish the correct
+    placement of a bubble on a glyph body, whose ink is narrower than its box by
+    up to `BUBBLE_TAIL_GAP` on each side: `_bubble_spot` measured the gap against
+    the ink, so the ink is what the score has to be in the same unit as.
+
+    **`taken` is a third source of obstacles, and it exists because the other two
+    are blind to it.** `boxes` holds what the preset placed, and a mounted
+    element never goes in there — so two bubbles on one anchor saw an empty frame,
+    each picked the same side, and landed on each other. That is `_to_verdict`'s
+    defect one primitive over. `_Mounts.others` supplies the rectangles already
+    placed on this anchor, and handing them in rather than teaching this function
+    about siblings keeps the scoring rule in one place: a sibling is just one more
+    thing a candidate would cover.
+    """
+    width, height = size
+    margin = stage.width * STAGE_MARGIN_RATIO
+    low_x, high_x = margin + width / 2, stage.width - margin - width / 2
+    low_y = margin + height / 2
+    high_y = _caption_top(stage) - margin - height / 2
+    # A box wider than the frame has nothing to be clamped to; centring it is the
+    # only answer that is not a negative range. `BUBBLE_MAX_WIDTH` keeps this out
+    # of reach on a 960 stage, so it is a guard rather than a case.
+    if low_x > high_x:
+        low_x = high_x = stage.width / 2
+    if low_y > high_y:
+        low_y = high_y = _caption_top(stage) / 2
+
+    anchor_ink = _Box(x=box.x, y=box.y, width=drawn[0], height=drawn[1])
+    others = [other for other_id, other in boxes.items() if other_id != anchor]
+    others.extend(taken)
+
+    best: tuple[tuple[float, float, int], float, float] | None = None
+    for index, candidate_side in enumerate(BUBBLE_SIDES):
+        want_x, want_y = _bubble_spot(box, drawn, size, candidate_side)
+        cx = min(max(want_x, low_x), high_x)
+        cy = min(max(want_y, low_y), high_y)
+        covered = sum(
+            _overlap_area(cx, cy, width, height, other) for other in (*others, anchor_ink)
+        )
+        score = (covered, math.hypot(cx - want_x, cy - want_y), index)
+        if best is None or score < best[0]:
+            best = (score, cx, cy)
+    # `BUBBLE_SIDES` is a non-empty literal, so the loop always sets this.
+    assert best is not None
+    _, cx, cy = best
+    return cx, cy
+
+
+def _tail_points(
+    side: str,
+    drawn: tuple[float, float],
+    body: tuple[float, float],
+    size: tuple[float, float],
+) -> list[RenderPoint]:
+    """The apex and the tail's two base points, in the anchor's frame.
+
+    `drawn` is the anchor's *drawn* extent (`_drawn_size`), `body` is where the
+    bubble's centre actually landed, `size` its box. All three are in the
+    anchor's frame, where `(0, 0)` is the anchor's centre — the origin every
+    offset on a mounted element is measured from.
+
+    The base is narrowed to the body's **straight run**, the flat part of an edge
+    inside the corner radius. A base as wide as `BUBBLE_TAIL_WIDTH` on a body
+    whose corners curve in further than that draws a stub poking out past a
+    rounded corner — a two-pixel artefact nobody would file and everybody would
+    see. Where the straight run is shorter than the base, the base gives way:
+    the tail's width is a taste and the body's shape is not.
+    """
+    half_spread = BUBBLE_TAIL_WIDTH / 2
+    bx, by = body
+    width, height = size
+    if side in ("right", "left"):
+        spread = min(half_spread, max(height / 2 - BUBBLE_RADIUS, 0.0))
+        if spread <= 0:
+            return []
+        edge = bx - width / 2 if side == "right" else bx + width / 2
+        return [
+            RenderPoint(x=drawn[0] / 2 if side == "right" else -drawn[0] / 2, y=0.0),
+            RenderPoint(x=edge, y=by - spread),
+            RenderPoint(x=edge, y=by + spread),
+        ]
+    spread = min(half_spread, max(width / 2 - BUBBLE_RADIUS, 0.0))
+    if spread <= 0:
+        return []
+    edge = by - height / 2 if side == "below" else by + height / 2
+    return [
+        RenderPoint(x=0.0, y=drawn[1] / 2 if side == "below" else -drawn[1] / 2),
+        RenderPoint(x=bx - spread, y=edge),
+        RenderPoint(x=bx + spread, y=edge),
+    ]
+
+
+def _positive(value: PropValue | None) -> bool:
+    """A number above zero, `bool` excluded — `_number`'s rule, minus the object."""
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0
+
+
+def _travels(scene: StoryboardScene, obj: StoryboardObject | None) -> bool:
+    """Whether the player will carry this object across the frame.
+
+    The same two questions `behaviors.js` asks, and asked here rather than read
+    off the role, because the role does not answer them: a `vehicle` in a
+    `chain` scene is a box that sits still (`SPEED_PRESETS` is one preset, and
+    the recorded avoidance document is the run that proved it), while a `field`
+    throws its `projectile` whether or not anyone wrote a `speed`.
+
+    Every beat and the scene's own `params` are in the list, not only the
+    declared prop, for `_written_texts`' reason one prop over: `speed` is live,
+    a beat can hand it down, and the frame that has to hold still for a callout
+    is the frame where some beat made it move. The player resolves the same
+    three places at play time, so this is its lookup chain read backwards.
+    """
+    if obj is None:
+        return False
+    if scene.scene_type == "field":
+        return obj.role == FLYING_ROLE
+    if scene.scene_type not in SPEED_PRESETS:
+        return False
+    declared: list[PropValue | None] = [obj.props.get("speed"), scene.params.get("speed")]
+    for step in scene.steps:
+        state = step.object_states.get(obj.id)
+        if isinstance(state, dict):
+            declared.append(state.get("speed"))
+    return any(_positive(value) for value in declared)
+
+
+def scene_moves(scene: StoryboardScene) -> bool:
+    """Whether anything in this scene moves once it is playing.
+
+    The question `_travels` answers for one object, asked of the whole picture —
+    and the one the density floor turns on. A scene where nothing moves has
+    nothing on screen but the objects themselves, so a count of two is a nearly
+    blank frame held for six seconds. A scene where something moves is a picture
+    whatever else is in it: the motion is the content, and the objects around it
+    are what the motion is measured against.
+
+    Public because `storyboard/validation.py` asks it too. Written here rather
+    than there because "what the player will actually do" is a fact about the
+    player's lookup chain — see `_travels` — and a second copy of that reasoning
+    in the validator is a second thing to keep in step.
+
+    **One known hole, inherited from `_travels` and not yet fixed.** A `traveler`
+    rides its link in every preset (`behaviors.js` step 5, at a default `speed` of
+    0.5, so it moves even when nobody wrote one), and `_travels` does not ask
+    about that. It costs *this* rule nothing: a traveler needs an `along` to a
+    link, a link needs two ends, so a scene holding one has at least four objects
+    and can never be sparse. It is left alone because the same predicate backs
+    `callout`'s refusal, where the hole is real — a bubble on a message token is
+    accepted today — and closing it makes an existing scene stop laying out.
+    That is a separate decision from this one, so it is not being made here.
+    """
+    return any(_travels(scene, obj) for obj in scene.objects)
+
+
+def _to_bubble(
+    obj: StoryboardObject,
+    scene: StoryboardScene,
+    boxes: dict[str, _Box],
+    stage: RenderStage,
+    mounts: _Mounts,
+) -> BubbleElement:
+    """A callout hung beside its anchor, with a tail that finds its own edge.
+
+    Placement is the verdict's problem one size up, and the differences are the
+    whole of this function.
+
+    **Four candidates, scored rather than accepted in order.** `_to_verdict` can
+    take the first position that fits because a 38-wide badge lands on its
+    target's corner whatever happens. A box of words has to go *beside* the
+    object, and which side is free is a question about the rest of the frame: the
+    side a bubble "prefers" is regularly the side the next card is already on —
+    measured on the value-types demo, where `v-number` sits exactly where a
+    bubble pointing at `v-boolean` wants to go. So the candidates are ranked by
+    how much of anything else the layout placed they would cover, then by how far
+    the frame had to slide them, then by `BUBBLE_SIDES`.
+
+    **The tail is computed last, from where the body actually landed.** A tail
+    chosen from the winning candidate can end up pointing through its own box
+    once the frame has moved it.
+
+    **The apex lands on what the anchor draws, not on its box.** A glyph body
+    fits its ink into the box by the smaller ratio (`_drawn_size`), so a 64x48
+    box holding the `package` glyph draws 43x48 of ink — a tail aimed at the box
+    edge would float in empty space beside the icon. `_drawn_size`'s own
+    docstring asks for exactly this.
+
+    What it does not do is fail on crowding: a bubble on an object the layout
+    already put near an edge is a scene that is merely crowded, and the bubble is
+    the part that can move. `_to_verdict` makes the same trade and says why.
+
+    **It does fail on a moving anchor**, and that is the one place it is stricter
+    than the verdict. A callout says the thing its anchor cannot say — the
+    `true/false` card does not tell you those are the only two spellings — and a
+    thing that travels has already said its sentence by travelling. Riding the
+    car, the bubble was the caption repeated inside the picture. The refusal is
+    here rather than only in the note because the note reached a real run and
+    lost once already (see the glyph paragraph in `registry.py`).
+    """
+    anchor = _relation(obj, "of")
+    box = _anchored_box(obj, anchor, boxes, "bubble")
+    anchor = cast(str, anchor)  # `_anchored_box` refuses a missing `of`; see `_to_verdict`
+    declared = obj.props.get("text")
+
+    anchor_obj = _object_by_id(scene, anchor)
+    if _travels(scene, anchor_obj):
+        raise LayoutError(
+            f"`{obj.id}`（气泡）挂在 `{anchor}` 上，而 `{anchor}` 会移动。"
+            "气泡是给画面里待着不动的东西补一句它自己说不出来的话的；"
+            "会移动的东西，那层意思已经在动里了，气泡只是把同一句话再说一遍。"
+            "把气泡挂到旁边不动的对象上，或者把这句话交给 `note` 的 `aside`"
+            "（没有框的一行字，不属于任何对象）"
+        )
+    drawn = _drawn_body(anchor_obj, box.width, box.height)
+
+    # Every string a beat can put in the box, plus the label the `text`-less
+    # fallback would draw — `_panel_texts`' argument, and here it also decides
+    # the box the tail's base is cut against.
+    table: dict[str, list[str]] = {}
+    for candidate in (*_written_texts(obj, scene, "text"), obj.label):
+        if not candidate or candidate in table:
+            continue
+        lines = _wrap_text(candidate, BUBBLE_FONT_SIZE, BUBBLE_MAX_WIDTH - BUBBLE_PADDING * 2)
+        if len(lines) > BUBBLE_MAX_LINES:
+            raise LayoutError(
+                f"`{obj.id}`（气泡）这句话折成 {len(lines)} 行，"
+                f"超过 {BUBBLE_MAX_LINES} 行上限：「{candidate}」。"
+                "气泡是一句批注——拆成两个对象各说一句，"
+                "或者把这段说明交给 `note` 的 `aside`（没有框的一行字）"
+            )
+        table[candidate] = lines
+
+    width, height = _bubble_extent(table)
+
+    cx, cy = _beside(box, drawn, (width, height), boxes, anchor, stage, mounts.others(anchor))
+    mounts.add(anchor, "bubble", _Box(x=cx, y=cy, width=width, height=height))
+
+    # Re-derived from the final geometry rather than from the winning candidate.
+    dx, dy = cx - box.x, cy - box.y
+    if abs(dx) >= abs(dy):
+        side = "right" if dx >= 0 else "left"
+    else:
+        side = "below" if dy >= 0 else "above"
+
+    return BubbleElement(
+        id=obj.id,
+        role=obj.role,
+        label=obj.label,
+        x=box.x,
+        y=box.y,
+        text=declared if isinstance(declared, str) and declared else obj.label,
+        lines=table,
+        width=width,
+        height=height,
+        dx=dx,
+        dy=dy,
+        tail=_tail_points(side, drawn, (dx, dy), (width, height)),
+        anchor=anchor,
+        props=_props_for(obj, "bubble"),
+    )
+
+
+def _note_table(
+    obj: StoryboardObject, scene: StoryboardScene
+) -> tuple[dict[str, list[str]], float, float]:
+    """A note's wrapped lines, and the room they need.
+
+    Split out of `_to_note` because there are two callers and they have to agree
+    to the character. `_note_band` cuts the strip of frame the notes take before
+    the preset lays anything out, and `_to_note` draws them — and a band measured
+    from a second wrapping rule would reserve one height and draw another. Only
+    the strings a beat can reach are in the table, so the room is reserved for
+    the longest this note can get, not for the one it starts at.
+
+    The too-long refusal is here rather than at the drawing end for the reason
+    `BUBBLE_MAX_LINES` gives: this runs during layout, which is after the last
+    model call, so the message can only be read by a person — but it is still
+    worth naming the object and the words rather than drawing a note over the
+    caption strip.
+    """
+    table: dict[str, list[str]] = {}
+    for candidate in (*_written_texts(obj, scene, "text"), obj.label):
+        if not candidate or candidate in table:
+            continue
+        lines = _wrap_text(candidate, NOTE_FONT_SIZE, NOTE_MAX_WIDTH)
+        if len(lines) > NOTE_MAX_LINES:
+            raise LayoutError(
+                f"`{obj.id}`（note）这句话折成 {len(lines)} 行，"
+                f"超过 {NOTE_MAX_LINES} 行上限：「{candidate}」。"
+                "note 是字幕之外的那一句——公式、结论、一个数字；"
+                "要说的更多，就拆成两个对象，或者把这段交给 `bubble`"
+            )
+        table[candidate] = lines
+    width, height = _note_extent(table)
+    return table, width, height
+
+
+def _note_band(scene: StoryboardScene, frame: _Frame) -> tuple[dict[str, _Box], float]:
+    """The notes that belong to the scene, in a band across the top of the frame.
+
+    Returns `(boxes, picture_top)`, and the second half is `_block_layout`'s
+    `picture_bottom` seen from the other end. A note with no `of` is pinned to
+    nothing, so it cannot be placed *beside* anything — it takes the top of the
+    frame and the picture is arranged underneath it.
+
+    **The band is folded into `frame.top` before `_block_layout` runs**, which is
+    what keeps a lone listing from being centred straight through its own
+    formula. Doing it the other way — leave the frame alone and let `_has_company`
+    sort it out — does not work: the block's own `has_company` question is about
+    *other objects*, and a note is not one.
+
+    Only the unanchored notes are here. One with an `of` hangs off its subject
+    through `_to_note` and never touches the frame.
+    """
+    notes = [
+        obj
+        for obj in scene.objects
+        if _primitive_of(obj) == "note" and _relation(obj, "of") is None
+    ]
+    if not notes:
+        return {}, frame.top
+
+    boxes: dict[str, _Box] = {}
+    middle = (frame.left + frame.right) / 2
+    y = frame.top
+    for obj in notes:
+        _, width, height = _note_table(obj, scene)
+        y += height / 2
+        boxes[obj.id] = _Box(x=middle, y=y, width=width, height=height)
+        y += height / 2 + NOTE_GAP
+    # The last `NOTE_GAP` belongs between the band and the picture, so it is
+    # already in `y` — which is the point of returning a bottom rather than a
+    # height the caller adds back.
+    return boxes, y
+
+
+def _centre_a_lone_note_band(
+    boxes: dict[str, _Box],
+    notes: dict[str, _Box],
+    frame: _Frame,
+    band_bottom: float,
+) -> None:
+    """Centre the note band when the band *is* the picture.
+
+    `_note_band` pins to the top of the frame because a picture is arranged
+    underneath it. That is right whenever there is one — and a scene whose
+    objects are nothing but unanchored notes has none: `generic` places bodies
+    and there are none to place, `_card_boxes` finds no cards, and the preset
+    returns an empty map. The band then sits at the top of a 960x600 stage with
+    400-odd pixels of nothing beneath it.
+
+    Observed on a real run of a lesson about JSON: a scene of two notes,
+    「优点」/「局限」, landed at y=74 and y=146 and the rest of the frame stayed
+    empty. The complaint it earned was that the words were all bunched in the
+    upper half and the picture looked unbalanced — which is exactly what it was.
+
+    Shifted rather than laid out again, and that is what makes this cheap: a
+    note with an `of` (a verdict, a bubble) is placed by `_beside` reading its
+    anchor's box back out of `boxes`, so moving that box moves the whole cluster
+    with no second placement rule to keep in step.
+
+    The condition is "nothing else was placed", not "nothing else is below the
+    band". A preset that ignores `frame.top` — `lane` is the one — can put a
+    body *level* with the band, and the looser question would shift the band
+    straight into it: trading a picture that is merely top-heavy for a collision
+    that `_check_fit` refuses the scene over. A scene with anything else in it
+    keeps the arrangement it has always had.
+    """
+    if not notes:
+        return
+    if any(obj_id not in notes for obj_id in boxes):
+        return
+    band_height = band_bottom - frame.top
+    # The band's top, if the band were centred in the frame it was measured in.
+    centred_top = (frame.top + frame.bottom) / 2 - band_height / 2
+    shift = centred_top - frame.top
+    if abs(shift) < 0.5:
+        return
+    for obj_id, box in notes.items():
+        boxes[obj_id] = _Box(x=box.x, y=box.y + shift, width=box.width, height=box.height)
+
+
+def _to_note(
+    obj: StoryboardObject,
+    scene: StoryboardScene,
+    boxes: dict[str, _Box],
+    stage: RenderStage,
+    mounts: _Mounts,
+) -> NoteElement:
+    """A line of words with no box. See `NoteElement` for the geometry.
+
+    Two placements, and `of` is what chooses between them. With one, the note
+    hangs beside its subject through `_beside` — the same four-candidate scoring
+    a bubble uses, minus the tail. Without one it belongs to the scene, and the
+    box came from `_note_band`, which took the top of the frame before the preset
+    laid anything out.
+
+    Neither branch fails on crowding, and the reason is `_beside`'s: a note that
+    overlaps something is a worse picture, not a broken one, and refusing here
+    would spend a whole model call to say so.
+    """
+    table, width, height = _note_table(obj, scene)
+    declared = obj.props.get("text")
+
+    anchor = _relation(obj, "of")
+    dx = dy = 0.0
+    if anchor is None:
+        box = boxes.get(obj.id)
+        if box is None:
+            raise LayoutError(
+                f"`{obj.id}`（note）没有被摆放：`_note_band` 应该把它放进顶部那一条带里"
+            )
+    else:
+        # No `cast` needed here unlike the three above: this branch is the `else`
+        # of `if anchor is None`, so the checker has narrowed it already.
+        box = _anchored_box(obj, anchor, boxes, "note")
+        anchor_obj = _object_by_id(scene, anchor)
+        drawn = _drawn_body(anchor_obj, box.width, box.height)
+        cx, cy = _beside(box, drawn, (width, height), boxes, anchor, stage, mounts.others(anchor))
+        dx, dy = cx - box.x, cy - box.y
+        mounts.add(anchor, "note", _Box(x=cx, y=cy, width=width, height=height))
+
+    return NoteElement(
+        id=obj.id,
+        role=obj.role,
+        label=obj.label,
+        x=box.x,
+        y=box.y,
+        text=declared if isinstance(declared, str) and declared else obj.label,
+        lines=table,
+        width=width,
+        height=height,
+        dx=dx,
+        dy=dy,
+        anchor=anchor,
+        props=_props_for(obj, "note"),
     )
 
 
@@ -3471,6 +4822,7 @@ def _to_element(
     stage: RenderStage,
     frame: _Frame,
     leads: frozenset[str] = frozenset(),
+    mounts: _Mounts | None = None,
 ) -> RenderElement:
     """Dispatch on the primitive, so every preset shares one converter.
 
@@ -3525,8 +4877,22 @@ def _to_element(
         return _to_dimension(obj, scene, boxes)
     if primitive == "angle":
         return _to_angle(obj, scene, boxes)
+    # The four mounted primitives all take `mounts`, and none of them can be
+    # reached without it — see `_Mounts`. A caller that lays one scene out by
+    # hand (a test, a demo) gets an empty one rather than a `None` check in four
+    # places, which is the same as saying "no siblings".
+    mounts = mounts if mounts is not None else _Mounts()
     if primitive == "verdict":
-        return _to_verdict(obj, scene, boxes, stage)
+        return _to_verdict(obj, scene, boxes, stage, mounts)
+    if primitive == "bubble":
+        return _to_bubble(obj, scene, boxes, stage, mounts)
+    if primitive == "ordinal":
+        return _to_ordinal(obj, scene, boxes, stage, mounts)
+    # Outside the `boxes.get(obj.id)` group above, and that is the whole of why
+    # it is written here instead: a note with an `of` has no slot in the frame,
+    # so requiring one would fail every anchored note. It looks its own box up.
+    if primitive == "note":
+        return _to_note(obj, scene, boxes, stage, mounts)
     # Unreachable for every primitive the registry declares drawable, and a test
     # walks all of them to keep it that way. If it fires, the registry is lying:
     # `drawable=True` promised a picture the dispatch below cannot draw. Naming
@@ -3538,15 +4904,75 @@ def _to_element(
     )
 
 
-def _to_step(step: StoryboardStep, primitives: dict[str, str]) -> RenderStep:
+def carried_states(
+    steps: Sequence[StoryboardStep],
+) -> list[dict[str, dict[str, PropValue]]]:
+    """Each beat's state, with the sticky half of every earlier beat folded in.
+
+    Public because it is the answer to a question about the *contract* — what
+    does a beat's `object_states` mean for the beats after it — and
+    `tools/check_storyboard.py` needs the same answer to ask whether two
+    consecutive beats draw the same frame. A second copy of the rule over there
+    would be a second thing to drift.
+
+    `object_states` is read as a **change of state** — 布尔值变成 false，车速降到 40 —
+    and a change of state is one a picture keeps until something changes it back.
+    The player resolves a beat's `states` against that beat alone (`player.js`'s
+    `makeLookup`), so a value written in beat 2 and not written again in beat 3
+    fell back to the element's own `props` in beat 3: the card flipped to `false`
+    and flipped straight back, with nothing anywhere saying so. The hand-written
+    ROS sample walks one token 待发布 → 已发布 → 已接收 and then snaps it back to
+    待发布 on its last beat, which `registry.py` calls 「就是整堂课」.
+
+    Not every live prop is a state. `TRANSIENT_LIVE_PROPS` holds the two that are
+    gestures instead, and they are left out of `carried` entirely — which is
+    exactly "applied on the beat that writes them and nowhere else".
+
+    Values are merged raw and clamped later, in `_to_step`, so there is one place
+    that knows about stage units rather than two.
+    """
+    carried: dict[str, dict[str, PropValue]] = {}
+    out: list[dict[str, dict[str, PropValue]]] = []
+    for step in steps:
+        entered: dict[str, dict[str, PropValue]] = {}
+        for target, value_by_prop in step.object_states.items():
+            for prop, value in value_by_prop.items():
+                into = entered if prop in TRANSIENT_LIVE_PROPS else carried
+                into.setdefault(target, {})[prop] = value
+        snapshot = {target: dict(held) for target, held in carried.items()}
+        for target, props in entered.items():
+            snapshot.setdefault(target, {}).update(props)
+        out.append(snapshot)
+    return out
+
+
+def _render_steps(steps: Sequence[StoryboardStep], primitives: dict[str, str]) -> list[RenderStep]:
+    """The beats, each carrying the state the picture is actually in.
+
+    Split out of `layout_scene` for one reason: `_carried_states` needs the whole
+    list in hand, and a comprehension cannot carry a running total. The two are
+    one step and are meant to be read that way.
+    """
+    return [
+        _to_step(step, primitives, held)
+        for step, held in zip(steps, carried_states(steps), strict=True)
+    ]
+
+
+def _to_step(
+    step: StoryboardStep,
+    primitives: dict[str, str],
+    carried: dict[str, dict[str, PropValue]],
+) -> RenderStep:
     """One beat, with its state values held to the stage the way props are.
 
-    `primitives` maps object id -> primitive name, built once per scene by
-    `layout_scene`. Without it a beat state would be the one road into the spec
-    that skips the range check — and it is the road a lesson takes when it wants
-    to show a car slowing down, which is exactly the beat where the number is
-    most likely to have been copied out of the document in the document's own
-    unit.
+    `carried` is what the picture holds when this beat starts, already merged by
+    `_carried_states`. `primitives` maps object id -> primitive name, built once
+    per scene by `layout_scene`. Without it a beat state would be the one road
+    into the spec that skips the range check — and it is the road a lesson takes
+    when it wants to show a car slowing down, which is exactly the beat where the
+    number is most likely to have been copied out of the document in the
+    document's own unit.
     """
     return RenderStep(
         id=step.id,
@@ -3559,7 +4985,7 @@ def _to_step(step: StoryboardStep, primitives: dict[str, str]) -> RenderStep:
                 prop: _clamp_value(primitives.get(target), prop, value)
                 for prop, value in value_by_prop.items()
             }
-            for target, value_by_prop in step.object_states.items()
+            for target, value_by_prop in carried.items()
         },
     )
 
@@ -3586,10 +5012,14 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
     stage = stage or RenderStage()
     boxes, leads, frame = _place(scene, stage)
     links = _link_points(scene, boxes)
+    # One `_Mounts` per scene, filled as the objects are converted below. It is
+    # what lets the second verdict on a body know the first one exists — see
+    # `_Mounts` for the picture that produced it.
+    mounts = _mounts_for(scene)
     elements: list[RenderElement] = []
     for obj in scene.objects:
         try:
-            elements.append(_to_element(obj, scene, boxes, links, stage, frame, leads))
+            elements.append(_to_element(obj, scene, boxes, links, stage, frame, leads, mounts))
         except ValidationError as exc:
             # The element models are strict and the model's props are not, so a
             # value can be legal in the vocabulary and out of range in the
@@ -3601,6 +5031,17 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
             raise LayoutError(
                 f"场景 `{scene.id}` 的 `{obj.id}`（{obj.role}）超出了渲染契约的取值范围：{exc}"
             ) from exc
+
+    # `enter` is settled once per object, so it is applied in one pass here
+    # rather than by each of the fourteen `_to_*` constructors. Those are
+    # fourteen chances to forget it, and a primitive that forgot would be one
+    # whose `enter` silently did nothing — the exact failure this whole round is
+    # about, arriving from the other end.
+    by_id = {element.id: element for element in elements}
+    for obj in scene.objects:
+        element = by_id.get(obj.id)
+        if element is not None:
+            element.enter = _enter_of(obj)
 
     # object id -> primitive name, for the beat states below. An object whose
     # role is unknown is left out rather than guessed at: its states have already
@@ -3632,7 +5073,16 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
             for element in elements
             if isinstance(
                 element,
-                (EmitterElement, ZoneElement, TraceElement, VectorElement, VerdictElement),
+                (
+                    EmitterElement,
+                    ZoneElement,
+                    TraceElement,
+                    VectorElement,
+                    VerdictElement,
+                    BubbleElement,
+                    NoteElement,
+                    OrdinalElement,
+                ),
             )
             and element.anchor is not None
         },
@@ -3655,10 +5105,43 @@ def layout_scene(scene: StoryboardScene, *, stage: RenderStage | None = None) ->
             and element.anchor is not None
         },
         elements=elements,
-        steps=[_to_step(step, primitives) for step in scene.steps],
+        steps=_render_steps(scene.steps, primitives),
         controls=[_to_control(control) for control in scene.controls],
         params=dict(scene.params),
     )
+
+
+def _palette_for(storyboard: StoryboardIR) -> str:
+    """Which of the six a lesson is drawn in: what it asked for, or the wheel.
+
+    The model may **omit** `theme`, and that half is the interesting one. Asking
+    it to name a palette every time would get the same answer every time — a model
+    asked a question it has no basis for answers the middle of the range, which is
+    how every lesson came out `neon` back when there was no field to write and the
+    page's own default was the only thing there was. So the fallback is not a
+    default: it is a **function of the lesson**, and a stable one, so re-running a
+    document brings back the palette it brought back last time while a different
+    document does not.
+
+    `hashlib` rather than `hash()`. CPython salts string hashing with a
+    per-process random value, so `hash(lesson_id) % 6` is a different number in
+    every run: the same lesson would come out in a different palette each time and
+    two runs of one command would not produce the same file. "Same input, same
+    frames" is what every comparison in this module rests on — it is the reason
+    `RenderScene.preset` is kept at all.
+
+    Keyed on `lesson_id` rather than `storyboard_id`, because a storyboard id is
+    minted per run while the lesson it covers is the thing that stays the same.
+
+    A lesson with no opinion still lands on *some* palette rather than on an empty
+    string, so the player's own fallback chain only runs for files written before
+    this field existed.
+    """
+    if storyboard.theme in PALETTE_NAMES:
+        return storyboard.theme
+    key = storyboard.lesson_id or storyboard.storyboard_id
+    digest = hashlib.sha1(key.encode("utf-8")).digest()
+    return PALETTE_NAMES[int.from_bytes(digest[:4], "big") % len(PALETTE_NAMES)]
 
 
 def layout_storyboard(storyboard: StoryboardIR, *, stage: RenderStage | None = None) -> RenderSpec:
@@ -3673,6 +5156,7 @@ def layout_storyboard(storyboard: StoryboardIR, *, stage: RenderStage | None = N
         title=storyboard.title,
         subject=storyboard.subject,
         eyebrow=storyboard.eyebrow,
+        theme=_palette_for(storyboard),
         stage=stage,
         glyphs={name: _load_glyph(name) for name in used},
         scenes=scenes,
@@ -3686,9 +5170,12 @@ def _embedded_glyphs(scenes: list[RenderScene]) -> list[str]:
     the model made, a verdict's is derived from its `mark` — which is why the
     element carries the resolved name rather than making the player resolve it.
 
-    Collected from the *laid-out* scenes rather than from the storyboard, so what
-    is embedded is exactly what survived `_glyph_to_draw`: a glyph the model asked
-    for and layout dropped does not get shipped anyway.
+    Collected from the *laid-out* scenes rather than from the storyboard, so the
+    spec carries exactly the glyphs its elements draw and not one more. This used
+    to be phrased as "a glyph the model asked for and layout dropped does not get
+    shipped anyway" — true when `_glyph_to_draw` dropped unknown names silently,
+    and false now that it raises: there is no such thing as a dropped glyph any
+    more, only a name that failed loudly before anything was laid out.
     """
     used: set[str] = set()
     for scene in scenes:

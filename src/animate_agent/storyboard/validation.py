@@ -21,6 +21,7 @@ from animate_agent.rendering.layout import (
     TRANSITION_SECONDS,
     beat_duration,
     block_line_count,
+    scene_moves,
     tree_icon_marks,
 )
 from animate_agent.rendering.registry import (
@@ -29,16 +30,25 @@ from animate_agent.rendering.registry import (
     CODE_LANGUAGE_NAMES,
     CONSUMABLE_PROPS,
     EMPHASIS_NAMES,
+    ENTER_NAMES,
     KNOWN_OBJECT_PROPS,
     MARK_NAMES,
+    ORDINAL_MAX,
+    ORDINAL_MIN,
+    PALETTE_NAMES,
     PENDING_ALTERNATIVES,
     PENDING_ROLES,
+    PRESENCE_PROP,
     PRESET_BY_NAME,
     PRIMITIVE_BY_NAME,
+    RETIRED_ALTERNATIVES,
+    RETIRED_ROLES,
     ROLE_TO_PRIMITIVE,
+    SHAPE_NAMES,
     SPEED_PRESETS,
     T2_GLYPH_NAMES,
     TONE_NAMES,
+    TRANSIENT_LIVE_PROPS,
     TREE_FORM_NAMES,
     TREE_ICON_NAMES,
     TYPE_NAMES,
@@ -177,20 +187,59 @@ def validate_storyboard(
         _check_roles_and_props(
             scene, where, _acceptable_refs(scene, lesson, ref_ids), issues
         )
+        _check_gestures(scene, where, issues)
         _check_references(scene, where, issues)
         _check_required_relations(scene, where, issues)
         _check_required_props(scene, where, issues)
         _check_steps(scene, where, limits, issues)
+        # After `_check_steps`, because it reads the accumulated `visible`/
+        # `enabled` the beats produce and the order they produce it in — the
+        # same carry-forward the layout does, asked one layer up where there is
+        # still a model to tell.
         _check_blocks(scene, where, issues)
+        _check_presence(scene, where, issues)
+        _check_ordinals(scene, where, issues)
+        _check_density(scene, where, issues)
         _check_controls(scene, where, issues)
         _check_orphans(scene, where, issues)
+        _check_chain_links(scene, where, issues)
 
     if lesson is not None:
         _check_coverage(storyboard, lesson, covered_lesson_ids, issues)
+    _check_theme(storyboard, issues)
     _check_demo_presence(storyboard, limits, issues)
     _check_total_duration(storyboard, limits, issues)
 
     return issues
+
+
+def _check_theme(storyboard: StoryboardIR, issues: list[ValidationIssue]) -> None:
+    """A palette the page cannot show, which draws as the default instead.
+
+    The same defect as the four in `WORD_PROPS` and the quietest of them all, for
+    a reason worth naming: there is no picture that comes out *wrong*. An id
+    `themes.js` does not offer falls through `resolveTheme` to 霓虹 and the lesson
+    draws in it, looking exactly as deliberate as if the model had meant it. The
+    only way the writer learns otherwise is a person noticing and saying so.
+
+    Omitting the field is legal and is what the vocabulary recommends, so this
+    refuses nothing that was never written — `layout._palette_for` answers an
+    absent theme with the palette its lesson id hashes to, which is a real palette
+    and a different one for a different lesson.
+    """
+    declared = storyboard.theme
+    if declared == "" or declared in PALETTE_NAMES:
+        return
+    issues.append(
+        ValidationIssue(
+            "unknown_theme",
+            "theme",
+            f"`{declared}` 不是已注册的配色；合法值：{'、'.join(PALETTE_NAMES)}。"
+            "写错不会报错——整条片子会退回默认配色画出来，"
+            "而你会以为你要的那一套本来就是这个样子。"
+            "不确定就把 `theme` 整个省略，不写也有一套。",
+        )
+    )
 
 
 def _check_lesson_links(
@@ -534,6 +583,21 @@ WORD_PROPS: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
         "写错不会报错——整棵树退回缩进大纲，而那是最能装的一种，"
         "所以画出来照样像模像样：你不会知道自己要的形态一次都没出现过",
     ),
+    (
+        "enter",
+        ENTER_NAMES,
+        "unknown_enter",
+        "写错不会报错——播放器认不出就按默认的 rise 画，"
+        "而「从上方落下来」和「从下方浮上来」是同一个东西的两种相反说法，"
+        "看错了不会觉得画面有问题，只会觉得那一拍的进场有点怪",
+    ),
+    (
+        "shape",
+        SHAPE_NAMES,
+        "unknown_shape",
+        "写错不会报错——播放器认不出就退回角色本来的形状，"
+        "而一个「本该是球」的东西画成方框，看着像是这一幕本来就要方框",
+    ),
 )
 
 
@@ -729,6 +793,28 @@ def _check_roles_and_props(
                     f"但布局层还没有实现它——写了会让整份分镜在最后一步作废、"
                     f"一张图都出不来。改用 "
                     f"{PENDING_ALTERNATIVES.get(primitive, '别的图元')}",
+                )
+            )
+        elif obj.role in RETIRED_ROLES:
+            # The mirror of the branch above, and the difference is the whole of
+            # why there are two. This role draws — a storyboard written with it
+            # still comes out, and every one already on disk still does. What is
+            # false is the other half of the pending message: nothing dies at
+            # layout. So the model must not be told that. It is told what is
+            # actually true — the vocabulary no longer offers this, and here is
+            # what to write instead.
+            #
+            # Refused here rather than merely left out of the prompt because
+            # leaving it out is a hope. `ROLE_TO_PRIMITIVE` still resolves the
+            # name, so a model that produced it anyway would be drawn without
+            # complaint and the picture nobody wanted would come back.
+            issues.append(
+                ValidationIssue(
+                    "primitive_retired",
+                    f"{obj_where}.role",
+                    f"`{obj.role}`（属于图元 `{ROLE_TO_PRIMITIVE[obj.role]}`）"
+                    f"画得出来，但新分镜不要再用了——这种画法本身不要了。改用 "
+                    f"{RETIRED_ALTERNATIVES.get(obj.role, '别的角色')}",
                 )
             )
 
@@ -1021,6 +1107,64 @@ def _check_steps(
 #: be told about it.
 BLOCK_PRIMITIVES: frozenset[str] = frozenset({"tree", "code"})
 
+#: What each gesture costs when it is written on the object instead of in a beat.
+#:
+#: Both are the same shape of harm — the gesture stops being a moment and becomes
+#: a permanent condition — and the picture that produced this table is worth
+#: recording, because nothing else would have caught it. A scene explaining JSON's
+#: advantages and drawbacks declared its 优点 tree with `focus: "1-3"` *on the
+#: object*, then wrote `focus` in the first two beats as well. The band was on
+#: rows 1-3 for the whole scene, so the two beats about the drawbacks beside it
+#: played with the advantages still lit — a highlight that says 「看这里」 about
+#: something the narration has moved on from.
+#:
+#: Ten storyboards were on disk when this was written, including both hand-written
+#: samples and every demo, and every one of them writes both props in beats. The
+#: scene above was the only exception, which is what makes it a defect rather than
+#: a dialect.
+_GESTURE_COST: dict[str, str] = {
+    "focus": "没有写它的每一拍都会回落到这个值，那条底色带就一直亮在同样的几行上",
+    "emphasis": "没有写它的每一拍都会回落到这个值，那个动作每一拍开头重播一遍",
+}
+
+
+def _check_gestures(
+    scene: StoryboardScene,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """Refuse a gesture written on the object, which is a state by accident.
+
+    `TRANSIENT_LIVE_PROPS` names the two props that are **gestures rather than
+    states** — and the layout half of that rule has always worked:
+    `layout.carried_states` leaves them out of the carried state, so a beat that
+    writes one hands it to nobody. It is the *other* half that was missing.
+
+    A beat that writes nothing falls through to `player.js`'s `makeLookup`, and
+    tier 3 there is the element's own `props`, carried verbatim from the
+    storyboard. So on every beat after the gesture, the value comes back — and it
+    comes back looking deliberate, on a picture that is otherwise exactly right.
+    Nothing on screen says a value nobody meant this beat was resurrected.
+
+    Refused here, upstream, because this is the last layer with a model to tell;
+    `_props_for` refuses it again for a spec that never went past this function.
+    """
+    for obj_index, obj in enumerate(scene.objects):
+        for prop in sorted(TRANSIENT_LIVE_PROPS):
+            if prop not in obj.props:
+                continue
+            issues.append(
+                ValidationIssue(
+                    "gesture_prop_on_object",
+                    f"{where}.objects[{obj_index}].props.{prop}",
+                    f"`{obj.id}` 把 `{prop}` 写在了对象上，但 `{prop}` 不是这个对象的"
+                    f"状态，是**某一拍的动作**——写在这里，{_GESTURE_COST[prop]}。"
+                    f"删掉这里的 `{prop}`，改写到该发生的那一拍："
+                    f'`object_states: {{"{obj.id}": {{"{prop}": ...}}}}`',
+                )
+            )
+
+
 #: `"3"` or `"2-4"`. Parsed here rather than in `layout.py` because a `focus` the
 #: layout cannot read is a *silent* failure — the drawer highlights nothing — and
 #: a silent failure is what this module exists to convert into a retry.
@@ -1032,8 +1176,8 @@ def _focus_text(value: object) -> str | None:
 
     `{"focus": 3}` is accepted and read as `"3"`: the difference between it and
     `"3"` is one pair of quotes, and refusing it would spend a retry on
-    punctuation. `layout._focus_of` stringifies the same way, so the number the
-    check is made against is the number the drawer will see.
+    punctuation. `String(3)` in the drawer's `parseFocus` reads it the same way,
+    so the number this check is made against is the number the drawer will see.
     """
     if isinstance(value, bool):
         return None
@@ -1086,31 +1230,263 @@ def _check_blocks(
                 )
             )
 
-        # Named rather than looped over `scene.steps`, because the object's own
-        # `props` is the third place a `focus` can be written — and the one a
-        # hand-written sample uses.
-        written = [("props", obj.props.get("focus"))]
-        for step_index, step in enumerate(scene.steps):
-            state = step.object_states.get(obj.id)
-            if isinstance(state, dict):
-                written.append((f"steps[{step_index}]", state.get("focus")))
-
+        # Only the beats, which is a shorter list than it used to be. The object's
+        # own `props` was a third source here, on the grounds that it is 「the one
+        # a hand-written sample uses」 — and that was not true when it was written.
+        # Neither hand-written sample writes `focus` outside a beat, and no run has
+        # ever produced one that did. `_check_gestures` refuses it there now.
         if primitive_name == "tree":
             _check_icons(obj.id, text, obj_where, issues)
 
-        for source, value in written:
-            focus = _focus_text(value)
+        for step_index, step in enumerate(scene.steps):
+            state = step.object_states.get(obj.id)
+            if not isinstance(state, dict):
+                continue
+            focus = _focus_text(state.get("focus"))
             if focus is None:
                 continue
-            prop_where = (
-                f"{obj_where}.props.focus"
-                if source == "props"
-                else f"{where}.{source}.object_states.{obj.id}.focus"
+            issues.extend(
+                _focus_issues(
+                    obj.id,
+                    focus,
+                    rows,
+                    f"{where}.steps[{step_index}].object_states.{obj.id}.focus",
+                )
             )
-            issues.extend(_focus_issues(obj.id, focus, rows, prop_where))
 
     # `language` is left to `WORD_PROPS`, which is keyed on the prop name and
     # needs nothing from the text.
+
+
+#: The fewest objects a scene with nothing moving in it may hold.
+#:
+#: A two-object still scene is a frame with two things in it and nothing else,
+#: and it stays that way for six seconds. Measured on the value-types demo: two
+#: `object`s at their role size cover 1.4% of the stage, and `compare` enlarging
+#: them to 132x99 brings that to 6% — still a lot of air. The person watching the
+#: result said so before any test did ("实际生成动画要避免一幕只有两个图元的"),
+#: and the mechanism is **count, not size**: what fills a frame is another thing
+#: in it.
+#:
+#: **The exemption is motion, and it is a correction.** The first version scoped
+#: the rule to `generic` — "the other presets draw their own furniture" — which
+#: is a proxy, and it arrived by refutation rather than by reasoning: the floor
+#: was written for every preset first and the suite broke on a `lane` fixture in
+#: one run. But the reason it was reaching for is the one the same person gave
+#: one message later: 不会动的图元就不能太少，会动的就不影响. A `lane` corridor
+#: is not empty because a car is *driving down it*, not because the preset happens
+#: to draw a road. Stated as motion, the rule covers the cases the proxy was
+#: invented for (`lane` with a `speed`, `field` with its projectile) and also the
+#: one the proxy got wrong: a `generic` scene that moves was refused for no reason
+#: a viewer could see. It reads off `_travels`, so it is the player's own answer
+#: to "will this be carried across the frame", not a second opinion.
+#:
+#: Three rather than four because three is where the picture stops being a pair
+#: and starts being a diagram — two things and a verdict, a body with its trace
+#: and its readout, a node with an edge and a caption. Above three there is
+#: nothing to enforce; a scene with nine objects is not better than one with
+#: three.
+#:
+#: **A taste rule, enforced anyway**, which is worth saying out loud because the
+#: project's other note-plus-refusal pairs — a bubble on a moving anchor, an
+#: `ordinal` outside its range — are about correctness. A sparse frame is not
+#: *wrong*, it is dull, and dull is what this round is about. The cost is real
+#: and it is why the floor is three and not five: a model told to add an object
+#: will sometimes add a filler object, and a scene with a decorative `note` in
+#: it is worse than a sparse honest one.
+SCENE_OBJECTS_MIN = 3
+
+
+def _check_density(scene: StoryboardScene, where: str, issues: list[ValidationIssue]) -> None:
+    """A still scene with too little in it to be worth anyone's time.
+
+    Fed back rather than drawn, because the two halves of this defect live in
+    different layers: layout can fill a frame with nothing, but the thing that
+    would fill it is content, and content is the model's to write. By the time a
+    `RenderSpec` exists there is no layer left that can add a third object.
+
+    Motion exempts a scene — see `SCENE_OBJECTS_MIN` for why "what moves" and not
+    "which preset" is the question, and why the preset version was wrong in both
+    directions.
+
+    The advice names `speed` and `field`'s projectile rather than "make something
+    move", because those are the two the player actually animates. A model told
+    the looser version writes a `heading` change and gets the same complaint
+    back.
+    """
+    if scene_moves(scene) or len(scene.objects) >= SCENE_OBJECTS_MIN:
+        return
+    issues.append(
+        ValidationIssue(
+            "scene_too_sparse",
+            f"{where}.objects",
+            f"场景 `{scene.id}` 里没有一样东西会动，而对象只有 {len(scene.objects)} 个，"
+            f"至少要 {SCENE_OBJECTS_MIN} 个——画面不动的时候，画上的东西就是全部内容，"
+            "两三个对象的画面就是一块留白。加一样说得上话的东西："
+            "一个 `note` 把这一段的关键数字或结论写在画面上，一个 `bubble` 或 `verdict` "
+            "指着其中一个对象说一句；或者让某样东西真的动起来"
+            "（`lane` 里的车给一个正的 `speed`，`field` 里的抛体）",
+        )
+    )
+
+
+def _check_ordinals(
+    scene: StoryboardScene,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """The two gates a step number needs, neither of which the screen can show.
+
+    - **A number outside `ORDINAL_MIN`..`ORDINAL_MAX`.** `n: 12` draws two digits
+      in a disc cut for one, and `n: true` draws 「1」 — `bool` is an `int`
+      subclass in Python, the trap `layout._number`'s docstring already
+      documents. Neither reads as a mistake on screen: both produce an ordinary
+      dot holding the wrong number, and a wrong step number is worse than no
+      step number, because it is the one thing the dot is there to say.
+    - **Two dots claiming the same step.** Two objects both labelled ③ is a
+      contradiction the picture reports by drawing two identical badges, one of
+      which is lying. Nothing downstream can tell which, so it has to be refused
+      where the model can still fix it.
+
+    **Gaps are legal**, and the second rule is written so as not to catch them.
+    A scene showing only part of a procedure is an ordinary scene — ① and ③ with
+    no ② is honest — and a rule demanding ①②③ in order would force the model to
+    invent objects for steps it is not showing.
+    """
+    seen: dict[int, str] = {}
+    for obj_index, obj in enumerate(scene.objects):
+        if ROLE_TO_PRIMITIVE.get(obj.role) != "ordinal":
+            continue
+        value = obj.props.get("n")
+        if value is None:
+            continue  # `required_prop_missing` already reported it
+        obj_where = f"{where}.objects[{obj_index}]"
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            issues.append(
+                ValidationIssue(
+                    "ordinal_out_of_range",
+                    f"{obj_where}.props.n",
+                    f"`{obj.id}` 的 `n` 要写 {ORDINAL_MIN}~{ORDINAL_MAX} 的整数，"
+                    f"现在写的是 {value!r}（`true`/`false` 不算数字）",
+                )
+            )
+            continue
+        if not ORDINAL_MIN <= value <= ORDINAL_MAX:
+            issues.append(
+                ValidationIssue(
+                    "ordinal_out_of_range",
+                    f"{obj_where}.props.n",
+                    f"`{obj.id}` 的 `n` 写成了 {value}，"
+                    f"只能写 {ORDINAL_MIN}~{ORDINAL_MAX}——一个圆点里读得出的只有一位数",
+                )
+            )
+            continue
+        if value in seen:
+            issues.append(
+                ValidationIssue(
+                    "ordinal_duplicate",
+                    f"{obj_where}.props.n",
+                    f"`{obj.id}` 和 `{seen[value]}` 都写着第 {value} 步。"
+                    "同一幕里两个序号一样的圆点，观众看不出哪一个才是这一步",
+                )
+            )
+            continue
+        seen[value] = obj.id
+
+
+def _check_presence(
+    scene: StoryboardScene,
+    where: str,
+    issues: list[ValidationIssue],
+) -> None:
+    """The two ways 「讲到才出现」 fails without looking like it failed.
+
+    Both are about the same prop — whichever one the object's primitive answers
+    to (`PRESENCE_PROP`) — and both are invisible in the same way: the picture
+    is not wrong, it is simply *missing something*, and a thing that never
+    arrives is indistinguishable from a thing nobody wrote.
+
+    - **Declared hidden and never turned on.** `visible: false` in the object's
+      own `props` is an instruction to be off at the start; if no beat ever
+      flips it, that instruction is the whole story and the object spends the
+      scene not existing. The vocabulary's gloss says the second half out loud
+      (「再在讲它的那一拍改成 true」) precisely because it is easy to write the
+      first half and stop — and because the failure is silent this is the layer
+      that has to say it, not the prompt.
+    - **A beat pointing at something that has not arrived.** `highlights` is a
+      glow drawn around an element *by id*, and it does not check whether the
+      element is on screen: the glow is drawn, over nothing, and the beat's
+      whole content is that glow. This is the quieter half of a rule the
+      vocabulary already has — 「每个节拍必须有视觉变化」 — with the change
+      happening off-screen.
+
+    **The two are asked about different moments, and that is deliberate.** An
+    object is worth pointing at either because it is already on screen, or
+    because *this* beat is the one bringing it on — the vocabulary states that
+    case as ordinary (「同一拍 highlights 到它是正常的」), so pointing at something
+    this beat switches *on* is fine, and pointing at something this beat
+    switches *off* is fine too (it was there when the beat began). Only an
+    object that is off coming in **and** off going out trips it.
+    """
+    #: obj id -> the name of the prop it answers to. Absent for a primitive
+    #: with no presence prop at all, and for one whose role is unknown — the
+    #: latter already reported, and neither is this check's business.
+    presence: dict[str, str] = {}
+    hidden_at_start: set[str] = set()
+    for obj in scene.objects:
+        prop = PRESENCE_PROP.get(ROLE_TO_PRIMITIVE.get(obj.role) or "")
+        if prop is None:
+            continue
+        presence[obj.id] = prop
+        if obj.props.get(prop) is False:
+            hidden_at_start.add(obj.id)
+
+    ever_on = {obj.id for obj in scene.objects} - hidden_at_start
+    currently_off = set(hidden_at_start)
+
+    for step_index, step in enumerate(scene.steps):
+        off_before = set(currently_off)
+        for target, states in step.object_states.items():
+            prop = presence.get(target)
+            if prop is None or prop not in states:
+                continue
+            if states[prop] is True:
+                currently_off.discard(target)
+                ever_on.add(target)
+            elif states[prop] is False:
+                currently_off.add(target)
+
+        for ref_index, highlight in enumerate(step.highlights):
+            if highlight in currently_off and highlight in off_before:
+                issues.append(
+                    ValidationIssue(
+                        "highlight_before_visible",
+                        f"{where}.steps[{step_index}].highlights[{ref_index}]",
+                        f"`{highlight}` 在拍到这里的时候还没有出现在画面上——"
+                        "高亮是围着元素画的一圈光，它不检查那个元素在不在，"
+                        "于是这一拍画出来是一圈围着空气的光，"
+                        "而这一拍的全部内容就是这圈光。"
+                        f"要么把打开它的那一拍排在前面，要么在这一拍里"
+                        f"给 `{highlight}` 写上 `{presence.get(highlight)}: true`",
+                    )
+                )
+
+    for obj_index, obj in enumerate(scene.objects):
+        if obj.id in hidden_at_start and obj.id not in ever_on:
+            prop = presence[obj.id]
+            issues.append(
+                ValidationIssue(
+                    "object_never_visible",
+                    f"{where}.objects[{obj_index}].props.{prop}",
+                    f"`{obj.id}` 的 `{prop}` 写成了 false，但没有任何一拍把它改回 true，"
+                    "所以它整幕都不会出现在画面上——"
+                    "画面上少了一样东西，而少掉的东西是看不出来的。"
+                    f"要么删掉这个 `{prop}: false`（默认就是 true），"
+                    "要么在讲它的那一拍写 "
+                    f'`object_states: {{"{obj.id}": {{"{prop}": true}}}}`',
+                )
+            )
 
 
 def _check_icons(
@@ -1318,6 +1694,63 @@ def _check_controls(
                         f"滑杆的 `unit` 字段是给人看的，改它不影响画面",
                     )
                 )
+
+
+def _check_chain_links(scene: StoryboardScene, where: str, issues: list[ValidationIssue]) -> None:
+    """Every node in a `chain` has to be on the chain.
+
+    A row of `node`s with no `link` between them is drawn as a row of boxes —
+    the preset spaces them evenly and nothing reports that the whole point of
+    the preset is missing. Observed on a real run of a lesson about JSON: five
+    nodes across the stage (`API 请求与响应` / `前后端数据交换` /
+    `软件配置文件` / `日志记录` / `轻量级数据存储`) and **one** link, from the
+    first to the second. Zero validation issues, so the picture went out: the
+    narration walks the audience along a sequence of five things while the
+    picture shows one arrow and three lonely boxes. The question it earned was
+    the right one — 「这几个之间是什么关系」— and there was no answer on screen.
+
+    The `link` primitive's own checks do not reach this. `along` must name a
+    `link` and a `link` must name both its ends; neither says a node has to be
+    an end of *any* of them.
+
+    Scoped to `chain`, and to scenes with two or more nodes. A `link` is legal
+    in other presets where it means something looser — one edge of a diagram
+    that is not a sequence — and a single node has no chain to be off. Both
+    guards exist so this cannot quietly turn into "every diagram must be
+    connected", which is a stronger claim than the evidence supports.
+
+    Deliberately *not* "the links must form one path": a chain that forks or
+    rejoins is a picture someone may want, and refusing it would be this check
+    inventing a rule the vocabulary never made.
+    """
+    if scene.scene_type != "chain":
+        return
+    nodes = [obj for obj in scene.objects if obj.role == "node"]
+    if len(nodes) < 2:
+        return
+    linked: set[str] = set()
+    for obj in scene.objects:
+        if ROLE_TO_PRIMITIVE.get(obj.role) != "link":
+            continue
+        for end in ("from", "to"):
+            value = obj.props.get(end)
+            if isinstance(value, str):
+                linked.add(value)
+    for index, obj in enumerate(scene.objects):
+        if obj.role != "node" or obj.id in linked:
+            continue
+        issues.append(
+            ValidationIssue(
+                "node_off_the_chain",
+                f"{where}.objects[{index}]",
+                f"预设 `chain` 里，节点 `{obj.id}` 没有被任何 `link` 连到——"
+                "画面上它和别的节点并排站着，但线不接过去，观众看到的是一排并列的框，"
+                "不是一条链路。每一环都要有一条 `link`（5 个节点要 4 条），"
+                "`from`/`to` 写相邻那两个节点的 id。"
+                "如果这几样东西本来就是并列的、没有先后，那不适合用 `chain`，"
+                "换 `generic` 才对",
+            )
+        )
 
 
 def _check_orphans(scene: StoryboardScene, where: str, issues: list[ValidationIssue]) -> None:

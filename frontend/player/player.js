@@ -23,7 +23,7 @@ import {
   wrapCaption,
 } from "./caption.js";
 import { EASE_SECONDS, blend, easeOutCubic, handsOver } from "./easing.js";
-import { LIVE_PROPS, drawElement } from "./registry.js";
+import { LIVE_PROPS, PRESENCE_PROP, drawElement } from "./registry.js";
 import { createStage, readTheme } from "./stage.js";
 import { STORAGE_KEY, THEMES, resolveTheme } from "./themes.js";
 
@@ -43,31 +43,30 @@ const MAX_CATCHUP_STEPS = 5;
 const TRANSITION_SECONDS = 0.45;
 
 /**
- * Which prop decides whether an element is on screen at all.
+ * The backdrop: a field of dots behind everything, in place of a ruled grid.
  *
- * The drawers ask this same question — `drawBody` and `drawTrace` test
- * `visible`, `drawEmitter` and `drawZone` test `enabled` — so the two have to
- * name the same prop, or an element would fade against a gate that never
- * opened. `test_the_presence_table_names_the_props_the_drawers_test` holds them
- * together.
- */
-const PRESENCE_PROP = {
-  body: "visible",
-  emitter: "enabled",
-  zone: "enabled",
-  trace: "visible",
-};
-
-/**
- * How faint the background grid is, as a fraction of the palette's own
- * structural colour.
+ * The stage was covered in 40-unit graph paper — lines in `--line` at
+ * `GRID_ALPHA`, which had been a literal cyan `rgba(83, 246, 255, 0.07)` before
+ * it learned to ask the palette. Both are the 示意图 register: graph paper says
+ * *measurement*, and the reference this project is chasing is an illustration.
+ * The change is meant for the sparse scenes, where the half of the frame with
+ * nothing in it read as unfinished rather than as margin.
  *
- * The grid was a literal `rgba(83, 246, 255, 0.07)` — `neon`'s `--line` at 0.22
- * — so under a light palette the stage was covered in cyan graph paper. Read as
- * a fraction of `--line` instead, `0.32 × 0.22` is the same 0.07 it has always
- * been on the default theme, and the grid belongs to whatever palette is up.
+ * Same spacing and the same colour, dots instead of lines — the swap
+ * anything2explainer ships as their default backdrop (`common/DotFieldBg.tsx`),
+ * and their rule for it is one sentence: 背景只有幕底. Nothing else belongs back
+ * here. Their other result is the one worth writing down: **a backdrop does not
+ * make a small subject bigger**, so this changes how the empty parts read and is
+ * not a fix for a scene whose largest object is 48px tall.
+ *
+ * Static. There is no clock here that outlives a beat — `state.sim` is reset by
+ * every `setStep` — so a drifting field would jump at each beat, and "paused"
+ * has to mean the picture stops moving.
  */
-const GRID_ALPHA = 0.22;
+const BACKDROP_STEP = 40;
+const BACKDROP_ORIGIN = 20;
+const BACKDROP_RADIUS = 1.5;
+const BACKDROP_ALPHA = 0.30;
 
 const ui = {
   canvas: document.getElementById("stage"),
@@ -94,9 +93,11 @@ const state = {
   //: `{ toScene, toStep, phase, t }` while a scene change is on screen, else
   //: `null`. Phase is `"out"` (old scene fading) or `"in"` (new scene rising).
   transition: null,
-  //: `"<element>.<prop>"` -> what it read under the *previous* beat. Emptied
-  //: whenever a beat is loaded rather than handed over from one, so the first
-  //: beat of a scene eases from nothing and simply appears.
+  //: `"<element>.<prop>"` -> what it read *before this beat*. Refilled on every
+  //: beat change: from the previous beat when there is one (`captureDeparting`),
+  //: from "everything is absent" when a scene opens (`seedDeparting`), and left
+  //: empty when there is nothing to ease from at all — a beat reloaded, or any
+  //: change while paused, where a ramp would have nothing to drive it.
   departing: new Map(),
   sim: null,
   viewport: null,
@@ -183,6 +184,19 @@ function easeProgress() {
  * are the only ones that can differ between two beats. Read off `LIVE_PROPS`
  * rather than listed again here: it is the same table the validator and the
  * prompt are built from, and a second copy would be a second thing to drift.
+ *
+ * **This and `seedDeparting` are the two halves of one question.** This half is
+ * a beat handed over from another beat: it eases from whatever the last beat
+ * left on screen. The other half is a scene's *first* beat, which has no
+ * previous beat to read — `loadScene` calls `seedDeparting` for it, and that
+ * function carries the argument for why the gate is the only thing seeded.
+ *
+ * Until that landed, the first beat of every scene was a hard cut and the
+ * vocabulary was quietly wrong about it: 「想让它讲到才出现」 worked from beat 2
+ * onward, and a scene whose opening object was meant to arrive had to spend its
+ * first beat on something else. That was a requirement on the storyboard that
+ * no layer checked. It is recorded, with the reasoning that got it fixed, in
+ * `docs/storyboard-milestone.md`.
  */
 function captureDeparting() {
   const from = new Map();
@@ -218,6 +232,11 @@ function buildView() {
     live: state.sim.live,
     time: state.sim.t,
     theme: state.theme,
+    // Handed to the drawers so one of them can ask where the caption starts —
+    // `drawBody` holds a body's name out of it. It is read off the spec rather
+    // than passed down, because `render` and this run at different times and the
+    // only thing either wants the stage for is its size.
+    stage: state.spec.stage,
     lookup: state.lookup,
     elementById: state.byId,
     obstacleIds: state.obstacleIds,
@@ -238,31 +257,38 @@ function buildView() {
 
 /* ----------------------------------------------------------------- drawing */
 
+/**
+ * The dot field, drawn under everything else.
+ *
+ * `fillRect` per dot rather than `arc`: four hundred arcs a frame is four
+ * hundred path constructions, and at a radius of 1.5 the square and the circle
+ * land on the same pixels. Read the constants above for why there is a field
+ * here at all, and why it does not move.
+ */
+function drawBackdrop(ctx, theme, width, height) {
+  const size = BACKDROP_RADIUS * 2;
+  ctx.save();
+  ctx.fillStyle = theme.line;
+  ctx.globalAlpha *= BACKDROP_ALPHA;
+  for (let y = BACKDROP_ORIGIN; y < height; y += BACKDROP_STEP) {
+    for (let x = BACKDROP_ORIGIN; x < width; x += BACKDROP_STEP) {
+      ctx.fillRect(x - BACKDROP_RADIUS, y - BACKDROP_RADIUS, size, size);
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * The lane line: the one piece of chrome that is *semantic* rather than texture.
+ *
+ * It used to share this function with the graph-paper grid, in two `save`/
+ * `restore` pairs because the grid ran at a fraction of the palette's opacity and
+ * the line does not. The grid is gone — see `BACKDROP_STEP` — so what is left is
+ * the road under a `lane` scene's car, drawn exactly as it always was.
+ */
 function drawChrome(ctx, scene, theme, width, height) {
   const lane = scene.elements.find((element) => element.role === "vehicle");
   const laneY = lane ? lane.y : height / 2;
-
-  // Two `save`/`restore` pairs rather than one, because the grid runs at a
-  // fraction of the palette's opacity and the lane line does not. Sharing one
-  // block would mean handing the lane line the grid's alpha and drawing it a
-  // fifth as strongly as it has always been drawn.
-  ctx.save();
-  ctx.strokeStyle = theme.line;
-  ctx.globalAlpha *= GRID_ALPHA;
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= width; x += 40) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-    ctx.stroke();
-  }
-  for (let y = 0; y <= height; y += 40) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
-  }
-  ctx.restore();
 
   ctx.save();
   ctx.setLineDash([10, 14]);
@@ -339,6 +365,9 @@ function render() {
   const stage = state.spec.stage;
   const ctx = state.viewport.ctx;
   state.viewport.clear();
+  // The backdrop goes under everything, the lane line over it: the line is a
+  // road a car is on, and a car is not behind a texture.
+  drawBackdrop(ctx, state.theme, stage.width, stage.height);
   drawChrome(ctx, state.scene, state.theme, stage.width, stage.height);
 
   const view = buildView();
@@ -780,6 +809,56 @@ function loadScene(index) {
   state.departing = new Map();
   renderControls();
   setStep(0);
+  // And then the first beat is given something to ease from, which is what
+  // makes a scene *open* rather than switch on. Set after `setStep` rather than
+  // passed into it because `setStep`'s own decision — hand over, or land — is
+  // about a beat boundary and has no business knowing about scene openings; the
+  // assignment here is the one line that says "this was not a beat boundary".
+  //
+  // **Skipped while paused, and that guard is not decoration.** Nothing
+  // advances `sim.t` when the clock is stopped, so `easeProgress()` stays at 0,
+  // `blend` keeps returning the seeded `false`, presence stays at 0 and
+  // `drawElement` returns early for every element: the stage would be blank,
+  // for ever, and the only way out would be to press play on a picture that
+  // gave no sign there was one. `loadScene` is not reachable while paused today
+  // — it is called from `stepOnce` behind `if (state.playing)`, and once at
+  // startup before the first tick — but that is a coincidence of the current
+  // call graph, and the guard is what makes it a fact.
+  if (state.playing) state.departing = seedDeparting();
+}
+
+/**
+ * Every element starts out absent, so a scene's first beat arrives rather than
+ * appearing.
+ *
+ * This is the closing of `captureDeparting`'s known gap, which was real and
+ * visible: a beat handed over from another beat eases from what it read then,
+ * and a scene's first beat had nothing to ease from at all — `loadScene`
+ * emptied the map and called `setStep(0)`, so whatever the first beat turned on
+ * was simply *there*, and whatever it turned off was simply missing. A scene
+ * opening is the one moment the audience is not expecting continuity, which
+ * made it the worst place in the film for the only hard cut.
+ *
+ * **The value is the boolean `false`, not `0`.** `blend` ramps a presence gate
+ * only when *both* ends are booleans; handed a `0` it falls through to
+ * `return target` and this whole function becomes a no-op that looks
+ * implemented — the failure mode where the arithmetic is right and nothing
+ * moves.
+ *
+ * **Presence props only.** There is no "previous" to seed a number from — what
+ * did `heading` read before the scene began? — and inventing one is exactly
+ * what `captureDeparting` refuses. Seeding only the gates also keeps the
+ * opening from animating every value it declares, which would be a second
+ * gesture stacked on the scene change's own fade.
+ */
+function seedDeparting() {
+  const from = new Map();
+  for (const element of state.scene.elements) {
+    const prop = PRESENCE_PROP[element.kind];
+    if (prop === undefined) continue;
+    from.set(`${element.id}.${prop}`, false);
+  }
+  return from;
 }
 
 async function main() {
@@ -806,10 +885,22 @@ async function main() {
   // attached in here, and a palette that arrived after the first draw would be
   // one painted frame in the wrong colours.
   //
-  // A `?theme=` outranks the stored choice: a link someone was handed is a
-  // statement about the picture they were handed, and the whole point of
-  // putting the palette in the URL is that opening it shows what it says.
-  applyTheme(resolveTheme(params.get("theme") ?? storedTheme()));
+  // Which palette the page opens in, most specific first: a `?theme=` in the
+  // link, then the one the lesson was *generated* with, then whatever the viewer
+  // picked last time, then the default.
+  //
+  // `?theme=` first because a link someone was handed is a statement about the
+  // picture they were handed, and the whole point of putting the palette in the
+  // URL is that opening it shows what it says. The spec's palette comes second
+  // and *ahead of the stored choice* deliberately: variety between lessons is the
+  // entire reason the field exists, and a stored preference that outranked it
+  // would mean anyone who had ever clicked a swatch never saw another palette
+  // again. A click still wins for the rest of the page — `chooseTheme` writes the
+  // URL, and the URL is first.
+  //
+  // `||` and not `??`, on all three. An empty `?theme=` and a spec written before
+  // this field existed both say `""`, and neither is a choice.
+  applyTheme(resolveTheme(params.get("theme") || spec.theme || storedTheme()));
   state.viewport = createStage(ui.canvas, spec.stage);
   state.viewport.resize();
 
@@ -829,7 +920,15 @@ async function main() {
   const stepIndex = Number(params.get("step") ?? 0);
   loadScene(Number.isInteger(sceneIndex) ? Math.max(0, Math.min(spec.scenes.length - 1, sceneIndex)) : 0);
   bind();
-  if (Number.isInteger(stepIndex) && stepIndex > 0) setStep(stepIndex);
+  if (Number.isInteger(stepIndex) && stepIndex > 0) {
+    // An explicit `?step=` means "show me this frame", so the scene's arrival is
+    // dropped rather than played: otherwise the frame the link names is a
+    // half-arrived one, which is the opposite of what a link to one frame is
+    // for. The URL's own comment above says its purpose is acceptance — a
+    // screenshot of a stage that is still fading in is a screenshot of nothing.
+    state.departing = new Map();
+    setStep(stepIndex);
+  }
   requestAnimationFrame(tick);
 }
 
