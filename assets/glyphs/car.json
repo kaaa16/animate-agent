@@ -1,0 +1,37 @@
+{
+  "domain": "robotics",
+  "ink_box": [
+    2.0,
+    5.0,
+    20.0,
+    15.0
+  ],
+  "name": "car",
+  "parts": {
+    "body": {
+      "d": "M5 17h-2v-6l2 -5h9l4 5h1a2 2 0 0 1 2 2v4h-2m-4 0h-6m-6 -6h15m-6 0v-5",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    },
+    "wheelFront": {
+      "d": "M15 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    },
+    "wheelRear": {
+      "d": "M5 17a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:car@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

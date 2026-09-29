@@ -16,7 +16,70 @@ animation:
     - three_3d
 
 agent:
-  max_storyboard_steps: 7
+  # 单个 storyboard 场景里的教学节拍（step）数量上限，与下面的下限一起读。
+  # 注意：这是「一幕里的节拍数」，不是「文档里的幕数」——幕数由 LessonIR 的覆盖关系决定。
+  # 一拍约 17 个字（见 rendering/layout.py 的 SPEECH_CHARS_PER_SECOND），
+  # 一幕四拍刚好是一屏读得完的长度，所以上限是 5 而不是 7。
+  max_storyboard_steps: 5
   require_visual_objects: true
   require_interactive_demo: true
+
+storyboard:
+  # 单个场景的节拍数下限。上限沿用上面的 agent.max_storyboard_steps。
+  min_storyboard_steps: 3
+  # 成片时长目标，以及允许上下浮动的比例。这是整条链路里唯一的「成片」指标——
+  # 其余阈值都是局部规则，全部满足仍然可能拍出三分半。
+  # 90 秒 ± 35%，也就是大约一到两分钟。总时长 = 各拍时长之和 + 换幕淡入淡出，
+  # 超过 121.5 秒会被打回重写。
+  # 长度预算就是从这个数推出来的：90 × 6 = 540 字；幕数再由预算推（约 70 字一幕）。
+  # 只有上限没有下限：这份校验也要能查手写片段和两幕的测试样例，
+  # 加下限会把它们统统判成不合格（见 validation._check_total_duration）。
+  # 下限在知识层，那才是写字的地方——分镜层只能把课压缩，不能把它拉长。
+  target_seconds: 90
+  target_band: 0.35
+  # 比 knowledge 的 0.4 低：这一层是 schema 密集型，创作部分上游已经做完。
+  temperature: 0.3
+  max_retries: 3
+
+llm:
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-pro
+
+knowledge:
+  # 场景数上限（硬校验，超出会打回重试）。幕数现在是**算出来**的——约 70 字一幕，
+  # 所以 90 秒的片子要 8 幕；这里留一点余量，给长稿子用。
+  # 它也是稿子模式下唯一压着片长的东西：12 幕 × 最长的一幕 narration 约 4 分钟。
+  max_scenes: 12
+  max_retries: 3
+  temperature: 0.4
+  # 要求原文每个 section / block 都至少被一个场景引用到，防止漏内容。
+  # 若接入的文档带大量导航/页脚等噪声导致频繁重试，可改成 false。
+  require_full_coverage: true
+  # 生成后再调一次模型，核对「原文有没有被漏讲、课程有没有编原文没有的东西」。
+  # 每次生成多一次 LLM 调用，默认关闭；打开前建议先用真实模型验证误报率。
+  verify_fidelity: false
+  # 稿子模式：输入是「为了做这条片子写的稿子」，不是随手拿到的文档。
+  # 打开后知识层不改写、不压缩，照稿子的原话和顺序走，片长跟着稿子。
+  # 关着（默认）走文档那条：可以自由重组和压缩，把长文档收进目标时长。
+  # 两条路都受上面 storyboard.target_seconds 那一到两分钟管——这个开关决定的是
+  # 「谁决定说了什么」，不是「说多少」。
+  script_mode: false
+
+speech:
+  # 配音。默认关：上传页不提「配音」的时候就不配，拖一份 PDF 进去得到的画面
+  # 和昨天一样。要开：命令行 `--speak`，或者在页面/接口上勾。
+  # 打开需要先装依赖：pip install -e ".[speech]"（edge-tts，要联网）。
+  enabled: false
+  # 默认音色。可选值见 src/animate_agent/speech/voices.py：
+  #   zh-CN-YunjianNeural  云健 · 男声播报
+  #   zh-CN-XiaoyiNeural   晓伊 · 女声活泼
+  # 两个音色可以同时生成（多花一倍合成时间，一片 36 拍约多 30 秒），
+  # 播放器上就能来回切；只生成一个的话页面上就没有切换器。
+  default_voice: zh-CN-YunjianNeural
+  # 语速。+8% 不是偏好——pipeline 里的 SPEECH_CHARS_PER_SECOND = 6.0
+  # 就是云健在这个语速下测出来的；改成 +0% 的话，所有时长会比管线假设的长约 9%。
+  rate: "+8%"
+  # 同时合成多少段。这一步的瓶颈是往返时延不是 CPU：串行一段 6.9 秒，
+  # 并发 8 降到 0.89 秒。调高还会更快，但没必要对别人的服务器开太多连接。
+  concurrency: 8
 

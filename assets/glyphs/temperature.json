@@ -1,0 +1,25 @@
+{
+  "domain": "robotics",
+  "ink_box": [
+    7.008564307045585,
+    2.0,
+    9.98287138590883,
+    19.964101615137753
+  ],
+  "name": "temperature",
+  "parts": {
+    "outline": {
+      "d": "M10 13.5a4 4 0 1 0 4 0v-8.5a2 2 0 0 0 -4 0v8.5 M10 9l4 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:temperature@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

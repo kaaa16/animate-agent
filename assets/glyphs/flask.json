@@ -1,0 +1,25 @@
+{
+  "domain": "science",
+  "ink_box": [
+    4.926829351454686,
+    2.0,
+    14.146341297090629,
+    20.0
+  ],
+  "name": "flask",
+  "parts": {
+    "outline": {
+      "d": "M9 3l6 0 M10 9l4 0 M10 3v6l-4 11a.7 .7 0 0 0 .5 1h11a.7 .7 0 0 0 .5 -1l-4 -11v-6",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:flask@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

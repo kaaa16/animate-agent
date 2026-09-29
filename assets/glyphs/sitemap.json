@@ -1,0 +1,25 @@
+{
+  "domain": "cloud",
+  "ink_box": [
+    2.0,
+    2.0,
+    20.0,
+    20.0
+  ],
+  "name": "sitemap",
+  "parts": {
+    "outline": {
+      "d": "M3 17a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v2a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2l0 -2 M15 17a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v2a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2l0 -2 M9 5a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v2a2 2 0 0 1 -2 2h-2a2 2 0 0 1 -2 -2l0 -2 M6 15v-1a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v1 M12 9l0 3",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:sitemap@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

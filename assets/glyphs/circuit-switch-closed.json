@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    1.0,
+    9.0,
+    22.0,
+    6.0
+  ],
+  "name": "circuit-switch-closed",
+  "parts": {
+    "outline": {
+      "d": "M2 12h2 M20 12h2 M4 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0 M16 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0 M8 12h8",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:circuit-switch-closed@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

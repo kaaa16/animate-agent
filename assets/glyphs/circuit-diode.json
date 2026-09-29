@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    1.0,
+    6.0,
+    22.0,
+    12.0
+  ],
+  "name": "circuit-diode",
+  "parts": {
+    "outline": {
+      "d": "M22 12h-6 M2 12h6 M8 7l8 5l-8 5l0 -10 M16 7v10",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:circuit-diode@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

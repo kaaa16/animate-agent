@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    1.0,
+    9.0,
+    22.0,
+    6.0
+  ],
+  "name": "circuit-inductor",
+  "parts": {
+    "outline": {
+      "d": "M2 14h3v-2a2 2 0 1 1 4 0v2v-1.5a2.5 2.5 0 1 1 5 0v1.5v-1.5a2.5 2.5 0 1 1 5 0v1.5h3",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:circuit-inductor@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

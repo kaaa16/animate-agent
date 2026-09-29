@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    5.0,
+    5.0,
+    14.0,
+    14.0
+  ],
+  "name": "x",
+  "parts": {
+    "outline": {
+      "d": "M18 6l-12 12 M6 6l12 12",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:x@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

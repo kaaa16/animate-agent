@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    2.0,
+    3.0,
+    20.0,
+    18.0
+  ],
+  "name": "activity",
+  "parts": {
+    "outline": {
+      "d": "M3 12h4l3 8l4 -16l3 8h4",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:activity@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

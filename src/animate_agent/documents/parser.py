@@ -89,60 +89,73 @@ def _top_level_content(root: BeautifulSoup | Tag) -> Iterable[Tag]:
         yield element
 
 
-def _block_from_element(element: Tag, block_id: str, base_url: str) -> DocumentBlock | None:
+def _blocks_from_element(element: Tag, block_id: str, base_url: str) -> list[DocumentBlock]:
+    """Return the blocks for one element.
+
+    Usually one, but a list yields one block per item so that source_refs can
+    name a single step instead of the whole list. `block_id` is the id of the
+    first block; later blocks take consecutive numbers so the caller's
+    len(blocks)+1 numbering stays correct.
+    """
     source_ref = f"#{element['id']}" if element.get("id") else None
     if element.name == "p":
         text = _clean_text(element.get_text(" ", strip=True))
-        if text:
-            return DocumentBlock(
-                id=block_id,
-                type="paragraph",
-                text=text,
-                source_ref=source_ref,
-            )
-        return None
+        if not text:
+            return []
+        return [DocumentBlock(id=block_id, type="paragraph", text=text, source_ref=source_ref)]
     if element.name == "pre":
         code = element.find("code")
         text = (code or element).get_text("\n", strip=True)
+        if not text:
+            return []
         raw_classes = (code or element).get("class")
         classes = raw_classes if isinstance(raw_classes, list) else []
         language = next(
             (item.split("language-", 1)[1] for item in classes if item.startswith("language-")),
             None,
         )
-        return DocumentBlock(
-            id=block_id,
-            type="code",
-            text=text,
-            language=language,
-            source_ref=source_ref,
-        ) if text else None
+        return [
+            DocumentBlock(
+                id=block_id,
+                type="code",
+                text=text,
+                language=language,
+                source_ref=source_ref,
+            )
+        ]
     if element.name in {"ul", "ol"}:
         items = [
             _clean_text(item.get_text(" ", strip=True))
             for item in element.find_all("li", recursive=False)
         ]
         items = [item for item in items if item]
-        if items:
-            return DocumentBlock(
-                id=block_id,
+        if not items:
+            return []
+        prefix, _, number = block_id.rpartition("-block-")
+        first = int(number)
+        return [
+            DocumentBlock(
+                id=f"{prefix}-block-{first + offset}",
                 type="list",
-                text="\n".join(items),
+                text=item,
                 source_ref=source_ref,
             )
-        return None
+            for offset, item in enumerate(items)
+        ]
     if element.name == "img":
         src = element.get("src")
         if not isinstance(src, str) or not src:
-            return None
+            return []
         alt = element.get("alt")
-        return DocumentBlock(
-            id=block_id,
-            type="image",
-            text=_clean_text(alt if isinstance(alt, str) else ""),
-            source_ref=urljoin(base_url, src),
-        )
-    return None
+        return [
+            DocumentBlock(
+                id=block_id,
+                type="image",
+                text=_clean_text(alt if isinstance(alt, str) else ""),
+                source_ref=urljoin(base_url, src),
+            )
+        ]
+    return []
 
 
 def parse_html(html: str, source_url: str) -> DocumentIR:
@@ -178,9 +191,7 @@ def parse_html(html: str, source_url: str) -> DocumentIR:
             current = Section(id="section-overview", title=title, level=1)
             sections.append(current)
         block_id = f"{current.id}-block-{len(current.blocks) + 1}"
-        block = _block_from_element(element, block_id, source_url)
-        if block is not None:
-            current.blocks.append(block)
+        current.blocks.extend(_blocks_from_element(element, block_id, source_url))
 
     return DocumentIR(
         document_id=document_id,

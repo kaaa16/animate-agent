@@ -1,0 +1,1139 @@
+/**
+ * Player: fetch a `RenderSpec`, simulate it, draw it, bind the controls.
+ *
+ * Everything here consumes the spec as data. There is no `eval`, no
+ * `new Function`, and spec text only ever reaches `textContent` or `fillText`
+ * (decision D4 — a model-authored string is data, never code).
+ *
+ * The simulation runs on a **fixed timestep** with an accumulator. The baseline
+ * demo advances a clock by a constant per rendered frame
+ * (`frontend/demo/app.js:299`: `state.t += 0.016 * speed`), which makes playback
+ * speed depend on the display's refresh rate, and reads `Date.now()` in two
+ * places besides. "Same spec, same frames" is the property the whole pipeline is
+ * built to keep, and a wall clock is what destroys it.
+ */
+
+import { createVoiceTrack } from "./audio.js";
+import { createSimulation } from "./behaviors.js";
+import {
+  CAPTION_FONT_SIZE,
+  CAPTION_LINE_HEIGHT,
+  CAPTION_PAD_X,
+  captionBand,
+  captionTop,
+  wrapCaption,
+} from "./caption.js";
+import { EASE_SECONDS, blend, easeOutCubic, handsOver } from "./easing.js";
+import { LIVE_PROPS, PRESENCE_PROP, drawElement } from "./registry.js";
+import { createStage, readTheme } from "./stage.js";
+import { STORAGE_KEY, THEMES, resolveTheme } from "./themes.js";
+import {
+  STORAGE_KEY as VOICE_STORAGE_KEY,
+  beatSeconds,
+  clipUrl,
+  resolveVoice,
+  voiceIdsIn,
+  voiceLabel,
+} from "./voice.js";
+
+const FIXED_STEP = 1 / 60;
+/** Beyond this, drop the backlog rather than replaying a long stall frame by frame. */
+const MAX_CATCHUP_STEPS = 5;
+/**
+ * Each half of a scene change: fade to the background, swap, fade back in.
+ *
+ * A *dip*, not a cross-fade. A cross-fade needs both scenes on screen at once,
+ * which means a second canvas or an offscreen buffer, and it reads as a
+ * dissolve — two pictures briefly superimposed. A dip goes through a moment of
+ * empty stage instead, which is honest about what happened (the old picture is
+ * gone, a new one is starting) and needs nothing but one `fillRect` over what
+ * was already drawn.
+ */
+const TRANSITION_SECONDS = 0.45;
+
+/**
+ * The backdrop: a field of dots behind everything, in place of a ruled grid.
+ *
+ * The stage was covered in 40-unit graph paper — lines in `--line` at
+ * `GRID_ALPHA`, which had been a literal cyan `rgba(83, 246, 255, 0.07)` before
+ * it learned to ask the palette. Both are the 示意图 register: graph paper says
+ * *measurement*, and the reference this project is chasing is an illustration.
+ * The change is meant for the sparse scenes, where the half of the frame with
+ * nothing in it read as unfinished rather than as margin.
+ *
+ * Same spacing and the same colour, dots instead of lines — the swap
+ * anything2explainer ships as their default backdrop (`common/DotFieldBg.tsx`),
+ * and their rule for it is one sentence: 背景只有幕底. Nothing else belongs back
+ * here. Their other result is the one worth writing down: **a backdrop does not
+ * make a small subject bigger**, so this changes how the empty parts read and is
+ * not a fix for a scene whose largest object is 48px tall.
+ *
+ * Static. There is no clock here that outlives a beat — `state.sim` is reset by
+ * every `setStep` — so a drifting field would jump at each beat, and "paused"
+ * has to mean the picture stops moving.
+ */
+const BACKDROP_STEP = 40;
+const BACKDROP_ORIGIN = 20;
+const BACKDROP_RADIUS = 1.5;
+const BACKDROP_ALPHA = 0.30;
+
+const ui = {
+  canvas: document.getElementById("stage"),
+  title: document.getElementById("title"),
+  eyebrow: document.getElementById("eyebrow"),
+  sceneCount: document.getElementById("scene-count"),
+  goal: document.getElementById("goal"),
+  steps: document.getElementById("steps"),
+  controls: document.getElementById("controls"),
+  themes: document.getElementById("themes"),
+  voicePicker: document.getElementById("voice-picker"),
+  voices: document.getElementById("voices"),
+  voiceHint: document.getElementById("voice-hint"),
+  play: document.getElementById("play"),
+  reset: document.getElementById("reset"),
+  prev: document.getElementById("prev"),
+  next: document.getElementById("next"),
+  error: document.getElementById("error"),
+};
+
+const state = {
+  spec: null,
+  scene: null,
+  //: Which scene is loaded. `advanceBeat` needs it to know whether the beat it
+  //: just finished was the last beat of a scene or of the whole storyboard.
+  sceneIndex: 0,
+  //: `{ toScene, toStep, phase, t }` while a scene change is on screen, else
+  //: `null`. Phase is `"out"` (old scene fading) or `"in"` (new scene rising).
+  transition: null,
+  //: `"<element>.<prop>"` -> what it read *before this beat*. Refilled on every
+  //: beat change: from the previous beat when there is one (`captureDeparting`),
+  //: from "everything is absent" when a scene opens (`seedDeparting`), and left
+  //: empty when there is nothing to ease from at all — a beat reloaded, or any
+  //: change while paused, where a ramp would have nothing to drive it.
+  departing: new Map(),
+  sim: null,
+  viewport: null,
+  theme: null,
+  byId: new Map(),
+  obstacleIds: [],
+  obstacleRadius: new Map(),
+  overrides: {},
+  lookup: null,
+  stepIndex: 0,
+  playing: true,
+  accumulator: 0,
+  last: 0,
+  stopped: null,
+  //: The voice tracks this spec carries, in picker order — `[]` for a spec with
+  //: no speech, which is every spec written before there was any.
+  voiceIds: [],
+  //: Which of them is playing, or `null` when there is nothing to play.
+  voice: null,
+  //: Where the spec was fetched from. A beat's `speech[voice].src` is relative
+  //: *to the spec*, so this is the base every clip URL is built from.
+  specUrl: "",
+  track: null,
+};
+
+/* ------------------------------------------------------------------ lookup */
+
+/**
+ * Resolve a property, most specific source first.
+ *
+ * 1. a control the user moved — user intent outranks everything
+ * 2. the current step's `object_states` — this is what makes a step a beat
+ * 3. the element's own `props`, carried verbatim from the StoryboardIR
+ * 4. the scene's `params`, reached by `scene.<prop>` controls
+ *
+ * `safe_distance` is the case that exercises tier 4: the baseline exposes it as
+ * a scene-level slider, not as a property of the circle drawn for it.
+ */
+function makeLookup(scene) {
+  const raw = (elementId, prop, fallback) => {
+    const key = `${elementId}.${prop}`;
+    if (key in state.overrides) return state.overrides[key];
+
+    const step = scene.steps[state.stepIndex];
+    const fromStep = step?.states?.[elementId];
+    if (fromStep && prop in fromStep) return fromStep[prop];
+
+    const element = state.byId.get(elementId);
+    // A binding names the control that drives this property, and it outranks
+    // the element's own props — a static prop is exactly what a binding exists
+    // to override. Without this tier the safe-distance circle kept the radius
+    // layout baked in while the slider moved the danger threshold, so the
+    // picture changed but the circle named 安全距离 did not: the label and the
+    // thing disagreed, and only a person would notice.
+    const bound = element?.binds?.[prop];
+    if (bound && bound in state.overrides) return state.overrides[bound];
+
+    if (element?.props && prop in element.props) return element.props[prop];
+
+    const sceneKey = `scene.${prop}`;
+    if (sceneKey in state.overrides) return state.overrides[sceneKey];
+    if (prop in (scene.params ?? {})) return scene.params[prop];
+
+    return fallback;
+  };
+
+  // The whole of the easing: everything above still decides *what* a property
+  // is worth this beat, and this decides only how it gets there. Answering from
+  // `raw` and blending is what keeps the two questions apart — a beat that sets
+  // nothing leaves `from` undefined and is returned untouched, so a property a
+  // control is driving never passes through here at all.
+  return (elementId, prop, fallback) => {
+    const target = raw(elementId, prop, fallback);
+    const from = state.departing.get(`${elementId}.${prop}`);
+    if (from === undefined) return target;
+    const progress = easeProgress();
+    if (progress >= 1) return target;
+    return blend(prop, from, target, progress);
+  };
+}
+
+/** How far into the ease a beat is, shaped. `easing.js` owns the arithmetic. */
+function easeProgress() {
+  return easeOutCubic(Math.min(1, state.sim.t / EASE_SECONDS));
+}
+
+/**
+ * What every live property reads as right now, taken *before* the beat moves —
+ * `state.lookup` resolves against `state.stepIndex`, so the moment it changes
+ * the old values are unrecoverable.
+ *
+ * Only the properties a beat is allowed to change are captured, because those
+ * are the only ones that can differ between two beats. Read off `LIVE_PROPS`
+ * rather than listed again here: it is the same table the validator and the
+ * prompt are built from, and a second copy would be a second thing to drift.
+ *
+ * **This and `seedDeparting` are the two halves of one question.** This half is
+ * a beat handed over from another beat: it eases from whatever the last beat
+ * left on screen. The other half is a scene's *first* beat, which has no
+ * previous beat to read — `loadScene` calls `seedDeparting` for it, and that
+ * function carries the argument for why the gate is the only thing seeded.
+ *
+ * Until that landed, the first beat of every scene was a hard cut and the
+ * vocabulary was quietly wrong about it: 「想让它讲到才出现」 worked from beat 2
+ * onward, and a scene whose opening object was meant to arrive had to spend its
+ * first beat on something else. That was a requirement on the storyboard that
+ * no layer checked. It is recorded, with the reasoning that got it fixed, in
+ * `docs/storyboard-milestone.md`.
+ */
+function captureDeparting() {
+  const from = new Map();
+  for (const element of state.scene.elements) {
+    for (const prop of LIVE_PROPS[element.kind] ?? []) {
+      from.set(`${element.id}.${prop}`, state.lookup(element.id, prop, undefined));
+    }
+  }
+  return from;
+}
+
+/**
+ * How strongly an element should be drawn, 0 to 1.
+ *
+ * Asked of the lookup rather than of `state.departing` directly, so that the
+ * number here and the value the drawer's own gate reads are the same number —
+ * one eased to a fraction while it is on its way in, and exactly `false` (or
+ * exactly `true`) once it has landed.
+ */
+function presence(elementId) {
+  const prop = PRESENCE_PROP[state.byId.get(elementId)?.kind];
+  if (prop === undefined) return 1;
+  const value = state.lookup(elementId, prop, true);
+  if (typeof value === "number") return Math.max(0, Math.min(1, value));
+  return value === false ? 0 : 1;
+}
+
+/* -------------------------------------------------------------------- view */
+
+function buildView() {
+  const step = state.scene.steps[state.stepIndex];
+  return {
+    live: state.sim.live,
+    time: state.sim.t,
+    theme: state.theme,
+    // Handed to the drawers so one of them can ask where the caption starts —
+    // `drawBody` holds a body's name out of it. It is read off the spec rather
+    // than passed down, because `render` and this run at different times and the
+    // only thing either wants the stage for is its size.
+    stage: state.spec.stage,
+    lookup: state.lookup,
+    elementById: state.byId,
+    obstacleIds: state.obstacleIds,
+    obstacleRadius: state.obstacleRadius,
+    // Glyph geometry travels in the spec (`RenderSpec.glyphs`), so the player
+    // resolves a `body.glyph` name against data it already holds rather than a
+    // file it would have to go and find.
+    glyphs: state.spec.glyphs ?? {},
+    highlighted: new Set(step?.highlights ?? []),
+    isDangerous: (id) => state.sim.isDangerous(id),
+    // Handed to `drawElement` rather than to the drawers: it is the one place
+    // every element is drawn through, so the alpha is applied once instead of
+    // in each drawer — five chances to forget it, and no way to tell from the
+    // code which of the five dropped it.
+    presence,
+  };
+}
+
+/* ----------------------------------------------------------------- drawing */
+
+/**
+ * The dot field, drawn under everything else.
+ *
+ * `fillRect` per dot rather than `arc`: four hundred arcs a frame is four
+ * hundred path constructions, and at a radius of 1.5 the square and the circle
+ * land on the same pixels. Read the constants above for why there is a field
+ * here at all, and why it does not move.
+ */
+function drawBackdrop(ctx, theme, width, height) {
+  const size = BACKDROP_RADIUS * 2;
+  ctx.save();
+  ctx.fillStyle = theme.line;
+  ctx.globalAlpha *= BACKDROP_ALPHA;
+  for (let y = BACKDROP_ORIGIN; y < height; y += BACKDROP_STEP) {
+    for (let x = BACKDROP_ORIGIN; x < width; x += BACKDROP_STEP) {
+      ctx.fillRect(x - BACKDROP_RADIUS, y - BACKDROP_RADIUS, size, size);
+    }
+  }
+  ctx.restore();
+}
+
+/**
+ * The lane line: the one piece of chrome that is *semantic* rather than texture.
+ *
+ * It used to share this function with the graph-paper grid, in two `save`/
+ * `restore` pairs because the grid ran at a fraction of the palette's opacity and
+ * the line does not. The grid is gone — see `BACKDROP_STEP` — so what is left is
+ * the road under a `lane` scene's car, drawn exactly as it always was.
+ */
+function drawChrome(ctx, scene, theme, width, height) {
+  const lane = scene.elements.find((element) => element.role === "vehicle");
+  const laneY = lane ? lane.y : height / 2;
+
+  ctx.save();
+  ctx.setLineDash([10, 14]);
+  ctx.strokeStyle = theme.line;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, laneY);
+  ctx.lineTo(width, laneY);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * The words at the bottom: this beat's narration, in the strip layout kept clear.
+ *
+ * On the canvas rather than in a DOM element under it, and that is the whole
+ * reason `caption.js` and `layout.py` have to agree on `CAPTION_BAND_RATIO`: the
+ * reserved strip is a piece of the stage's coordinates, so what is drawn in it
+ * has to be too. A DOM overlay would be laid out in CSS pixels against a canvas
+ * that is *scaled to fit*, and the two would part company the first time the
+ * window changed size — invisibly, and only at some window sizes.
+ *
+ * The plate is the theme's own panel colour, so a caption over the background
+ * grid reads as a card rather than as text on graph paper. Same problem
+ * `drawReadout` solves the same way.
+ */
+function drawCaption(ctx, step, theme, stage) {
+  const text = (step?.narration ?? "").trim();
+  if (text.length === 0) return;
+
+  const top = captionTop(stage);
+  const height = captionBand(stage);
+
+  ctx.save();
+  ctx.font = `${CAPTION_FONT_SIZE}px Inter, 'Microsoft YaHei', sans-serif`;
+  // `measureText`, not a width table: the font is the renderer's, and a
+  // half-width Latin table would break a Chinese caption in the wrong place.
+  const lines = wrapCaption(
+    text,
+    (line) => ctx.measureText(line).width,
+    stage.width - 2 * CAPTION_PAD_X,
+  );
+
+  ctx.fillStyle = theme.panel;
+  ctx.fillRect(0, top, stage.width, height);
+
+  ctx.fillStyle = theme.text;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // Centred as a block, so a one-line beat and a two-line beat share a middle
+  // instead of one sitting on the floor of the band and the other floating.
+  const block = lines.length * CAPTION_LINE_HEIGHT;
+  const first = top + (height - block) / 2 + CAPTION_LINE_HEIGHT / 2;
+  lines.forEach((line, index) => {
+    ctx.fillText(line, stage.width / 2, first + index * CAPTION_LINE_HEIGHT);
+  });
+  ctx.restore();
+}
+
+/**
+ * How much of the picture is covered by the scene change, 0 (none) to 1 (all).
+ *
+ * Read every frame rather than stored, because it is a pure function of the
+ * transition clock: one clock, one answer, no chance of the two disagreeing.
+ */
+function fadeAmount() {
+  const transition = state.transition;
+  if (transition === null) return 0;
+  const progress = Math.min(1, transition.t / TRANSITION_SECONDS);
+  return transition.phase === "out" ? progress : 1 - progress;
+}
+
+function render() {
+  const stage = state.spec.stage;
+  const ctx = state.viewport.ctx;
+  state.viewport.clear();
+  // The backdrop goes under everything, the lane line over it: the line is a
+  // road a car is on, and a car is not behind a texture.
+  drawBackdrop(ctx, state.theme, stage.width, stage.height);
+  drawChrome(ctx, state.scene, state.theme, stage.width, stage.height);
+
+  const view = buildView();
+  for (const element of state.scene.elements) {
+    try {
+      drawElement(ctx, element, view);
+    } catch (error) {
+      // A blank canvas and a half-drawn one look the same to a person. Say what
+      // broke, on the page, and stop rather than throwing once per frame.
+      fail(error instanceof Error ? error.message : String(error));
+      return;
+    }
+  }
+
+  // After the elements and before the fade: the words are part of *this*
+  // scene, so a scene change has to take them with it. Drawn last, a caption
+  // would sit on top of the fade and survive into the next scene, reading as
+  // narration for a picture that is already gone.
+  drawCaption(ctx, state.scene.steps[state.stepIndex], state.theme, stage);
+
+  // Last, so it covers the chrome and the elements alike: a scene change is
+  // about the whole stage, not about the pictures inside it.
+  const fade = fadeAmount();
+  if (fade > 0) {
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = state.theme.background;
+    ctx.fillRect(0, 0, stage.width, stage.height);
+    ctx.restore();
+  }
+}
+
+function fail(message) {
+  state.stopped = message;
+  state.playing = false;
+  ui.error.textContent = message;
+  ui.error.hidden = false;
+}
+
+/* --------------------------------------------------------------------- loop */
+
+function tick(now) {
+  requestAnimationFrame(tick);
+  if (state.stopped !== null) return;
+
+  const elapsed = state.last === 0 ? 0 : Math.min((now - state.last) / 1000, 0.25);
+  state.last = now;
+
+  if (state.playing) {
+    state.accumulator += elapsed;
+    let steps = 0;
+    while (state.accumulator >= FIXED_STEP && steps < MAX_CATCHUP_STEPS) {
+      stepOnce();
+      state.accumulator -= FIXED_STEP;
+      steps += 1;
+    }
+    if (steps === MAX_CATCHUP_STEPS) state.accumulator = 0;
+    // The beat's clock and its animation are the same clock: `update` advances
+    // `sim.t` and `setStep` puts it back to zero, so pausing pauses both, and a
+    // beat that is on screen is a beat that is running.
+    //
+    // At most one beat advances here. The loop above moves `sim.t` by at most
+    // `MAX_CATCHUP_STEPS` fixed steps, and the shortest beat a layout can write
+    // is several seconds, so the two are nowhere near touching.
+    advanceBeat();
+  }
+
+  render();
+}
+
+/**
+ * One fixed step of everything that moves: the simulation, and the scene change
+ * if one is running.
+ *
+ * The simulation keeps stepping through a fade rather than freezing. A scene
+ * caught mid-stride — a car three quarters of the way down its lane — should
+ * carry on out of the picture, not stop dead and then dissolve; a freeze frame
+ * is what a person reads as a stall.
+ */
+function stepOnce() {
+  state.sim.update(FIXED_STEP, state.lookup);
+
+  const transition = state.transition;
+  if (transition === null) return;
+  transition.t += FIXED_STEP;
+  if (transition.t < TRANSITION_SECONDS) return;
+
+  if (transition.phase === "out") {
+    // The stage is fully covered. Swap underneath it and start uncovering.
+    loadScene(transition.toScene);
+    if (transition.toStep > 0) setStep(transition.toStep);
+    state.transition = {
+      toScene: transition.toScene,
+      toStep: transition.toStep,
+      phase: "in",
+      t: 0,
+    };
+    return;
+  }
+  state.transition = null;
+}
+
+/* --------------------------------------------------------------------- step */
+
+/**
+ * Move on once the current beat has held for as long as it was given.
+ *
+ * Until this existed nothing computed a beat's length at all. The layout pass
+ * bakes a duration onto a *body* (`element.duration`, for a thrown one) but
+ * wrote none onto a beat, so the player had nothing to count against and did
+ * the only thing left: it sat on whatever beat was loaded. Beats 2..N were
+ * reachable only by clicking. A scene could be written, validated, rendered and
+ * reviewed end to end without anyone seeing its second frame.
+ *
+ * Three rules, and the middle one is the change:
+ *
+ * - A `duration` of `0` means the spec predates the field. Then this returns
+ *   immediately and the player behaves exactly as it did when that spec was
+ *   written — an old file keeps its old behaviour instead of silently
+ *   acquiring a rhythm nobody chose for it.
+ * - A scene's last beat hands over to the next **scene**, through the
+ *   transition, rather than stopping there. Stopping was right when a scene was
+ *   the whole story: the player took one scene and the URL said which. But a
+ *   storyboard is a sequence of scenes, the upload page never passed `?scene=`,
+ *   and so every run of the real chain was watched one scene deep — which is
+ *   how a document whose second scene is the good one got judged on its first.
+ *   The beat clock is what knows the storyboard is longer than a scene; this is
+ *   the only place that knows it.
+ * - The end of the **storyboard** is still the end. It does **not** wrap to beat
+ *   1. A scene that quietly restarts is a scene whose last beat is never seen
+ *   to finish, which is the same defect as the one above wearing the opposite
+ *   coat. The last beat simply holds, still animating; ◀ ▶ and the beat list
+ *   still go back.
+ */
+function advanceBeat() {
+  // Still called `duration`, though what it holds is now the measured length of
+  // a clip rather than a division. `test_the_last_beat_stops` greps this body for
+  // `duration > 0`, and renaming the local would fail it with a message about the
+  // guard rather than about the name.
+  const step = state.scene.steps[state.stepIndex];
+  const duration = beatSeconds(step, state.voice);
+  if (!(duration > 0)) return;
+  if (state.sim.t < duration) return;
+  // A scene change already owns the clock. Without this the beat that was
+  // playing when the fade started would hand over a second time underneath it.
+  if (state.transition !== null) return;
+
+  if (state.stepIndex >= state.scene.steps.length - 1) {
+    if (state.sceneIndex >= state.spec.scenes.length - 1) return;
+    beginTransition(state.sceneIndex + 1);
+    return;
+  }
+  setStep(state.stepIndex + 1);
+}
+
+/**
+ * Start a scene change. `toStep` is where the new scene opens — 0 going
+ * forwards, and the previous scene's last beat going back, so that ◀ from the
+ * first beat of a scene lands on the beat a person was just watching.
+ */
+function beginTransition(toScene, toStep = 0) {
+  // The fade owns the stage from here. A beat's clock normally runs out before
+  // the dip begins, so there is usually nothing left to stop — but ◀ into the
+  // previous scene's last beat arrives mid-word by design, and a sentence
+  // carrying on under a fade that is covering its own picture is the one thing
+  // a scene change must not sound like.
+  if (state.track !== null) state.track.stop();
+  state.transition = { toScene, toStep, phase: "out", t: 0 };
+}
+
+/**
+ * Move `delta` beats, crossing a scene boundary when that is where `delta`
+ * leads.
+ *
+ * ◀ ▶ used to clamp at the edges of the loaded scene, which made the transport
+ * a control for looking at one scene rather than for looking at the animation.
+ * The upload page hands over the whole storyboard, so this is the button a
+ * person will reach for to check the scene after this one.
+ */
+function stepBy(delta) {
+  // One hand-over at a time. A second press mid-fade would restart the fade-out
+  // from `t = 0`, which snaps the picture back to visible for no reason anyone
+  // asked for.
+  if (state.transition !== null) return;
+  const index = state.stepIndex + delta;
+  if (index >= 0 && index < state.scene.steps.length) {
+    setStep(index);
+    return;
+  }
+  const scene = state.sceneIndex + (delta > 0 ? 1 : -1);
+  if (scene < 0 || scene >= state.spec.scenes.length) return;
+  beginTransition(scene, delta > 0 ? 0 : (state.spec.scenes[scene].steps.length - 1));
+}
+
+function setStep(index) {
+  const total = state.scene.steps.length;
+  const clamped = Math.max(0, Math.min(total - 1, index));
+  // Captured while `state.stepIndex` still names the beat being left. Only a
+  // change that *has* something to hand over from captures anything — the same
+  // beat reloaded (重置, a `reset_scene` button), and any change at all while
+  // paused, both land instead of easing. `easing.js:handsOver` argues both, and
+  // the paused half is the one that was missing: a camera paused to inspect
+  // beat 3 was shown beat 1, because nothing was left to advance the ease.
+  state.departing = handsOver(state.playing, clamped === state.stepIndex)
+    ? captureDeparting()
+    : new Map();
+  state.stepIndex = clamped;
+  // Restart the beat from rest: a step is a moment, and a beat that inherits the
+  // previous one's elapsed time can never be looked at twice. It is also what
+  // starts the ease above at zero.
+  state.sim.reset();
+  state.accumulator = 0;
+  renderSteps();
+  playBeat();
+}
+
+/**
+ * Sound the beat that is now on screen, from its beginning.
+ *
+ * Called from `setStep` and from nowhere else, which is what keeps the audio
+ * tied to the one event that means "the picture moved on". Not from `tick` or
+ * `render` — those run sixty times a second, and an `Audio` element rebuilt on
+ * every frame is a stutter rather than a voice.
+ *
+ * Paused, this stops instead of starting: the viewer pressed 暂停 and the
+ * silence is part of what that means. Resuming goes through `togglePlay`, which
+ * knows where the picture got to.
+ */
+function playBeat() {
+  if (state.track === null) return;
+  const url = clipUrl(state.scene.steps[state.stepIndex], state.voice, state.specUrl);
+  if (url === "" || !state.playing) {
+    // An unvoiced beat, or a spec with no speech at all. `stop` on an element
+    // that never had a clip is a no-op, so a silent film pays nothing for this.
+    state.track.stop();
+    return;
+  }
+  state.track.play(url, 0);
+}
+
+function renderSteps() {
+  ui.steps.replaceChildren(
+    ...state.scene.steps.map((step, index) => {
+      const item = document.createElement("li");
+      item.className = index === state.stepIndex ? "step is-current" : "step";
+      const title = document.createElement("span");
+      title.className = "step-title";
+      title.textContent = `${String(index + 1).padStart(2, "0")} ${step.title}`;
+      const body = document.createElement("p");
+      body.className = "step-body";
+      // `textContent`, never `innerHTML` — this string may be model-authored.
+      body.textContent = step.narration;
+      item.append(title, body);
+      item.addEventListener("click", () => setStep(index));
+      return item;
+    }),
+  );
+}
+
+/* ----------------------------------------------------------------- controls */
+
+function renderControls() {
+  const scene = state.scene;
+  ui.controls.replaceChildren();
+
+  for (const control of scene.controls) {
+    if (control.type === "button") {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "control-button";
+      button.textContent = control.label || control.action || control.id;
+      button.addEventListener("click", () => {
+        if (control.action === "reset_scene") setStep(state.stepIndex);
+        else if (control.action === "toggle_play") togglePlay();
+        else if (control.action === "advance_timeline") setStep(state.stepIndex + 1);
+      });
+      ui.controls.append(button);
+      continue;
+    }
+
+    if (control.type === "toggle") {
+      const label = document.createElement("label");
+      label.className = "control";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = Boolean(control.default);
+      box.addEventListener("change", () => {
+        state.overrides[control.target_property] = box.checked ? 1 : 0;
+      });
+      state.overrides[control.target_property] = box.checked ? 1 : 0;
+      const caption = document.createElement("span");
+      caption.textContent = control.label;
+      label.append(box, caption);
+      ui.controls.append(label);
+      continue;
+    }
+
+    const label = document.createElement("label");
+    label.className = "control";
+    const caption = document.createElement("span");
+    const value = document.createElement("output");
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(control.min ?? 0);
+    input.max = String(control.max ?? 1);
+    input.step = String(control.step ?? 0.1);
+    input.value = String(control.default ?? control.min ?? 0);
+    state.overrides[control.target_property] = Number(input.value);
+
+    const show = () => {
+      value.textContent = `${input.value}${control.unit ? ` ${control.unit}` : ""}`;
+    };
+    show();
+    input.addEventListener("input", () => {
+      state.overrides[control.target_property] = Number(input.value);
+      show();
+    });
+
+    caption.textContent = control.label;
+    label.append(caption, input, value);
+    ui.controls.append(label);
+  }
+}
+
+/* ------------------------------------------------------------------- theme */
+
+/**
+ * Point the page at a palette and hand the canvas the colours it now resolves
+ * to.
+ *
+ * `state.theme` is the only place a colour comes from — every drawer takes it
+ * as an argument and `render` passes this one — so re-reading it here *is* the
+ * whole switch. There is no cache to invalidate and nothing to repaint by hand;
+ * the next frame is already in the new palette.
+ *
+ * The attribute goes on `<html>` rather than on `<body>` so that the palette
+ * also covers whatever the stylesheet hangs off `:root`, and so that a swatch's
+ * own `data-theme` — which does the same job for one chip — nests inside it
+ * without either one having to know about the other.
+ */
+function applyTheme(id) {
+  document.documentElement.dataset.theme = id;
+  state.theme = readTheme(document.documentElement);
+  renderSwatches(id);
+}
+
+/**
+ * What a click on a swatch does: switch, remember, and keep the URL honest.
+ *
+ * The URL is rewritten because the acceptance run hands these links to a person,
+ * and a link that says `?theme=paper` while the page shows薄荷 is worse than a
+ * link with no theme in it at all. `replaceState`, not `pushState`: switching
+ * the colours twice is not two places to go back to.
+ */
+function chooseTheme(id) {
+  applyTheme(id);
+  try {
+    localStorage.setItem(STORAGE_KEY, id);
+  } catch (error) {
+    // Private mode can refuse `localStorage`. The palette still changes; it
+    // just will not survive a reload, and that is not worth failing over.
+  }
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("theme", id);
+    history.replaceState(null, "", url);
+  } catch (error) {
+    // A document that cannot rewrite its own URL — opened from a `file:` path,
+    // say. Same answer: the colours are what was asked for, the address is not.
+  }
+}
+
+/**
+ * Build the picker. Called on every switch, which is what moves the ring.
+ *
+ * Rebuilt rather than updated in place for the same reason `renderSteps` is:
+ * six buttons is nothing, and a `replaceChildren` cannot leave a stale
+ * `.is-active` on a button that no longer is one.
+ */
+function renderSwatches(current) {
+  ui.themes.replaceChildren(
+    ...THEMES.map((theme) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = theme.id === current ? "swatch is-active" : "swatch";
+      button.title = `换成「${theme.label}」配色`;
+      // The chip carries the palette id and the button does not. Everything
+      // inside a `[data-theme]` subtree resolves against *that* palette, and
+      // the label is text on the page — under `neon` it would come out
+      // near-white and vanish on a light background.
+      const chip = document.createElement("span");
+      chip.className = "swatch-chip";
+      chip.dataset.theme = theme.id;
+      const name = document.createElement("span");
+      // `textContent`, never `innerHTML`. These strings are ours rather than the
+      // model's, but a second way of writing text into the document is a second
+      // thing to have to audit for the one that is not.
+      name.textContent = theme.label;
+      button.append(chip, name);
+      button.addEventListener("click", () => chooseTheme(theme.id));
+      return button;
+    }),
+  );
+}
+
+/** What was chosen last time, or null. Never throws on a locked-down browser. */
+function stored(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    return null;
+  }
+}
+
+function storedTheme() {
+  return stored(STORAGE_KEY);
+}
+
+function storedVoice() {
+  return stored(VOICE_STORAGE_KEY);
+}
+
+/* ------------------------------------------------------------------- voice */
+
+/**
+ * Say that the browser is holding the sound until it is asked.
+ *
+ * Only ever about sound. The hint is not a gate on the picture: this player
+ * starts on its own and keeps drawing whether or not anyone has clicked, which
+ * is what the `?scene=N&step=N` links are for — a screenshot cannot click.
+ */
+function showVoiceHint(blocked) {
+  ui.voiceHint.hidden = !blocked;
+}
+
+/**
+ * What a click on a voice does: switch, remember, keep the URL honest — and
+ * reload the beat that is playing, because the point of the switch is to hear
+ * the rest of it in the other voice.
+ *
+ * `speech/voices.py` and `voice.js` are held to each other by a test, the way
+ * the palettes are: a voice one lists and the other does not is a button that
+ * does nothing.
+ */
+function chooseVoice(id) {
+  state.voice = id;
+  try {
+    localStorage.setItem(VOICE_STORAGE_KEY, id);
+  } catch (error) {
+    // Private mode can refuse `localStorage`. The voice still changes; it just
+    // will not survive a reload, and that is not worth failing over.
+  }
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("voice", id);
+    history.replaceState(null, "", url);
+  } catch (error) {
+    // A document that cannot rewrite its own URL — opened from a `file:` path,
+    // say. Same answer: the voice is what was asked for, the address is not.
+  }
+  renderVoices(id);
+
+  if (state.track === null || !state.playing || state.transition !== null) return;
+  // From where the picture has got to, not from the top. The two reads of one
+  // line are within a few tenths of a second of each other, so `sim.t` is a fair
+  // offset in either — and seeking rather than restarting is what makes a switch
+  // cost the viewer nothing but the voice. A `sim.t` already past the new clip's
+  // end simply finishes it, and the next beat arrives on the beat.
+  state.track.play(
+    clipUrl(state.scene.steps[state.stepIndex], state.voice, state.specUrl),
+    state.sim.t,
+  );
+}
+
+/**
+ * Build the voice picker — or hide it, when there is nothing to choose between.
+ *
+ * A film generated with one voice carries one, and a picker with a single button
+ * in it reads as a control that is broken rather than as a film with one
+ * narrator. A spec with no speech at all hides it too, which is what leaves
+ * every film made before this unchanged.
+ *
+ * Rebuilt on every switch for the same reason `renderSwatches` is: it is what
+ * moves the ring, and a `replaceChildren` cannot leave a stale `.is-active` on a
+ * button that no longer is one.
+ */
+function renderVoices(current) {
+  ui.voicePicker.hidden = state.voiceIds.length < 2;
+  ui.voices.replaceChildren(
+    ...state.voiceIds.map((id) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = id === current ? "voice is-active" : "voice";
+      button.title = `换成「${voiceLabel(id)}」`;
+      const name = document.createElement("span");
+      // `textContent`, never `innerHTML`. These strings are ours rather than the
+      // model's, but a second way of writing text into the document is a second
+      // thing to have to audit for the one that is not.
+      name.textContent = voiceLabel(id);
+      button.append(name);
+      button.addEventListener("click", () => chooseVoice(id));
+      return button;
+    }),
+  );
+}
+
+/* -------------------------------------------------------------------- boot */
+
+function togglePlay() {
+  state.playing = !state.playing;
+  state.last = 0;
+  ui.play.textContent = state.playing ? "暂停" : "播放";
+  if (state.track === null) return;
+
+  if (!state.playing) {
+    state.track.pause();
+    return;
+  }
+  // Resumed only when the beat on screen is the one that was being spoken to. A
+  // fade paused part way through has a scene on its way out under it, and
+  // `stepOnce` is frozen mid-dip — speaking there would narrate the picture that
+  // is being covered up.
+  if (state.transition !== null) return;
+  state.track.play(
+    clipUrl(state.scene.steps[state.stepIndex], state.voice, state.specUrl),
+    state.sim.t,
+  );
+}
+
+function bind() {
+  ui.play.addEventListener("click", togglePlay);
+  // 重置 means "put it back where it started", and a scene change in flight is
+  // part of what has to be put back: left running, it would finish the fade and
+  // load the scene you just tried to leave.
+  ui.reset.addEventListener("click", () => {
+    state.transition = null;
+    setStep(0);
+  });
+  ui.prev.addEventListener("click", () => stepBy(-1));
+  ui.next.addEventListener("click", () => stepBy(1));
+  window.addEventListener("keydown", (event) => {
+    if (event.code === "Space") {
+      event.preventDefault();
+      togglePlay();
+    } else if (event.code === "ArrowRight") {
+      stepBy(1);
+    } else if (event.code === "ArrowLeft") {
+      stepBy(-1);
+    }
+  });
+  window.addEventListener("resize", () => state.viewport.resize());
+
+  // A browser will not start audio before the page has been interacted with, and
+  // the only way to find out is to ask and be refused — which `audio.js` reports
+  // through `onBlocked`. Any gesture counts and all of them do the same thing, so
+  // they are the same handler.
+  //
+  // It starts wherever the picture has got to, not from the beginning. A viewer
+  // who clicks four seconds in has missed four seconds and has not been shown
+  // them out of order; rewinding the film to resync with the voice would be the
+  // worse trade, and a screenshot with no gesture behind it must still draw.
+  const armAudio = () => {
+    if (state.track === null || !state.track.blocked) return;
+    if (!state.playing || state.transition !== null) return;
+    state.track.play(
+      clipUrl(state.scene.steps[state.stepIndex], state.voice, state.specUrl),
+      state.sim.t,
+    );
+  };
+  window.addEventListener("pointerdown", armAudio);
+  window.addEventListener("keydown", armAudio);
+}
+
+function loadScene(index) {
+  state.sceneIndex = index;
+  state.scene = state.spec.scenes[index];
+  state.byId = new Map(state.scene.elements.map((element) => [element.id, element]));
+  state.obstacleIds = state.scene.elements
+    .filter((element) => element.role === "obstacle")
+    .map((element) => element.id);
+  state.obstacleRadius = new Map(
+    state.obstacleIds.map((id) => [id, Number(state.byId.get(id)?.props?.radius ?? 0)]),
+  );
+  state.lookup = makeLookup(state.scene);
+  state.sim = createSimulation(state.scene, state.spec.stage);
+  state.overrides = {};
+  state.accumulator = 0;
+  state.last = 0;
+
+  ui.title.textContent = state.spec.title || state.scene.title || "";
+  ui.eyebrow.textContent = state.spec.eyebrow || state.spec.subject || "";
+  // Which scene of how many, in words. The scene's own title and goal change
+  // with it, but neither says "and there are two more after this" — and until
+  // the player could leave a scene at all, nothing needed to.
+  ui.sceneCount.textContent = `第 ${index + 1} / ${state.spec.scenes.length} 幕`;
+  ui.goal.textContent = state.scene.teaching_goal || "";
+
+  // A scene opens at rest. `setStep(0)` below would otherwise compare against
+  // the beat index the *previous* scene was sitting on, read this scene's beats
+  // at that index, and slide the first frame in from values nobody wrote.
+  state.stepIndex = 0;
+  state.departing = new Map();
+  renderControls();
+  setStep(0);
+  // And then the first beat is given something to ease from, which is what
+  // makes a scene *open* rather than switch on. Set after `setStep` rather than
+  // passed into it because `setStep`'s own decision — hand over, or land — is
+  // about a beat boundary and has no business knowing about scene openings; the
+  // assignment here is the one line that says "this was not a beat boundary".
+  //
+  // **Skipped while paused, and that guard is not decoration.** Nothing
+  // advances `sim.t` when the clock is stopped, so `easeProgress()` stays at 0,
+  // `blend` keeps returning the seeded `false`, presence stays at 0 and
+  // `drawElement` returns early for every element: the stage would be blank,
+  // for ever, and the only way out would be to press play on a picture that
+  // gave no sign there was one. `loadScene` is not reachable while paused today
+  // — it is called from `stepOnce` behind `if (state.playing)`, and once at
+  // startup before the first tick — but that is a coincidence of the current
+  // call graph, and the guard is what makes it a fact.
+  if (state.playing) state.departing = seedDeparting();
+}
+
+/**
+ * Every element starts out absent, so a scene's first beat arrives rather than
+ * appearing.
+ *
+ * This is the closing of `captureDeparting`'s known gap, which was real and
+ * visible: a beat handed over from another beat eases from what it read then,
+ * and a scene's first beat had nothing to ease from at all — `loadScene`
+ * emptied the map and called `setStep(0)`, so whatever the first beat turned on
+ * was simply *there*, and whatever it turned off was simply missing. A scene
+ * opening is the one moment the audience is not expecting continuity, which
+ * made it the worst place in the film for the only hard cut.
+ *
+ * **The value is the boolean `false`, not `0`.** `blend` ramps a presence gate
+ * only when *both* ends are booleans; handed a `0` it falls through to
+ * `return target` and this whole function becomes a no-op that looks
+ * implemented — the failure mode where the arithmetic is right and nothing
+ * moves.
+ *
+ * **Presence props only.** There is no "previous" to seed a number from — what
+ * did `heading` read before the scene began? — and inventing one is exactly
+ * what `captureDeparting` refuses. Seeding only the gates also keeps the
+ * opening from animating every value it declares, which would be a second
+ * gesture stacked on the scene change's own fade.
+ */
+function seedDeparting() {
+  const from = new Map();
+  for (const element of state.scene.elements) {
+    const prop = PRESENCE_PROP[element.kind];
+    if (prop === undefined) continue;
+    from.set(`${element.id}.${prop}`, false);
+  }
+  return from;
+}
+
+async function main() {
+  const params = new URLSearchParams(window.location.search);
+  const specUrl = params.get("spec") || "/data/generated/render-robot_obstacle_avoidance.json";
+
+  let spec;
+  try {
+    const response = await fetch(specUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    spec = await response.json();
+  } catch (error) {
+    fail(`取不到 spec：${specUrl}\n${error instanceof Error ? error.message : error}`);
+    return;
+  }
+
+  if (!spec.scenes || spec.scenes.length === 0) {
+    fail("spec 里一个场景都没有");
+    return;
+  }
+
+  state.spec = spec;
+  // Kept because a beat's clip is named relative to the spec, and this is the
+  // only place the spec's own address is known.
+  state.specUrl = specUrl;
+  // Before the first frame, and before `bind` — the picker's listeners are
+  // attached in here, and a palette that arrived after the first draw would be
+  // one painted frame in the wrong colours.
+  //
+  // Which palette the page opens in, most specific first: a `?theme=` in the
+  // link, then the one the lesson was *generated* with, then whatever the viewer
+  // picked last time, then the default.
+  //
+  // `?theme=` first because a link someone was handed is a statement about the
+  // picture they were handed, and the whole point of putting the palette in the
+  // URL is that opening it shows what it says. The spec's palette comes second
+  // and *ahead of the stored choice* deliberately: variety between lessons is the
+  // entire reason the field exists, and a stored preference that outranked it
+  // would mean anyone who had ever clicked a swatch never saw another palette
+  // again. A click still wins for the rest of the page — `chooseTheme` writes the
+  // URL, and the URL is first.
+  //
+  // `||` and not `??`, on all three. An empty `?theme=` and a spec written before
+  // this field existed both say `""`, and neither is a choice.
+  applyTheme(resolveTheme(params.get("theme") || spec.theme || storedTheme()));
+  state.viewport = createStage(ui.canvas, spec.stage);
+  state.viewport.resize();
+
+  // Which voices this spec carries, and which one opens. The chain is the
+  // theme's — `?voice=` first, then what the film was generated in, then the
+  // stored choice — and `resolveVoice` narrows all of it to what is actually on
+  // the film, so a link to a voice this spec does not have opens on one it does
+  // rather than on silence.
+  //
+  // Before `loadScene`, because that reaches `setStep`, and `setStep` is what
+  // starts the first clip. A track created after the first beat is a first beat
+  // with no sound.
+  state.voiceIds = voiceIdsIn(spec);
+  state.voice = resolveVoice(
+    params.get("voice") || spec.voice || storedVoice(),
+    state.voiceIds,
+  );
+  state.track = createVoiceTrack({ onBlocked: showVoiceHint });
+  renderVoices(state.voice);
+
+  // `?scene=N&step=N` opens the player at a given beat. Added for acceptance:
+  // a headless screenshot can only capture whatever is on screen when it fires,
+  // so without this the only frame anyone could look at was the first beat of
+  // the first scene — which is exactly how "four identical rounded rectangles"
+  // got recorded for one document and never checked in the other two.
+  //
+  // It still earns its place now that the player walks scene to scene on its
+  // own: it is how you *start* somewhere other than the beginning, and how you
+  // hand someone a link to one scene rather than to the whole run.
+  //
+  // Out of range is clamped rather than rejected, here and in `setStep`: a bad
+  // index in a URL should still show you a picture, not a blank page.
+  const sceneIndex = Number(params.get("scene") ?? 0);
+  const stepIndex = Number(params.get("step") ?? 0);
+  loadScene(Number.isInteger(sceneIndex) ? Math.max(0, Math.min(spec.scenes.length - 1, sceneIndex)) : 0);
+  bind();
+  if (Number.isInteger(stepIndex) && stepIndex > 0) {
+    // An explicit `?step=` means "show me this frame", so the scene's arrival is
+    // dropped rather than played: otherwise the frame the link names is a
+    // half-arrived one, which is the opposite of what a link to one frame is
+    // for. The URL's own comment above says its purpose is acceptance — a
+    // screenshot of a stage that is still fading in is a screenshot of nothing.
+    state.departing = new Map();
+    setStep(stepIndex);
+  }
+  requestAnimationFrame(tick);
+}
+
+main().catch((error) => fail(error instanceof Error ? error.message : String(error)));

@@ -1,0 +1,25 @@
+{
+  "domain": "cloud",
+  "ink_box": [
+    3.0,
+    2.0,
+    18.0,
+    20.0
+  ],
+  "name": "database",
+  "parts": {
+    "outline": {
+      "d": "M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0 M4 6v6a8 3 0 0 0 16 0v-6 M4 12v6a8 3 0 0 0 16 0v-6",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:database@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

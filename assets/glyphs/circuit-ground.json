@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    3.0,
+    4.0,
+    18.0,
+    16.0
+  ],
+  "name": "circuit-ground",
+  "parts": {
+    "outline": {
+      "d": "M12 13v-8 M4 13h16 M7 16h10 M10 19h4",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:circuit-ground@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

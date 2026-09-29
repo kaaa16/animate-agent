@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    2.9860000000000007,
+    3.0,
+    18.014,
+    19.0
+  ],
+  "name": "leaf",
+  "parts": {
+    "outline": {
+      "d": "M5 21c.5 -4.5 2.5 -8 7 -10 M9 18c6.218 0 10.5 -3.288 11 -12v-2h-4.014c-9 0 -11.986 4 -12 9c0 1 0 3 2 5h3l.014 0",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:leaf@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>智教 · 分镜播放器</title>
+    <link rel="stylesheet" href="./player.css" />
+    <!--
+      The remembered palette is applied before the first paint, not from
+      `player.js`. A module script runs only after the document is parsed, so
+      the page would render the default dark palette for a frame and then swap
+      to a light one: a black flash on every reload, which reads as a bug in the
+      palette rather than as a timing detail.
+
+      There is no validation here and there does not need to be. An id with no
+      `[data-theme]` block in the stylesheet matches nothing and falls through
+      to `:root` — which holds the same palette `resolveTheme` would settle on.
+      `themes.js` owns the ids, the labels and the key; this only has to spell
+      the key the same way, and `test_the_prepaint_script_reads_the_same_key`
+      compares the two strings.
+    -->
+    <script>
+      try {
+        const asked =
+          new URLSearchParams(location.search).get("theme") ||
+          localStorage.getItem("player-theme");
+        if (asked) document.documentElement.dataset.theme = asked;
+      } catch (error) {
+        // A browser that refuses `localStorage` still gets a working page; it
+        // just gets the default palette, which is the right answer anyway.
+      }
+    </script>
+  </head>
+  <body>
+    <header class="bar">
+      <div class="title-block">
+        <p class="eyebrow">
+          <!-- Which scene of how many. Its own element, not part of the
+               eyebrow: `player.js` writes both with `textContent`, so sharing
+               one node would have each overwrite the other. -->
+          <span id="scene-count"></span>
+          <span id="eyebrow"></span>
+        </p>
+        <h1 id="title">载入中…</h1>
+        <p class="goal" id="goal"></p>
+      </div>
+      <!--
+        Filled in by `player.js` from `themes.js`. The buttons are built rather
+        than written out here so that a palette cannot be added to the
+        stylesheet and left unreachable — there is one list, and it is the one
+        the picker reads.
+      -->
+      <div class="theme-picker">
+        <span class="theme-picker-label">配色</span>
+        <div class="themes" id="themes"></div>
+      </div>
+
+      <!--
+        Filled in by `player.js` from `voice.js`, and hidden outright when the
+        spec carries fewer than two voices — a film read by one narrator has
+        nothing to choose between, and a picker with one button in it reads as a
+        control that is broken. Hidden here from the start for the same reason:
+        it must not flash on a spec with no speech at all.
+      -->
+      <div class="theme-picker" id="voice-picker" hidden>
+        <span class="theme-picker-label">配音</span>
+        <div class="themes" id="voices"></div>
+      </div>
+
+      <div class="transport">
+        <button type="button" id="prev" title="上一拍（←）">◀</button>
+        <button type="button" id="play" title="播放 / 暂停（空格）">暂停</button>
+        <button type="button" id="next" title="下一拍（→）">▶</button>
+        <button type="button" id="reset" title="回到第一拍">重置</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="stage-wrap">
+        <canvas id="stage"></canvas>
+        <!--
+          Errors are rendered on the page rather than swallowed. A blank canvas
+          and a badly-drawn one are indistinguishable to a person looking at the
+          screen, so the player says which one it is (decision: visible errors).
+        -->
+        <pre class="error" id="error" hidden></pre>
+        <!--
+          Browsers hold audio back until the page has been interacted with, and
+          they do not say so — the only signal is a rejected `play()`. This is
+          the page saying it instead.
+
+          It says nothing about the picture, which starts and keeps running
+          whether or not anyone clicks. `?scene=N&step=N` exists for screenshots,
+          and a screenshot cannot click.
+        -->
+        <p class="voice-hint" id="voice-hint" hidden>
+          点一下页面开始配音（画面不等它）
+        </p>
+      </section>
+
+      <aside class="side">
+        <div>
+          <h2>控制台</h2>
+          <div class="controls" id="controls"></div>
+        </div>
+        <div class="steps-block">
+          <h2>教学节拍</h2>
+          <ol class="steps" id="steps"></ol>
+        </div>
+      </aside>
+    </main>
+
+    <script type="module" src="./player.js"></script>
+  </body>
+</html>

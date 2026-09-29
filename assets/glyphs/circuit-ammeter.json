@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    1.0,
+    4.0,
+    22.0,
+    16.0
+  ],
+  "name": "circuit-ammeter",
+  "parts": {
+    "outline": {
+      "d": "M5 12a7 7 0 1 0 14 0a7 7 0 1 0 -14 0 M5 12h-3 M19 12h3 M10 14v-3c0 -1.036 .895 -2 2 -2s2 .964 2 2v3 M14 12h-4",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:circuit-ammeter@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

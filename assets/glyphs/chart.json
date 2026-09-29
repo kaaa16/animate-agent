@@ -1,0 +1,25 @@
+{
+  "domain": "cloud",
+  "ink_box": [
+    3.0,
+    5.0,
+    18.0,
+    15.0
+  ],
+  "name": "chart",
+  "parts": {
+    "outline": {
+      "d": "M4 19l16 0 M4 15l4 -6l4 2l4 -5l4 4",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:chart-line@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

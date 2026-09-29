@@ -40,3 +40,6 @@ docs/*-preview.png
 docs/*.drawio.png
 docs/interaction-flow.png
 LOCAL_CHANGE_SUMMARY_*.md
+tests/
+data/
+docs/storyboard-acceptance/

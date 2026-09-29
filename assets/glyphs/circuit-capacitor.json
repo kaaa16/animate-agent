@@ -1,0 +1,25 @@
+{
+  "domain": "physics",
+  "ink_box": [
+    1.0,
+    6.0,
+    22.0,
+    12.0
+  ],
+  "name": "circuit-capacitor",
+  "parts": {
+    "outline": {
+      "d": "M22 12h-8 M2 12h8 M10 7v10 M14 7v10",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:circuit-capacitor@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

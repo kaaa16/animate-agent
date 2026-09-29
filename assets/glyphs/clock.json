@@ -1,0 +1,25 @@
+{
+  "domain": "general",
+  "ink_box": [
+    2.0,
+    2.0,
+    20.0,
+    20.0
+  ],
+  "name": "clock",
+  "parts": {
+    "outline": {
+      "d": "M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0 M12 7v5l3 3",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:clock@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

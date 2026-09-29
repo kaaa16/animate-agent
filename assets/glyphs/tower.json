@@ -1,0 +1,25 @@
+{
+  "domain": "network",
+  "ink_box": [
+    2.0026097303214563,
+    2.007000036106298,
+    19.993780539357086,
+    19.992999963893702
+  ],
+  "name": "tower",
+  "parts": {
+    "outline": {
+      "d": "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0 M16.616 13.924a5 5 0 1 0 -9.23 0 M20.307 15.469a9 9 0 1 0 -16.615 0 M9 21l3 -9l3 9 M10 19h4",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:building-broadcast-tower@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

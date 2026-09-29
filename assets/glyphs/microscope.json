@@ -1,0 +1,25 @@
+{
+  "domain": "science",
+  "ink_box": [
+    4.0,
+    2.0,
+    17.0,
+    20.0
+  ],
+  "name": "microscope",
+  "parts": {
+    "outline": {
+      "d": "M5 21h14 M6 18h2 M7 18v3 M9 11l3 3l6 -6l-3 -3l-6 6 M10.5 12.5l-1.5 1.5 M17 3l3 3 M12 21a6 6 0 0 0 3.715 -10.712",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:microscope@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}

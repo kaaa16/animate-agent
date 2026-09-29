@@ -20,7 +20,14 @@ dependencies = [
   "beautifulsoup4>=4.13.0",
   "readability-lxml>=0.8.4.1",
   "markdown-it-py>=3.0.0",
+  "python-pptx>=0.6.21",
+  "python-docx>=0.8.11",
+  "python-multipart>=0.0.6",
+  "pyyaml>=6.0",
 ]
+
+[project.scripts]
+animate-agent = "animate_agent.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -28,13 +35,24 @@ dev = [
   "ruff>=0.12.0",
   "mypy>=1.16.0",
 ]
+# The voice track, and the only dependency here that talks to a network. Kept out
+# of `dependencies` — and out of `dev`, which would drag it into the import graph
+# of all 993 tests — so that installing the pipeline is still a thing you can do
+# offline. `pip install -e ".[speech]"`.
+speech = [
+  "edge-tts>=7.2",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# `.` is the repo root, so `tools.*` imports the same way the tools are run
+# (`python -m tools.build_glyphs`). Build-time geometry belongs to the tools
+# rather than the shipped package, and a test that cannot reach it either does
+# not get written or gets written against a copy.
+pythonpath = ["src", "."]
 
 [tool.ruff]
 line-length = 100

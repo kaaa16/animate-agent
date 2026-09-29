@@ -1,0 +1,468 @@
+/*
+ * Upload page stylesheet.
+ *
+ * The custom properties below are copied from `frontend/player/player.css`,
+ * same names in the same order — `neon`, the player's default, and only that
+ * one: this page has no palette picker, so it keeps the palette the player
+ * starts in and does not grow five more sets of colours it never switches to.
+ * They are **consistency, not a dependency**: the
+ * player runs inside its own iframe and `stage.js:readTheme` reads the tokens off
+ * *that* document's `documentElement`, never off this one. They are copied
+ * anyway so the page and the picture it produces look like one product, and so
+ * the two lists stay diffable — but nothing here breaks if they drift, and
+ * saying otherwise would overstate it.
+ *
+ * The demo sheets under `frontend/demo/` are deliberately not linked. They are a
+ * different palette (`--surface` / `--home-text` / `--blue` / `--violet`), their
+ * input rules are keyed to `#sourceInput` (an element a file-upload page does not
+ * have), and `styles.css` is mostly rules for markup that is commented out in
+ * that page. Borrowing the shape was cheaper than borrowing the sheet.
+ */
+
+:root {
+  color-scheme: dark;
+  --bg: #07080d;
+  --panel: rgba(13, 18, 28, 0.86);
+  --panel-strong: rgba(19, 27, 41, 0.94);
+  --line: rgba(83, 246, 255, 0.32);
+  --line-hot: #42f7ff;
+  --accent: #42f7ff;
+  --magenta: #ff2fd6;
+  --yellow: #f4f06d;
+  --green: #5dff9c;
+  --text: #ecfbff;
+  --muted: #91a6b8;
+  --danger: #ff5e7a;
+  --shadow: 0 0 28px rgba(66, 247, 255, 0.16);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 12% 8%, rgba(66, 247, 255, 0.09), transparent 42%),
+    radial-gradient(circle at 88% 92%, rgba(255, 47, 214, 0.08), transparent 46%),
+    var(--bg);
+  color: var(--text);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.shell {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 56px 24px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+
+/* --------------------------------------------------------------------- hero */
+
+.hero h1 {
+  margin: 6px 0 10px;
+  font-size: clamp(26px, 3.4vw, 40px);
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.kicker {
+  margin: 0;
+  font-size: 12.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--line-hot);
+}
+
+.lede {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+/* --------------------------------------------------------------------- card */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 22px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+
+/*
+ * The drop target and the conversation, in one box. Dashed because the drop is
+ * still the first thing to try; the `id` is still `dropZone` for the handlers in
+ * `app.js` and for `test_api_mounts.py`.
+ */
+.chat {
+  border: 1.5px dashed var(--line);
+  border-radius: 14px;
+  padding: 14px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.chat.is-dragging {
+  border-color: var(--line-hot);
+  background: rgba(66, 247, 255, 0.06);
+}
+
+/*
+ * Capped and scrollable. Uncapped, one generated article pushes the composer and
+ * the 生成动画 button off the bottom of the window — the page would still work and
+ * would look broken.
+ */
+.chat-log {
+  list-style: none;
+  margin: 0;
+  padding: 0 2px 0 0;
+  max-height: 340px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bubble {
+  max-width: 82%;
+  padding: 9px 13px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.65;
+  /*
+   * `textContent` collapses newlines, and the thing that arrives here is a
+   * Markdown article with paragraphs in it. Without this it lands as one line
+   * running off the right-hand edge.
+   */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.from-user {
+  align-self: flex-end;
+  background: rgba(66, 247, 255, 0.14);
+  border: 1px solid var(--line);
+}
+
+.from-ai {
+  align-self: flex-start;
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+}
+
+.is-thinking {
+  color: var(--muted);
+}
+
+/* A note from the page, not from either speaker: an attachment, a failure. */
+.note {
+  align-self: center;
+  max-width: 92%;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+  text-align: center;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+#chatInput {
+  flex: 1;
+  min-height: 42px;
+  max-height: 140px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+#chatInput::placeholder {
+  color: var(--muted);
+}
+
+.unpick {
+  padding: 5px 14px;
+  font-size: 12.5px;
+}
+
+.pick,
+.go {
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  padding: 9px 22px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.pick {
+  background: transparent;
+  color: var(--text);
+}
+
+.pick:hover {
+  background: rgba(66, 247, 255, 0.12);
+}
+
+.go {
+  background: var(--line-hot);
+  border-color: var(--line-hot);
+  color: #041016;
+  font-weight: 650;
+}
+
+.go:disabled {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/*
+ * The 音色 row. Below the box and separated from it, because it is a choice about
+ * the request rather than part of making it.
+ */
+.options {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.option-label {
+  letter-spacing: 0.08em;
+}
+
+.option select {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+/*
+ * The list that drops out of a `<select>` is drawn by the browser, not by this
+ * sheet: it does not inherit the panel behind the closed control, and it does
+ * not reliably follow `color-scheme: dark` on `:root`. On a light-mode Windows
+ * it comes back as a white panel, and the near-white text the select passes
+ * down to its options is then invisible in it — the control reads as blank
+ * until you click through it blind. An opaque background and an explicit colour
+ * on the options themselves are the only two things that travel into that
+ * popup, so they are set here rather than left to the UA default.
+ */
+.option select option {
+  background: #131b29;
+  color: var(--text);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.status {
+  /* `auto` on the right rather than `space-between` on the row: there are three
+     things here now, and the status is the one that should give way. */
+  margin: 0 auto 0 0;
+  color: var(--muted);
+  font-size: 13.5px;
+  word-break: break-all;
+}
+
+/* ----------------------------------------------------------------- progress */
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bar {
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(83, 246, 255, 0.14);
+  position: relative;
+}
+
+.bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 38%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--line-hot), transparent);
+  animation: sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(263%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar::after {
+    animation-duration: 4s;
+  }
+}
+
+.progress-line {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------- alerts */
+
+.alert {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 94, 122, 0.5);
+  background: rgba(255, 94, 122, 0.1);
+  color: var(--text);
+  line-height: 1.65;
+  /* Signatures and stack-ish messages arrive with newlines; keep them. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------- result */
+
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.result-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.result-label {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--line-hot);
+}
+
+.result-head h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.result-meta {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.open {
+  color: var(--line-hot);
+  font-size: 13.5px;
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 2px;
+}
+
+.open:hover {
+  border-bottom-color: var(--line-hot);
+}
+
+/*
+ * An explicit height, not `100%`. The player's own `.stage-wrap` sizes itself
+ * with `min-height: min(52vh, 520px)` (player.css — the `.stage-wrap` rule), and
+ * `vh` here is the *iframe's* viewport — so without a height on the frame the
+ * canvas can collapse to nothing and the page looks broken while being perfectly
+ * fine.
+ *
+ * **The two numbers are one decision.** The player stacks a transport bar under
+ * the stage, and its `.stage-wrap` floor is a `min-height` that cannot shrink —
+ * inside a frame shorter than the sum, the bar is pushed below the fold and the
+ * frame scrolls. So the floor came down from `min(62vh, 620px)` to make room and
+ * this went up to match; changing either on its own just moves the problem.
+ */
+#player {
+  width: 100%;
+  height: min(82vh, 780px);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel-strong);
+}
+
+@media (max-width: 640px) {
+  .shell {
+    padding: 32px 16px 60px;
+  }
+
+  .actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* `margin: auto 0 0 0` is for a row; in a stretched column it would shrink the
+     status to nothing. */
+  .status {
+    margin: 0;
+  }
+
+  .composer {
+    flex-wrap: wrap;
+  }
+
+  #chatInput {
+    flex-basis: 100%;
+    order: -1;
+  }
+
+  .go {
+    width: 100%;
+  }
+}

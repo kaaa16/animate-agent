@@ -1,0 +1,25 @@
+{
+  "domain": "network",
+  "ink_box": [
+    3.0,
+    3.0,
+    18.0,
+    19.0
+  ],
+  "name": "antenna",
+  "parts": {
+    "outline": {
+      "d": "M20 4v8 M16 4.5v7 M12 5v16 M8 5.5v5 M4 6v4 M20 8h-16",
+      "fill_rule": "nonzero",
+      "mode": "stroke",
+      "stroke_width": 2.0
+    }
+  },
+  "source": "tabler:antenna@3.46.0",
+  "view_box": [
+    0.0,
+    0.0,
+    24.0,
+    24.0
+  ]
+}
